@@ -1,0 +1,1010 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ciallogcat · 布局实验室</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --lab-bg: #0c0f14;
+      --lab-panel: #131821;
+      --lab-border: #252c38;
+      --lab-text: #e7ebf2;
+      --lab-muted: #8d96a7;
+      --surface-0: #10141b;
+      --surface-1: #151a22;
+      --surface-2: #1b212b;
+      --surface-3: #232a35;
+      --border: #2b3340;
+      --text: #e2e7ef;
+      --muted: #8e98aa;
+      --faint: #697386;
+      --accent: #6da7ff;
+      --accent-soft: rgba(109, 167, 255, .14);
+      --success: #65c98f;
+      --warn: #e8b85a;
+      --error: #ff737b;
+      --debug: #76a9ff;
+      --info: #6ecb9a;
+      --verbose: #8993a4;
+      --row-height: 29px;
+      --ui-font-size: 13px;
+      --log-font-size: 12px;
+      --columns: 100px 34px 88px 190px 150px minmax(300px, 1fr);
+      --radius: 7px;
+      font-family: Inter, "Noto Sans SC", "Microsoft YaHei UI", system-ui, sans-serif;
+      background: var(--lab-bg);
+      color: var(--lab-text);
+    }
+
+    html[data-theme="light"] {
+      color-scheme: light;
+      --lab-bg: #e8ebf0;
+      --lab-panel: #f8f9fb;
+      --lab-border: #d1d6df;
+      --lab-text: #202631;
+      --lab-muted: #6c7481;
+      --surface-0: #f2f4f7;
+      --surface-1: #ffffff;
+      --surface-2: #f7f8fa;
+      --surface-3: #eceff3;
+      --border: #d8dde5;
+      --text: #232933;
+      --muted: #687180;
+      --faint: #8b94a2;
+      --accent: #2369d8;
+      --accent-soft: rgba(35, 105, 216, .10);
+      --success: #23814f;
+      --warn: #9d6400;
+      --error: #c73f48;
+      --debug: #2d68c3;
+      --info: #23814f;
+      --verbose: #727b88;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; overflow: hidden; }
+    button, input, select { font: inherit; }
+    button { color: inherit; }
+
+    .lab {
+      display: grid;
+      grid-template-columns: 286px minmax(0, 1fr);
+      height: 100%;
+      background:
+        radial-gradient(circle at 75% 0%, rgba(79, 117, 173, .12), transparent 31%),
+        var(--lab-bg);
+    }
+
+    .inspector {
+      min-width: 0;
+      overflow: auto;
+      padding: 20px 18px;
+      border-right: 1px solid var(--lab-border);
+      background: color-mix(in srgb, var(--lab-panel) 94%, transparent);
+    }
+
+    .inspector-header { margin-bottom: 22px; }
+    .eyebrow {
+      color: var(--accent);
+      font-size: 11px;
+      font-weight: 750;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+    }
+    h1 { margin: 7px 0 7px; font-size: 20px; letter-spacing: -.02em; }
+    .intro { margin: 0; color: var(--lab-muted); font-size: 12px; line-height: 1.6; }
+
+    .control-section {
+      padding: 15px 0 16px;
+      border-top: 1px solid var(--lab-border);
+    }
+    .control-section h2 {
+      margin: 0 0 11px;
+      color: var(--lab-muted);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .05em;
+      text-transform: uppercase;
+    }
+    .field { display: grid; gap: 7px; margin: 10px 0; }
+    .field > label { color: var(--lab-muted); font-size: 12px; }
+    .field select,
+    .lab-button {
+      width: 100%;
+      height: 34px;
+      border: 1px solid var(--lab-border);
+      border-radius: 7px;
+      background: color-mix(in srgb, var(--lab-panel) 82%, var(--lab-bg));
+      color: var(--lab-text);
+      padding: 0 10px;
+      outline: none;
+    }
+    .field select:focus { border-color: var(--accent); }
+
+    .segmented {
+      display: grid;
+      grid-auto-flow: column;
+      grid-auto-columns: 1fr;
+      gap: 3px;
+      padding: 3px;
+      border: 1px solid var(--lab-border);
+      border-radius: 8px;
+      background: var(--lab-bg);
+    }
+    .segmented button {
+      min-width: 0;
+      height: 29px;
+      border: 0;
+      border-radius: 5px;
+      background: transparent;
+      color: var(--lab-muted);
+      cursor: pointer;
+      font-size: 12px;
+    }
+    .segmented button.active {
+      background: var(--lab-panel);
+      color: var(--lab-text);
+      box-shadow: 0 1px 4px rgba(0, 0, 0, .16);
+    }
+
+    .check-list { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 10px; }
+    .check {
+      display: flex;
+      align-items: center;
+      gap: 7px;
+      color: var(--lab-muted);
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .check input { accent-color: var(--accent); }
+    .button-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .lab-button { cursor: pointer; }
+    .lab-button:hover { border-color: color-mix(in srgb, var(--accent) 65%, var(--lab-border)); }
+    .lab-button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+    .canvas { min-width: 0; display: grid; grid-template-rows: 48px minmax(0, 1fr); }
+    .canvas-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 18px;
+      color: var(--lab-muted);
+      font-size: 12px;
+    }
+    .canvas-toolbar .actions { display: flex; gap: 8px; }
+    .mini-button {
+      height: 30px;
+      padding: 0 11px;
+      border: 1px solid var(--lab-border);
+      border-radius: 7px;
+      background: var(--lab-panel);
+      color: var(--lab-text);
+      cursor: pointer;
+    }
+
+    .preview-wrap { min-height: 0; padding: 0 18px 18px; }
+    .preview-frame {
+      width: 100%;
+      height: 100%;
+      min-height: 440px;
+      overflow: hidden;
+      border: 1px solid var(--lab-border);
+      border-radius: 12px;
+      background: var(--surface-0);
+      box-shadow: 0 24px 70px rgba(0, 0, 0, .28);
+    }
+
+    .app-window {
+      display: grid;
+      grid-template-rows: 34px minmax(0, 1fr);
+      width: 100%;
+      height: 100%;
+      background: var(--surface-1);
+      color: var(--text);
+      font-size: var(--ui-font-size);
+    }
+    .titlebar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 10px 0 13px;
+      border-bottom: 1px solid var(--border);
+      background: var(--surface-0);
+      user-select: none;
+    }
+    .titlebar-brand { display: flex; align-items: center; gap: 9px; font-weight: 680; }
+    .app-mark {
+      display: grid;
+      place-items: center;
+      width: 20px;
+      height: 20px;
+      border-radius: 5px;
+      background: var(--accent);
+      color: #fff;
+      font-size: 11px;
+      font-weight: 800;
+    }
+    .window-controls { display: flex; gap: 5px; }
+    .window-controls span { width: 11px; height: 11px; border-radius: 50%; background: var(--surface-3); }
+
+    .app-body { display: flex; min-height: 0; }
+    .preset-rail {
+      display: none;
+      flex: 0 0 180px;
+      min-width: 0;
+      padding: 12px 9px;
+      border-right: 1px solid var(--border);
+      background: var(--surface-0);
+    }
+    .rail-label { padding: 2px 7px 8px; color: var(--faint); font-size: 10px; font-weight: 750; letter-spacing: .08em; }
+    .rail-preset {
+      display: block;
+      width: 100%;
+      padding: 8px 9px;
+      margin: 2px 0;
+      overflow: hidden;
+      border: 0;
+      border-radius: 6px;
+      background: transparent;
+      color: var(--muted);
+      text-align: left;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      cursor: pointer;
+    }
+    .rail-preset:hover, .rail-preset.active { background: var(--accent-soft); color: var(--text); }
+    .rail-preset.active { box-shadow: inset 2px 0 var(--accent); }
+
+    .workspace { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; min-width: 0; flex: 1; }
+    .toolbar-stack { border-bottom: 1px solid var(--border); background: var(--surface-1); }
+    .context-row, .filter-row {
+      display: flex;
+      align-items: center;
+      min-width: 0;
+      gap: 7px;
+      padding: 7px 9px;
+    }
+    .context-row { border-bottom: 1px solid var(--border); }
+    .app-window[data-layout="compact"] .toolbar-stack {
+      display: grid;
+      grid-template-columns: max-content minmax(260px, 1fr);
+    }
+    .app-window[data-layout="compact"] .context-row { border-bottom: 0; padding-right: 2px; }
+    .app-window[data-layout="compact"] .filter-row { padding-left: 2px; }
+    .app-window[data-layout="sidebar"] .preset-rail { display: block; }
+
+    .tool-select, .query-input, .tool-button {
+      height: 29px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--surface-2);
+      color: var(--text);
+      outline: none;
+    }
+    .tool-select { max-width: 210px; padding: 0 25px 0 9px; }
+    .device-select { width: 155px; }
+    .package-select { width: 220px; }
+    .query-shell {
+      display: flex;
+      align-items: center;
+      min-width: 130px;
+      flex: 1;
+      height: 29px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--surface-2);
+    }
+    .search-icon { padding-left: 9px; color: var(--faint); font-size: 14px; }
+    .query-input { min-width: 0; flex: 1; border: 0; background: transparent; padding: 0 8px; font-family: ui-monospace, "JetBrains Mono", monospace; }
+    .query-input:focus { box-shadow: none; }
+    .query-shell:focus-within { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+    .regex-toggle {
+      height: 23px;
+      margin-right: 3px;
+      padding: 0 6px;
+      border: 0;
+      border-radius: 4px;
+      background: transparent;
+      color: var(--faint);
+      font-family: ui-monospace, monospace;
+      cursor: pointer;
+    }
+    .regex-toggle.active { background: var(--accent-soft); color: var(--accent); }
+    .level-group { display: flex; gap: 2px; }
+    .level-chip {
+      display: grid;
+      place-items: center;
+      width: 25px;
+      height: 25px;
+      border: 0;
+      border-radius: 5px;
+      background: transparent;
+      color: var(--faint);
+      font: 700 11px ui-monospace, monospace;
+      cursor: pointer;
+    }
+    .level-chip.active { background: var(--surface-3); color: var(--text); }
+    .level-chip[data-level="V"] { --level-color: var(--verbose); }
+    .level-chip[data-level="D"] { --level-color: var(--debug); }
+    .level-chip[data-level="I"] { --level-color: var(--info); }
+    .level-chip[data-level="W"] { --level-color: var(--warn); }
+    .level-chip[data-level="E"] { --level-color: var(--error); }
+    .level-chip.active { color: var(--level-color); }
+    .toolbar-spacer { flex: 1; }
+    .tool-button {
+      min-width: 29px;
+      padding: 0 8px;
+      color: var(--muted);
+      cursor: pointer;
+    }
+    .tool-button:hover, .tool-button.active { background: var(--surface-3); color: var(--text); }
+    .tool-button.danger:hover { color: var(--error); }
+    .divider { width: 1px; height: 20px; background: var(--border); }
+
+    .content-area { display: flex; min-width: 0; min-height: 0; }
+    .log-panel { display: grid; grid-template-rows: 27px minmax(0, 1fr); min-width: 0; flex: 1; }
+    .log-grid { display: grid; grid-template-columns: var(--columns); min-width: 720px; }
+    .log-header {
+      align-items: center;
+      border-bottom: 1px solid var(--border);
+      background: var(--surface-0);
+      color: var(--faint);
+      font-size: 10px;
+      font-weight: 750;
+      letter-spacing: .05em;
+      user-select: none;
+    }
+    .log-header > span, .log-row > span { min-width: 0; padding: 0 7px; }
+    .log-list { min-height: 0; overflow: auto; background: var(--surface-1); }
+    .log-row {
+      min-height: var(--row-height);
+      align-items: center;
+      border-bottom: 1px solid color-mix(in srgb, var(--border) 42%, transparent);
+      color: var(--muted);
+      font: var(--log-font-size)/1.35 ui-monospace, "JetBrains Mono", "Cascadia Code", monospace;
+      cursor: default;
+    }
+    .log-row:nth-child(even) { background: color-mix(in srgb, var(--surface-2) 42%, transparent); }
+    .log-row:hover { background: color-mix(in srgb, var(--accent-soft) 55%, var(--surface-1)); }
+    .log-row.selected { background: var(--accent-soft); box-shadow: inset 2px 0 var(--accent); }
+    .cell {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .cell.level { font-weight: 800; text-align: center; }
+    .cell.level.V { color: var(--verbose); }
+    .cell.level.D { color: var(--debug); }
+    .cell.level.I { color: var(--info); }
+    .cell.level.W { color: var(--warn); }
+    .cell.level.E { color: var(--error); }
+    .cell.tag { color: color-mix(in srgb, var(--accent) 78%, var(--text)); }
+    .cell.message { color: var(--text); }
+    .cell.message mark { border-radius: 2px; background: rgba(234, 179, 52, .27); color: inherit; }
+    .app-window[data-wrap="true"] .log-row { align-items: start; padding: 5px 0; }
+    .app-window[data-wrap="true"] .cell.message { overflow: visible; white-space: normal; }
+    .column-hidden { display: none; }
+
+    .detail-panel {
+      min-width: 0;
+      background: var(--surface-0);
+      color: var(--muted);
+    }
+    .detail-side {
+      display: none;
+      flex: 0 0 330px;
+      border-left: 1px solid var(--border);
+    }
+    .detail-bottom {
+      display: none;
+      min-height: 112px;
+      max-height: 180px;
+      border-top: 1px solid var(--border);
+    }
+    .app-window[data-detail="right"] .detail-side { display: block; }
+    .app-window[data-detail="bottom"] .detail-bottom { display: block; }
+    .detail-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      height: 31px;
+      padding: 0 10px;
+      border-bottom: 1px solid var(--border);
+      color: var(--text);
+      font-size: 11px;
+      font-weight: 650;
+    }
+    .detail-body {
+      padding: 9px 11px;
+      overflow: auto;
+      font: 12px/1.55 ui-monospace, "JetBrains Mono", monospace;
+      white-space: pre-wrap;
+    }
+    .detail-meta { margin-bottom: 7px; color: var(--faint); }
+    .copy-detail {
+      border: 0;
+      background: transparent;
+      color: var(--accent);
+      cursor: pointer;
+    }
+
+    .statusbar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      height: 25px;
+      padding: 0 9px;
+      border-top: 1px solid var(--border);
+      background: var(--surface-0);
+      color: var(--faint);
+      font-size: 10px;
+    }
+    .status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--success); }
+    .status-spacer { flex: 1; }
+    .filter-error { color: var(--error); }
+
+    .toast {
+      position: fixed;
+      right: 22px;
+      bottom: 22px;
+      z-index: 20;
+      transform: translateY(12px);
+      padding: 9px 12px;
+      border: 1px solid var(--lab-border);
+      border-radius: 8px;
+      background: var(--lab-panel);
+      color: var(--lab-text);
+      box-shadow: 0 12px 30px rgba(0, 0, 0, .25);
+      opacity: 0;
+      pointer-events: none;
+      transition: .18s ease;
+      font-size: 12px;
+    }
+    .toast.visible { transform: translateY(0); opacity: 1; }
+
+    body.preview-only .lab { display: block; }
+    body.preview-only .inspector, body.preview-only .canvas-toolbar { display: none; }
+    body.preview-only .canvas { display: block; height: 100%; }
+    body.preview-only .preview-wrap { height: 100%; padding: 0; }
+    body.preview-only .preview-frame { border: 0; border-radius: 0; }
+    .exit-preview { display: none; }
+    body.preview-only .exit-preview {
+      display: block;
+      position: fixed;
+      z-index: 30;
+      top: 7px;
+      right: 88px;
+      height: 24px;
+      border: 1px solid var(--border);
+      border-radius: 5px;
+      background: var(--surface-2);
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 11px;
+    }
+
+    @media (max-width: 1000px) {
+      .lab { grid-template-columns: 240px minmax(0, 1fr); }
+      .inspector { padding-inline: 13px; }
+      .preview-wrap { padding-inline: 10px; }
+      .app-window[data-layout="compact"] .toolbar-stack { display: block; }
+      .app-window[data-layout="compact"] .context-row { border-bottom: 1px solid var(--border); }
+      .detail-side { flex-basis: 280px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="lab">
+    <aside class="inspector">
+      <div class="inspector-header">
+        <div class="eyebrow">UI prototype</div>
+        <h1>布局实验室</h1>
+        <p class="intro">只比较信息层级和操作密度。所有设置实时作用于右侧预览，并保存在当前浏览器。</p>
+      </div>
+
+      <section class="control-section">
+        <h2>布局</h2>
+        <div class="field">
+          <label for="layout-select">工具栏组织</label>
+          <select id="layout-select">
+            <option value="compact">单行紧凑（推荐）</option>
+            <option value="balanced">双层平衡</option>
+            <option value="sidebar">预设侧栏</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="detail-select">日志详情</label>
+          <select id="detail-select">
+            <option value="bottom">底部面板</option>
+            <option value="right">右侧面板</option>
+            <option value="hidden">默认隐藏</option>
+          </select>
+        </div>
+      </section>
+
+      <section class="control-section">
+        <h2>外观</h2>
+        <div class="field">
+          <label>主题</label>
+          <div class="segmented" data-control="theme">
+            <button type="button" data-value="dark">深色</button>
+            <button type="button" data-value="light">浅色</button>
+          </div>
+        </div>
+        <div class="field">
+          <label>密度</label>
+          <div class="segmented" data-control="density">
+            <button type="button" data-value="compact">紧凑</button>
+            <button type="button" data-value="comfortable">舒适</button>
+          </div>
+        </div>
+        <label class="check"><input id="wrap-toggle" type="checkbox">消息自动换行</label>
+      </section>
+
+      <section class="control-section">
+        <h2>显示列</h2>
+        <div class="check-list" id="column-controls">
+          <label class="check"><input type="checkbox" data-column="time">时间</label>
+          <label class="check"><input type="checkbox" data-column="level">级别</label>
+          <label class="check"><input type="checkbox" data-column="pid">PID / TID</label>
+          <label class="check"><input type="checkbox" data-column="process">进程</label>
+          <label class="check"><input type="checkbox" data-column="tag">Tag</label>
+        </div>
+      </section>
+
+      <section class="control-section">
+        <h2>导出选择</h2>
+        <div class="button-row">
+          <button class="lab-button primary" id="copy-config" type="button">复制配置</button>
+          <button class="lab-button" id="reset-config" type="button">重置</button>
+        </div>
+      </section>
+    </aside>
+
+    <main class="canvas">
+      <div class="canvas-toolbar">
+        <span>这是 HTML 外观原型，不代表最终 egui 控件细节。</span>
+        <div class="actions">
+          <button class="mini-button" id="fullscreen-preview" type="button">仅看预览</button>
+        </div>
+      </div>
+
+      <div class="preview-wrap">
+        <div class="preview-frame">
+          <div class="app-window" id="app-window" data-layout="compact" data-detail="bottom" data-wrap="false">
+            <header class="titlebar">
+              <div class="titlebar-brand"><span class="app-mark">C</span><span>Ciallogcat</span></div>
+              <div class="window-controls" aria-hidden="true"><span></span><span></span><span></span></div>
+            </header>
+
+            <div class="app-body">
+              <aside class="preset-rail">
+                <div class="rail-label">SAVED FILTERS</div>
+                <button class="rail-preset active" data-preset="app-all">App · all</button>
+                <button class="rail-preset" data-preset="app-errors">App · failures</button>
+                <button class="rail-preset" data-preset="network">Network</button>
+                <button class="rail-preset" data-preset="lifecycle">Lifecycle</button>
+              </aside>
+
+              <section class="workspace">
+                <div class="toolbar-stack">
+                  <div class="context-row">
+                    <select class="tool-select device-select" aria-label="设备">
+                      <option>Pixel 9 · USB</option>
+                    </select>
+                    <select class="tool-select package-select" id="package-filter" aria-label="应用包名">
+                      <option value="com.example.ciallogcat">com.example.ciallogcat</option>
+                      <option value="*">所有进程</option>
+                      <option value="com.android.systemui">com.android.systemui</option>
+                      <option value="system_server">system_server</option>
+                    </select>
+                  </div>
+
+                  <div class="filter-row">
+                    <div class="query-shell">
+                      <span class="search-icon">⌕</span>
+                      <input class="query-input" id="query-input" placeholder="筛选消息；支持正则">
+                      <button class="regex-toggle" id="regex-toggle" type="button" title="正则表达式">.*</button>
+                    </div>
+                    <div class="level-group" id="level-group" title="最低日志级别">
+                      <button class="level-chip active" data-level="V" type="button">V</button>
+                      <button class="level-chip" data-level="D" type="button">D</button>
+                      <button class="level-chip" data-level="I" type="button">I</button>
+                      <button class="level-chip" data-level="W" type="button">W</button>
+                      <button class="level-chip" data-level="E" type="button">E</button>
+                    </div>
+                    <span class="divider"></span>
+                    <button class="tool-button" id="pause-button" type="button" title="冻结显示">暂停</button>
+                    <button class="tool-button" id="mark-button" type="button" title="插入时间标记">标记</button>
+                    <button class="tool-button danger" id="clear-button" type="button" title="只清空本地显示">清屏</button>
+                  </div>
+                </div>
+
+                <div class="content-area">
+                  <section class="log-panel">
+                    <div class="log-header log-grid" id="log-header">
+                      <span data-col="time">TIME</span>
+                      <span data-col="level">LV</span>
+                      <span data-col="pid">PID / TID</span>
+                      <span data-col="process">PROCESS</span>
+                      <span data-col="tag">TAG</span>
+                      <span data-col="message">MESSAGE</span>
+                    </div>
+                    <div class="log-list" id="log-list"></div>
+                  </section>
+
+                  <aside class="detail-panel detail-side">
+                    <div class="detail-head"><span>日志详情</span><button class="copy-detail" data-copy-detail type="button">复制</button></div>
+                    <div class="detail-body" data-detail-body></div>
+                  </aside>
+                </div>
+
+                <section class="detail-panel detail-bottom">
+                  <div class="detail-head"><span>日志详情</span><button class="copy-detail" data-copy-detail type="button">复制</button></div>
+                  <div class="detail-body" data-detail-body></div>
+                </section>
+
+                <footer class="statusbar">
+                  <span class="status-dot"></span>
+                  <span>Pixel 9 已连接</span>
+                  <span>·</span>
+                  <span id="match-status">0 条命中</span>
+                  <span class="filter-error" id="filter-error"></span>
+                  <span class="status-spacer"></span>
+                  <span id="capture-status">采集中 · 820 条/秒</span>
+                </footer>
+              </section>
+            </div>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <button class="exit-preview" id="exit-preview" type="button">退出预览</button>
+  <div class="toast" id="toast" role="status"></div>
+
+  <script>
+    const DEFAULT_STATE = {
+      layout: "compact",
+      theme: "dark",
+      density: "compact",
+      detail: "bottom",
+      wrap: false,
+      columns: { time: true, level: true, pid: true, process: true, tag: true },
+      package: "com.example.ciallogcat",
+      query: "",
+      regex: false,
+      minLevel: "V",
+      paused: false,
+      selectedId: 11
+    };
+
+    const PRESETS = {
+      "app-all": { package: "com.example.ciallogcat", query: "", regex: false, minLevel: "V" },
+      "app-errors": { package: "com.example.ciallogcat", query: "failed|timeout|exception", regex: true, minLevel: "D" },
+      network: { package: "com.example.ciallogcat", query: "network|http|timeout", regex: true, minLevel: "D" },
+      lifecycle: { package: "com.example.ciallogcat", query: "on(Create|Start|Resume|Pause)", regex: true, minLevel: "V" }
+    };
+
+    const LEVEL_ORDER = { V: 0, D: 1, I: 2, W: 3, E: 4 };
+    const packages = [
+      "com.example.ciallogcat",
+      "com.example.ciallogcat:sync",
+      "com.android.systemui",
+      "system_server"
+    ];
+    const tags = ["MainActivity", "SyncWorker", "OkHttp", "ActivityTaskManager", "RenderThread", "AndroidRuntime"];
+    const messages = [
+      "onCreate completed; restoring saved state",
+      "network request completed; status=200 duration=184ms",
+      "refresh cached profile; source=memory",
+      "onResume; foreground=true",
+      "upload completed; items=24 bytes=81920",
+      "dispatch lifecycle event to observers",
+      "render frame; skipped=0 duration=12ms",
+      "database transaction committed",
+      "worker scheduled; constraints=CONNECTED",
+      "received connectivity change"
+    ];
+
+    function makeLogs() {
+      const logs = [];
+      for (let i = 0; i < 180; i += 1) {
+        const packageName = packages[i % packages.length];
+        let level = ["D", "I", "V", "D", "I", "W"][i % 6];
+        let message = messages[(i * 7) % messages.length] + `; seq=${4200 + i}`;
+        let tag = tags[(i * 5) % tags.length];
+        if (i % 37 === 0) {
+          level = "E";
+          tag = "AndroidRuntime";
+          message = "FATAL EXCEPTION: main; request failed after timeout\n    at com.example.ciallogcat.SyncWorker.run(SyncWorker.kt:84)\n    at kotlinx.coroutines.DispatchedTask.run(DispatchedTask.kt:106)";
+        } else if (i % 23 === 0) {
+          level = "W";
+          tag = "OkHttp";
+          message = "network timeout; retry=2 endpoint=/v1/profile elapsed=5000ms";
+        }
+        const seconds = (31 + Math.floor(i / 6)) % 60;
+        const minutes = 42 + Math.floor((31 + Math.floor(i / 6)) / 60);
+        logs.push({
+          id: i,
+          time: `10:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}.${String((i * 37) % 1000).padStart(3, "0")}`,
+          level,
+          pid: 8420 + (i % 7),
+          tid: 8420 + (i % 19),
+          process: packageName,
+          tag,
+          message
+        });
+      }
+      return logs;
+    }
+
+    const allLogs = makeLogs();
+    let visibleLogs = allLogs.slice();
+    let state = loadState();
+    let toastTimer;
+
+    const appWindow = document.getElementById("app-window");
+    const logList = document.getElementById("log-list");
+    const queryInput = document.getElementById("query-input");
+    const packageFilter = document.getElementById("package-filter");
+    const regexToggle = document.getElementById("regex-toggle");
+    const filterError = document.getElementById("filter-error");
+
+    function loadState() {
+      try {
+        const saved = JSON.parse(localStorage.getItem("ciallogcat-layout-lab"));
+        return { ...structuredClone(DEFAULT_STATE), ...saved, columns: { ...DEFAULT_STATE.columns, ...(saved?.columns || {}) } };
+      } catch {
+        return structuredClone(DEFAULT_STATE);
+      }
+    }
+
+    function persistState() {
+      localStorage.setItem("ciallogcat-layout-lab", JSON.stringify(state));
+    }
+
+    function syncControls() {
+      document.documentElement.dataset.theme = state.theme;
+      document.getElementById("layout-select").value = state.layout;
+      document.getElementById("detail-select").value = state.detail;
+      document.getElementById("wrap-toggle").checked = state.wrap;
+      packageFilter.value = state.package;
+      queryInput.value = state.query;
+      regexToggle.classList.toggle("active", state.regex);
+      appWindow.dataset.layout = state.layout;
+      appWindow.dataset.detail = state.detail;
+      appWindow.dataset.wrap = String(state.wrap);
+
+      document.querySelectorAll("[data-control]").forEach(group => {
+        const key = group.dataset.control;
+        group.querySelectorAll("button").forEach(button => button.classList.toggle("active", button.dataset.value === state[key]));
+      });
+      document.querySelectorAll("[data-column]").forEach(input => { input.checked = state.columns[input.dataset.column]; });
+      document.querySelectorAll(".level-chip").forEach(button => button.classList.toggle("active", button.dataset.level === state.minLevel));
+
+      if (state.density === "compact") {
+        appWindow.style.setProperty("--row-height", "26px");
+        appWindow.style.setProperty("--ui-font-size", "12px");
+        appWindow.style.setProperty("--log-font-size", "11.5px");
+      } else {
+        appWindow.style.setProperty("--row-height", "32px");
+        appWindow.style.setProperty("--ui-font-size", "13px");
+        appWindow.style.setProperty("--log-font-size", "12.5px");
+      }
+      updateColumns();
+      renderLogs();
+    }
+
+    function updateColumns() {
+      const definitions = {
+        time: "100px",
+        level: "34px",
+        pid: "88px",
+        process: "190px",
+        tag: "150px",
+        message: "minmax(300px, 1fr)"
+      };
+      const active = Object.keys(definitions).filter(key => key === "message" || state.columns[key]);
+      appWindow.style.setProperty("--columns", active.map(key => definitions[key]).join(" "));
+      appWindow.querySelectorAll("[data-col]").forEach(cell => cell.classList.toggle("column-hidden", cell.dataset.col !== "message" && !state.columns[cell.dataset.col]));
+    }
+
+    function createMatcher() {
+      filterError.textContent = "";
+      if (!state.query) return null;
+      try {
+        return new RegExp(state.regex ? state.query : escapeRegex(state.query), "ig");
+      } catch (error) {
+        filterError.textContent = `正则错误：${error.message}`;
+        return false;
+      }
+    }
+
+    function renderLogs() {
+      const matcher = createMatcher();
+      visibleLogs = allLogs.filter(log => {
+        const packageMatch = state.package === "*" || log.process === state.package || log.process.startsWith(`${state.package}:`);
+        const levelMatch = LEVEL_ORDER[log.level] >= LEVEL_ORDER[state.minLevel];
+        if (!packageMatch || !levelMatch || matcher === false) return false;
+        if (!matcher) return true;
+        matcher.lastIndex = 0;
+        return matcher.test(log.message);
+      });
+
+      logList.replaceChildren();
+      visibleLogs.slice(0, 140).forEach(log => {
+        const row = document.createElement("div");
+        row.className = `log-row log-grid${state.selectedId === log.id ? " selected" : ""}`;
+        row.dataset.id = log.id;
+        row.append(
+          cell(log.time, "time"),
+          cell(log.level, "level", `level ${log.level}`),
+          cell(`${log.pid} / ${log.tid}`, "pid"),
+          cell(log.process, "process"),
+          cell(log.tag, "tag", "tag"),
+          messageCell(log.message.split("\n")[0], matcher)
+        );
+        row.addEventListener("click", () => {
+          state.selectedId = log.id;
+          persistState();
+          renderLogs();
+        });
+        logList.append(row);
+      });
+
+      document.getElementById("match-status").textContent = `${visibleLogs.length.toLocaleString()} 条命中`;
+      renderDetail();
+    }
+
+    function cell(text, column, extraClass = "") {
+      const span = document.createElement("span");
+      span.className = `cell ${extraClass}`;
+      span.dataset.col = column;
+      span.classList.toggle("column-hidden", column !== "message" && !state.columns[column]);
+      span.textContent = text;
+      return span;
+    }
+
+    function messageCell(text, matcher) {
+      const span = cell("", "message", "message");
+      if (!matcher || matcher === false || !state.query) {
+        span.textContent = text;
+        return span;
+      }
+      const highlight = new RegExp(matcher.source, matcher.flags.includes("g") ? matcher.flags : `${matcher.flags}g`);
+      let cursor = 0;
+      let count = 0;
+      for (const match of text.matchAll(highlight)) {
+        if (count++ > 20 || match[0].length === 0) break;
+        span.append(document.createTextNode(text.slice(cursor, match.index)));
+        const mark = document.createElement("mark");
+        mark.textContent = match[0];
+        span.append(mark);
+        cursor = match.index + match[0].length;
+      }
+      span.append(document.createTextNode(text.slice(cursor)));
+      return span;
+    }
+
+    function renderDetail() {
+      const selected = allLogs.find(log => log.id === state.selectedId) || visibleLogs[0];
+      document.querySelectorAll("[data-detail-body]").forEach(body => {
+        body.replaceChildren();
+        if (!selected) {
+          body.textContent = "选择一条日志查看完整内容";
+          return;
+        }
+        const meta = document.createElement("div");
+        meta.className = "detail-meta";
+        meta.textContent = `${selected.time}  ·  ${selected.pid}/${selected.tid}  ·  ${selected.process}  ·  ${selected.tag}`;
+        const message = document.createElement("div");
+        message.textContent = selected.message;
+        body.append(meta, message);
+      });
+    }
+
+    function selectedLogText() {
+      const selected = allLogs.find(log => log.id === state.selectedId);
+      if (!selected) return "";
+      return `${selected.time} ${selected.pid} ${selected.tid} ${selected.level} ${selected.process} ${selected.tag}: ${selected.message}`;
+    }
+
+    function escapeRegex(text) {
+      return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    }
+
+    async function copyText(text, message) {
+      try {
+        await navigator.clipboard.writeText(text);
+        showToast(message);
+      } catch {
+        const area = document.createElement("textarea");
+        area.value = text;
+        document.body.append(area);
+        area.select();
+        document.execCommand("copy");
+        area.remove();
+        showToast(message);
+      }
+    }
+
+    function showToast(message) {
+      const toast = document.getElementById("toast");
+      toast.textContent = message;
+      toast.classList.add("visible");
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => toast.classList.remove("visible"), 1500);
+    }
+
+    document.getElementById("layout-select").addEventListener("change", event => { state.layout = event.target.value; persistState(); syncControls(); });
+    document.getElementById("detail-select").addEventListener("change", event => { state.detail = event.target.value; persistState(); syncControls(); });
+    document.getElementById("wrap-toggle").addEventListener("change", event => { state.wrap = event.target.checked; persistState(); syncControls(); });
+    packageFilter.addEventListener("change", event => { state.package = event.target.value; persistState(); renderLogs(); });
+    queryInput.addEventListener("input", event => { state.query = event.target.value; persistState(); renderLogs(); });
+    regexToggle.addEventListener("click", () => { state.regex = !state.regex; persistState(); syncControls(); });
+
+    document.querySelectorAll("[data-control]").forEach(group => {
+      group.addEventListener("click", event => {
+        const button = event.target.closest("button[data-value]");
+        if (!button) return;
+        state[group.dataset.control] = button.dataset.value;
+        persistState();
+        syncControls();
+      });
+    });
+
+    document.getElementById("column-controls").addEventListener("change", event => {
+      const column = event.target.dataset.column;
+      if (!column) return;
+      state.columns[column] = event.target.checked;
+      persistState();
+      syncControls();
+    });
+
+    document.getElementById("level-group").addEventListener("click", event => {
+      const button = event.target.closest("[data-level]");
+      if (!button) return;
+      state.minLevel = button.dataset.level;
+      persistState();
+      syncControls();
+    });
+
+    document.querySelectorAll("[data-preset]").forEach(button => {
+      button.addEventListener("click", () => {
+        Object.assign(state, PRESETS[button.dataset.preset]);
+        document.querySelectorAll("[data-preset]").forEach(item => item.classList.toggle("active", item === button));
+        persistState();
+        syncControls();
+      });
+    });
+
+    document.querySelectorAll("[data-copy-detail]").forEach(button => button.addEventListener("click", () => copyText(selectedLogText(), "已复制日志")));
+    document.getElementById("copy-config").addEventListener("click", () => copyText(JSON.stringify({ layout: state.layout, theme: state.theme, density: state.density, detail: state.detail, wrap: state.wrap, columns: state.columns }, null, 2), "已复制布局配置"));
+    document.getElementById("reset-config").addEventListener("click", () => { state = structuredClone(DEFAULT_STATE); persistState(); syncControls(); showToast("已恢复默认布局"); });
+
+    document.getElementById("pause-button").addEventListener("click", event => {
+      state.paused = !state.paused;
+      event.currentTarget.classList.toggle("active", state.paused);
+      event.currentTarget.textContent = state.paused ? "继续" : "暂停";
+      document.getElementById("capture-status").textContent = state.paused ? "显示已冻结 · 仍在采集" : "采集中 · 820 条/秒";
+    });
+    document.getElementById("mark-button").addEventListener("click", () => showToast("已插入本地时间标记"));
+    document.getElementById("clear-button").addEventListener("click", () => showToast("原型不会真的清除日志"));
+    document.getElementById("fullscreen-preview").addEventListener("click", () => document.body.classList.add("preview-only"));
+    document.getElementById("exit-preview").addEventListener("click", () => document.body.classList.remove("preview-only"));
+    document.addEventListener("keydown", event => {
+      if (event.key === "Escape") document.body.classList.remove("preview-only");
+      if (event.key === "/" && document.activeElement !== queryInput) {
+        event.preventDefault();
+        queryInput.focus();
+      }
+    });
+
+    syncControls();
+  </script>
+</body>
+</html>

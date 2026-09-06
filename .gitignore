@@ -1,0 +1,16 @@
+/target/
+
+# Local editor and operating-system files
+/.idea/
+/.vscode/
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Local credentials and diagnostic output
+.env
+.env.*
+!.env.example
+*.log
+/config.json
+/graphics-report*.txt
