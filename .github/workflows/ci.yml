@@ -56,6 +56,8 @@ jobs:
             throw "Tag $env:RELEASE_TAG must match Cargo version v$version"
           }
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - name: Formatting
         run: cargo fmt --all --check
       - name: Tests
