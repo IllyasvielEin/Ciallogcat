@@ -1,10 +1,17 @@
 name: Release
 
 on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Version label for validation artifacts (must match Cargo version)'
+        required: true
+        default: 'v0.2'
+        type: string
   push:
     tags:
       - 'v[0-9]*.[0-9]*.[0-9]*'
-      - 'v0.1'
+      - 'v[0-9]*.[0-9]*'
 
 permissions:
   contents: read
@@ -31,7 +38,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential pkg-config libudev-dev libx11-dev libxi-dev libxrandr-dev libxcursor-dev libxkbcommon-dev libwayland-dev libegl1-mesa-dev
+          sudo apt-get install -y build-essential pkg-config libudev-dev libx11-dev libxi-dev libxrandr-dev libxcursor-dev libxkbcommon-dev libwayland-dev libegl1-mesa-dev dpkg-dev desktop-file-utils
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -39,13 +46,13 @@ jobs:
       - name: Validate version tag
         shell: pwsh
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
         run: |
           $metadata = cargo metadata --locked --no-deps --format-version 1 | ConvertFrom-Json
           if ($LASTEXITCODE -ne 0) { throw 'Cargo metadata failed' }
           $version = ($metadata.packages | Where-Object name -eq 'ciallogcat').version
-          $isFirstRelease = $env:RELEASE_TAG -ceq 'v0.1' -and $version -ceq '0.1.0'
-          if ($env:RELEASE_TAG -cne "v$version" -and -not $isFirstRelease) {
+          $shortTag = if ($version -match '^([0-9]+)\.([0-9]+)\.0$') { "v$($Matches[1]).$($Matches[2])" } else { $null }
+          if ($env:RELEASE_TAG -cne "v$version" -and $env:RELEASE_TAG -cne $shortTag) {
             throw "Tag $env:RELEASE_TAG must match Cargo version v$version"
           }
       - uses: Swatinem/rust-cache@v2
@@ -60,9 +67,18 @@ jobs:
       - name: Package
         shell: pwsh
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
           RELEASE_PLATFORM: ${{ matrix.platform }}
         run: ./.github/scripts/package.ps1
+      - name: Install Debian packager
+        if: runner.os == 'Linux'
+        run: cargo install cargo-deb --version 3.8.0 --locked
+      - name: Build and verify Debian package
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+        run: bash .github/scripts/package-deb.sh
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.platform }}
@@ -72,6 +88,7 @@ jobs:
 
   release:
     name: Publish GitHub Release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     needs: build
     runs-on: ubuntu-24.04
     permissions:
@@ -86,7 +103,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
         run: |
           set -euo pipefail
           cd dist
@@ -101,7 +118,7 @@ jobs:
           else
             gh release create "$RELEASE_TAG" --verify-tag --draft \
               --title "Ciallogcat $RELEASE_TAG" --generate-notes \
-              --notes 'Includes Windows x86_64 and Linux x86_64 builds. Linux is built on Ubuntu 24.04 and requires compatible system libraries and a graphical desktop. Install ADB separately. CI validates builds and automated tests; real-device capture, long-running memory behavior and Linux desktop interaction require separate validation. Windows window dragging may stutter.'
+              --notes 'v0.2 adds filtered multi-row selection and copying, stable row selection during live capture with explicit follow/resume controls, persistent buffer multi-select, and a fix for Linux packaging. Includes Windows x86_64 ZIP and Linux x86_64 tar.gz and DEB packages. DEB installation and removal are checked in a clean Ubuntu 24.04 container. Linux is built on Ubuntu 24.04 and requires compatible system libraries and a graphical desktop. Install ADB separately. CI validates builds and automated tests; real-device capture, long-running memory behavior and Linux desktop interaction require separate validation. Windows window dragging may stutter.'
           fi
-          gh release upload "$RELEASE_TAG" ./*.zip ./*.tar.gz ./*.sha256 --clobber
+          gh release upload "$RELEASE_TAG" ./*.zip ./*.tar.gz ./*.deb ./*.sha256 --clobber
           gh release edit "$RELEASE_TAG" --draft=false --prerelease="$prerelease"

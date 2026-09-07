@@ -2,7 +2,7 @@ $ErrorActionPreference = 'Stop'
 if (-not $env:RELEASE_TAG -or $env:RELEASE_PLATFORM -notin @('linux-x86_64', 'windows-x86_64')) {
     throw 'RELEASE_TAG and a supported RELEASE_PLATFORM are required'
 }
-if ($env:RELEASE_TAG -cne 'v0.1' -and $env:RELEASE_TAG -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$') {
+if ($env:RELEASE_TAG -notmatch '^v[0-9]+\.[0-9]+(?:\.[0-9]+)?(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$') {
     throw 'Invalid version tag'
 }
 $bundleName = "ciallogcat-$env:RELEASE_TAG-$env:RELEASE_PLATFORM"
@@ -30,7 +30,7 @@ if ($LASTEXITCODE -ne 0) { throw 'rustc version check failed' }
 if ($env:RELEASE_PLATFORM -eq 'linux-x86_64') {
     $dependencies = ldd "target/release/$executable" 2>&1
     if ($LASTEXITCODE -ne 0 -or ($dependencies -match 'not found')) { throw 'Unresolved Linux dynamic dependencies' }
-    $dependencies | Set-Content -LiteralPath "$stage/BUILD-INFO.txt" -Encoding utf8 -Append
+    $dependencies | Add-Content -LiteralPath "$stage/BUILD-INFO.txt" -Encoding utf8
     $archiveName = "$bundleName.tar.gz"
     tar -czf "$dist/$archiveName" -C $stageRoot $bundleName
     if ($LASTEXITCODE -ne 0) { throw 'tar failed' }

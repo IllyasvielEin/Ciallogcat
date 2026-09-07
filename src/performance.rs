@@ -359,3 +359,109 @@ fn pause_and_close_ignore_old_session_events_and_keep_logs() {
     assert!(app.selected_device.is_none());
     assert_eq!(app.entries.len(), 1);
 }
+
+#[test]
+fn multi_selection_shortcuts_copy_only_filtered_rows_and_respect_text_focus() {
+    let ctx = egui::Context::default();
+    let mut app = CiallogcatApp::with_config(&ctx, AppConfig::default(), None);
+    for index in 0..5 {
+        app.append_entry(sample(index, "message\ncontinuation"));
+    }
+    app.matches = vec![0, 2, 4];
+    frame(&mut app, &ctx, 900.0);
+    key_frame(&mut app, &ctx, egui::Key::Home, egui::Modifiers::NONE);
+    key_frame(&mut app, &ctx, egui::Key::ArrowDown, egui::Modifiers::SHIFT);
+    let output = key_frame(&mut app, &ctx, egui::Key::C, egui::Modifiers::COMMAND);
+    let expected = format!(
+        "{}\n{}",
+        app.entries[0].copy_text(),
+        app.entries[2].copy_text()
+    );
+    assert!(output.platform_output.commands.iter().any(
+        |command| matches!(command, egui::OutputCommand::CopyText(text) if text == &expected)
+    ));
+    key_frame(&mut app, &ctx, egui::Key::A, egui::Modifiers::COMMAND);
+    assert!(app.selection.contains(4));
+    assert!(!app.selection.contains(1));
+    key_frame(&mut app, &ctx, egui::Key::Escape, egui::Modifiers::NONE);
+    assert!(app.selection.is_empty());
+    key_frame(&mut app, &ctx, egui::Key::F, egui::Modifiers::COMMAND);
+    frame(&mut app, &ctx, 900.0);
+    key_frame(&mut app, &ctx, egui::Key::A, egui::Modifiers::COMMAND);
+    assert!(app.selection.is_empty());
+}
+
+#[test]
+fn selecting_during_capture_stops_following_until_explicit_resume() {
+    let ctx = egui::Context::default();
+    let mut app = CiallogcatApp::with_config(&ctx, AppConfig::default(), None);
+    app.show_details = false;
+    for index in 0..300 {
+        app.append_entry(sample(index, "live message"));
+    }
+    let pointer_frame = |app: &mut CiallogcatApp, events: Vec<egui::Event>| {
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(900.0, 560.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ui| {
+                app.toolbar(ui);
+                app.status_bar(ui);
+                app.log_table(ui);
+            },
+        );
+        output.textures_delta.clear();
+    };
+    pointer_frame(&mut app, vec![]);
+    pointer_frame(&mut app, vec![]);
+    assert!(app.follow_logs);
+    let pos = egui::pos2(500.0, 350.0);
+    pointer_frame(
+        &mut app,
+        vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ],
+    );
+    assert!(
+        !app.follow_logs,
+        "stop on press, before the click completes"
+    );
+    for index in 300..400 {
+        app.append_entry(sample(index, "arrived while mouse held"));
+    }
+    pointer_frame(&mut app, vec![]);
+    pointer_frame(
+        &mut app,
+        vec![egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        }],
+    );
+    let selected = app
+        .selected
+        .expect("release must still select the original row");
+    assert!(
+        selected < 300,
+        "new arrivals must not replace the row under the mouse"
+    );
+    let output = key_frame(&mut app, &ctx, egui::Key::C, egui::Modifiers::COMMAND);
+    assert!(output.platform_output.commands.iter().any(|command| matches!(command, egui::OutputCommand::CopyText(text) if text == &app.entries[selected].copy_text())));
+    assert_eq!(app.entries.len(), 400, "capture continues while browsing");
+    key_frame(&mut app, &ctx, egui::Key::End, egui::Modifiers::COMMAND);
+    assert!(app.follow_logs);
+    key_frame(&mut app, &ctx, egui::Key::Home, egui::Modifiers::NONE);
+    assert!(!app.follow_logs);
+}

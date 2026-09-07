@@ -11,7 +11,7 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo build --locked --release
 ```
 
-修改采集、设备发现或图形窗口行为时，应注明验证的平台、ADB 版本及是否使用真机。CI 仅在推送版本标签时检查 Linux 和 Windows 的编译与单元测试，不能代替桌面交互、真机连接和 GPU 性能验证。
+修改采集、设备发现或图形窗口行为时，应注明验证的平台、ADB 版本及是否使用真机。CI 在推送版本标签或手动运行时检查 Linux 和 Windows 的编译与单元测试，并验证 Ubuntu 24.04 DEB 的安装与卸载，不能代替桌面交互、真机连接和 GPU 性能验证。
 
 性能测量命令和限制见 [UI 设计与性能](docs/ui-review.md)。不要把合成 CPU 测量报告成实际帧率。
 

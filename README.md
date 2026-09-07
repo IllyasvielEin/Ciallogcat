@@ -22,6 +22,20 @@ Ciallogcat 是一个独立的桌面 Logcat 查看器，用于调试个人开发�
 - 内置 Cascadia Next SC NF，Linux 和 Windows 使用一致的中英文字体。
 - 自动保存设置。日志按内存预算滚动保留，默认 300 MiB，可在 View 中调整。
 
+## 安装发布版
+
+v0.2 提供 Windows x86_64 ZIP、Linux x86_64 tar.gz 和 Ubuntu 24.04 x86_64 DEB。Linux 产物在 Ubuntu 24.04 构建，不保证兼容旧版 Ubuntu 或其他 Debian 发行版。
+
+Ubuntu 24.04 下载 DEB 后安装：
+
+```bash
+sudo apt install ./ciallogcat-v0.2-linux-x86_64.deb
+```
+
+安装后可在应用菜单搜索 Ciallogcat，或执行 ciallogcat。运行库为必需依赖，adb 为推荐依赖；已有 Android SDK Platform-Tools 的用户可使用 --no-install-recommends 安装，并确保 adb 在 PATH 中。卸载使用 sudo apt remove ciallogcat，用户设置会保留。
+
+tar.gz 是免安装压缩包，解压后运行目录中的 ./ciallogcat；运行库和 ADB 需自行安装。Windows 解压 ZIP 后运行 ciallogcat.exe。
+
 ## 构建与运行
 
 安装当前 [Rust stable](https://rustup.rs/)（包含 Cargo）以及 Android SDK Platform-Tools，并将 `adb` 加入 `PATH`。Windows 使用 MSVC 工具链，需要 Visual Studio Build Tools 的“使用 C++ 的桌面开发”组件与 Windows SDK。
@@ -69,7 +83,9 @@ cargo run --locked --release
 
 为避免异常输出无限占用内存，采集端单行最多接收 1 MiB 原始字节；超过部分丢弃并在该日志末尾标注 `truncated`，下一行继续读取。
 
-按 `Ctrl+F` 或 `/` 聚焦关键词输入框；退出输入后用方向键及 `Home` / `End` 选择日志，`Ctrl+End` 跳到最新日志。`Esc` 退出输入或取消日志选择，不清除筛选。`Ctrl+C` 优先复制选中的文字，没有文字选择时复制所选完整日志。
+按 `Ctrl+F` 或 `/` 聚焦关键词输入框；退出输入后用方向键及 `Home` / `End` 选择日志，`Ctrl+End` 跳到最新日志。`Esc` 退出输入或取消日志选择，不清除筛选。`Ctrl+C` 优先复制选中的文字，没有文字选择时按显示顺序复制所选完整日志（包含多行消息）。使用 Shift+点击或 Shift+方向键 / Home / End 连选，Ctrl+点击增减选中行，Ctrl+A 全选当前筛选结果。更改筛选后只保留仍匹配的选中行；清空或内存裁剪时取消选择。输入框聚焦时保留原生快捷键。
+
+自动跟随与采集独立：在日志区按下鼠标、向上滚动或用键盘选择日志时，停止自动跟随，后台继续接收日志。点击“回到最新”或按 Ctrl+End 恢复跟随；选择和复制无需暂停采集。
 
 详情区只在选中日志时展开。超长消息在表格中只显示前缀，在详情中分段滚动查看；复制与筛选使用已接收的完整日志。`Clear` 只清空本地视图，不会清除设备中的日志缓冲区。
 

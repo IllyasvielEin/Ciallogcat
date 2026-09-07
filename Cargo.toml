@@ -1,6 +1,6 @@
 [package]
 name = "ciallogcat"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "A desktop Android Logcat viewer built with Rust and egui"
 repository = "https://github.com/IllyasvielEin/Ciallogcat"
@@ -17,3 +17,24 @@ serde_json = "1"
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+[package.metadata.deb]
+revision = ""
+maintainer = "IllyasvielEin <IllyasvielEin@users.noreply.github.com>"
+copyright = "2026 Ciallogcat contributors"
+license-file = ["LICENSE", "0"]
+extended-description = "Desktop Android Logcat viewer with filtering, multi-row copying and live capture. Built for Ubuntu 24.04 x86_64; requires a graphical desktop."
+section = "devel"
+priority = "optional"
+depends = "$auto, libx11-6, libxcursor1, libxi6, libxrandr2, libxkbcommon0, libwayland-client0, libegl1, libgl1, libvulkan1"
+recommends = "adb, mesa-vulkan-drivers"
+assets = [
+    ["target/release/ciallogcat", "usr/bin/ciallogcat", "755"],
+    ["assets/linux/ciallogcat.desktop", "usr/share/applications/ciallogcat.desktop", "644"],
+    ["assets/linux/ciallogcat.svg", "usr/share/icons/hicolor/scalable/apps/ciallogcat.svg", "644"],
+    ["README.md", "usr/share/doc/ciallogcat/README.md", "644"],
+    ["CONTRIBUTING.md", "usr/share/doc/ciallogcat/CONTRIBUTING.md", "644"],
+    ["docs/*.md", "usr/share/doc/ciallogcat/guides/", "644"],
+    ["assets/fonts/LICENSE-OFL.txt", "usr/share/doc/ciallogcat/fonts/LICENSE-OFL.txt", "644"],
+    ["assets/fonts/README.md", "usr/share/doc/ciallogcat/fonts/README.md", "644"],
+]

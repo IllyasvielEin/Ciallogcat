@@ -7,3 +7,7 @@
 *.html text eol=lf
 *.ttf binary
 *.png binary
+
+*.sh text eol=lf
+*.desktop text eol=lf
+*.svg text eol=lf

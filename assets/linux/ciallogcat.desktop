@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Ciallogcat
+Comment=View and filter Android device logs
+Comment[zh_CN]=查看和筛选 Android 设备日志
+Exec=ciallogcat
+TryExec=ciallogcat
+Icon=ciallogcat
+Terminal=false
+Categories=Development;Utility;
+Keywords=Android;ADB;Logcat;Logs;
+StartupNotify=false

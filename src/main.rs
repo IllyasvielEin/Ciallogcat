@@ -5,6 +5,7 @@ mod log_store;
 mod model;
 #[cfg(test)]
 mod performance;
+mod selection;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -116,6 +117,7 @@ struct CiallogcatApp {
     entries: Arc<LogStore>,
     matches: Vec<usize>,
     selected: Option<usize>,
+    selection: selection::RowSelection,
     unresolved_processes: HashMap<u32, Vec<usize>>,
     processes: HashMap<u32, Arc<str>>,
     dropped_entries: usize,
@@ -146,6 +148,7 @@ struct CiallogcatApp {
     dark: bool,
     row_height: f32,
     show_details: bool,
+    follow_logs: bool,
     scroll_to_bottom: bool,
     scroll_to_selected: bool,
 
@@ -204,6 +207,7 @@ impl CiallogcatApp {
             entries: Arc::new(LogStore::default()),
             matches: Vec::new(),
             selected: None,
+            selection: selection::RowSelection::default(),
             unresolved_processes: HashMap::new(),
             processes: HashMap::new(),
             dropped_entries: 0,
@@ -234,6 +238,7 @@ impl CiallogcatApp {
             dark: config.dark,
             row_height: config.row_height,
             show_details: config.show_details,
+            follow_logs: true,
             scroll_to_bottom: false,
             scroll_to_selected: false,
 
@@ -326,6 +331,7 @@ impl CiallogcatApp {
                 );
             }
             self.matches = result.matches;
+            self.selection.retain(&self.matches);
             if self
                 .selected
                 .is_some_and(|index| self.matches.binary_search(&index).is_err())
@@ -373,6 +379,7 @@ impl CiallogcatApp {
         self.dropped_entries += remove;
         self.matches = Vec::new();
         self.selected = None;
+        self.selection.clear();
         self.detail_lines = None;
         self.unresolved_processes = HashMap::new();
         for (index, entry) in self.entries.iter().enumerate() {
@@ -673,6 +680,7 @@ impl CiallogcatApp {
         self.entries = Arc::new(LogStore::default());
         self.matches = Vec::new();
         self.selected = None;
+        self.selection.clear();
         self.detail_lines = None;
         self.unresolved_processes = HashMap::new();
         self.dropped_entries = 0;
@@ -825,6 +833,7 @@ impl CiallogcatApp {
                                     ),
                                 );
                                 if response.clicked() {
+                                    response.request_focus();
                                     selected_device = Some(device.serial.clone());
                                     ui.close();
                                 }
@@ -991,7 +1000,9 @@ impl CiallogcatApp {
                 }
                 ui.separator();
                 let summary = self.buffers.iter().map(|buffer| buffer.name()).collect::<Vec<_>>().join("+");
-                ui.menu_button(format!("缓冲区: {summary}"), |ui| {
+                egui::containers::menu::MenuButton::new(format!("缓冲区: {summary}"))
+                    .config(egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside))
+                    .ui(ui, |ui| {
                     for buffer in LogBuffer::CHOICES {
                         let mut enabled = self.buffer_draft.contains(&buffer);
                         if ui.checkbox(&mut enabled, buffer.name()).changed() {
@@ -1035,6 +1046,7 @@ impl CiallogcatApp {
                             )
                             .on_hover_text(format!("{level:?} and above"));
                         if response.clicked() {
+                            response.request_focus();
                             self.min_level = level;
                             filter_changed = true;
                         }
@@ -1081,7 +1093,10 @@ impl CiallogcatApp {
                         ui.separator();
                         ui.label("Ctrl+F /    Find messages");
                         ui.label("↑ ↓ Home End    Select log");
-                        ui.label("Ctrl+C    Copy selected log");
+                        ui.label("Ctrl+C    Copy selected logs");
+                        ui.label("Shift+Click / Shift+Up/Down    Select range");
+                        ui.label("Ctrl+Click    Toggle row");
+                        ui.label("Ctrl+A    Select all filtered logs");
                         ui.label("Esc    Leave input / selection");
                     });
 
@@ -1095,10 +1110,15 @@ impl CiallogcatApp {
                         }
                         ui.separator();
                         if ui
-                            .button("↓ Tail")
-                            .on_hover_text("Jump to latest log · Ctrl+End")
+                            .button(if self.follow_logs {
+                                "↓ 正在跟随"
+                            } else {
+                                "↓ 回到最新"
+                            })
+                            .on_hover_text("回到最新并恢复自动跟随 · Ctrl+End；浏览时继续采集")
                             .clicked()
                         {
+                            self.follow_logs = true;
                             self.scroll_to_bottom = true;
                         }
                         if matches!(self.capture_state, CaptureState::Error(_))
@@ -1258,6 +1278,7 @@ impl CiallogcatApp {
         }
         let highlight = self.highlight_matcher.as_ref();
         let selected = self.selected;
+        let selection = &self.selection;
         let row_height = self.row_height;
         let dark = self.dark;
         let entries = Arc::clone(&self.entries);
@@ -1266,6 +1287,18 @@ impl CiallogcatApp {
         let mut filter_process = None;
 
         egui::CentralPanel::default().show(root_ui, |ui| {
+            ui.style_mut().interaction.selectable_labels = false;
+            // Stop before laying out rows: a press and release can span many
+            // capture updates, so waiting for clicked() lets the target move.
+            let browsing = ctx.input(|input| {
+                input.pointer.hover_pos().is_some_and(|pos| ui.max_rect().contains(pos))
+                    && (input.pointer.any_pressed() || input.smooth_scroll_delta.y > 0.0)
+            });
+            if browsing {
+                self.follow_logs = false;
+                self.scroll_to_bottom = false;
+                self.scroll_to_selected = false;
+            }
             if matches.is_empty() {
                 ui.centered_and_justified(|ui| {
                     ui.label(if self.filter_pending || self.filter_dirty_since.is_some() {
@@ -1298,7 +1331,8 @@ impl CiallogcatApp {
                 .column(Column::remainder().at_least(180.0))
                 .min_scrolled_height(0.0)
                 .sense(egui::Sense::click())
-                .stick_to_bottom(true);
+                .animate_scrolling(false)
+                .stick_to_bottom(self.follow_logs);
             if self.scroll_to_bottom && !matches.is_empty() {
                 table = table.scroll_to_row(matches.len() - 1, Some(Align::BOTTOM));
             } else if self.scroll_to_selected
@@ -1320,7 +1354,7 @@ impl CiallogcatApp {
                         let match_index = row.index();
                         let entry_index = matches[match_index];
                         let entry = &entries[entry_index];
-                        row.set_selected(selected == Some(entry_index));
+                        row.set_selected(selection.contains(entry_index));
 
                         row.col(|ui| {
                             ui.label(RichText::new(entry.time.as_ref()).monospace().size(12.0));
@@ -1371,9 +1405,14 @@ impl CiallogcatApp {
 
                         let response = row.response();
                         if response.clicked() {
-                            clicked_row = Some(entry_index);
+                            response.request_focus();
+                            clicked_row = Some((entry_index, ctx.input(|input| input.modifiers)));
                         }
                         response.context_menu(|ui| {
+                            if selection.contains(entry_index) && ui.button("Copy selected logs").clicked() {
+                                ctx.copy_text(selection.copy_text(&entries));
+                                ui.close();
+                            }
                             if ui.button("Copy full log").clicked() {
                                 ctx.copy_text(entry.copy_text());
                                 ui.close();
@@ -1390,8 +1429,10 @@ impl CiallogcatApp {
 
         self.scroll_to_bottom = false;
         self.scroll_to_selected = false;
-        if let Some(index) = clicked_row {
-            self.selected = Some(index);
+        if let Some((index, modifiers)) = clicked_row {
+            self.selection
+                .select(&self.matches, index, modifiers.shift, modifiers.command);
+            self.selected = self.selection.contains(index).then_some(index);
             self.scroll_to_selected = true;
         }
         if let Some(process) = filter_process {
@@ -1466,6 +1507,7 @@ impl CiallogcatApp {
                 self.package_popup_open = false;
             } else {
                 self.selected = None;
+                self.selection.clear();
             }
             return;
         }
@@ -1473,7 +1515,14 @@ impl CiallogcatApp {
             return;
         }
         if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::End)) {
+            self.follow_logs = true;
             self.scroll_to_bottom = true;
+            return;
+        }
+        if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::A)) {
+            self.follow_logs = false;
+            self.selection.select_all(&self.matches);
+            self.selected = self.selected.or_else(|| self.matches.first().copied());
             return;
         }
         for key in [
@@ -1482,8 +1531,13 @@ impl CiallogcatApp {
             egui::Key::Home,
             egui::Key::End,
         ] {
-            if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, key)) {
+            let extend = ctx.input_mut(|input| input.consume_key(egui::Modifiers::SHIFT, key));
+            if extend || ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, key)) {
+                self.follow_logs = false;
                 self.selected = navigated_selection(&self.matches, self.selected, key);
+                if let Some(index) = self.selected {
+                    self.selection.select(&self.matches, index, extend, false);
+                }
                 self.scroll_to_selected = true;
                 break;
             }
@@ -1504,11 +1558,8 @@ impl CiallogcatApp {
                 .iter()
                 .any(|command| matches!(command, egui::OutputCommand::CopyText(_)))
         });
-        if requested
-            && !text_already_copied
-            && let Some(index) = self.selected
-        {
-            ctx.copy_text(self.entries[index].copy_text());
+        if requested && !text_already_copied && !self.selection.is_empty() {
+            ctx.copy_text(self.selection.copy_text(&self.entries));
         }
     }
 
