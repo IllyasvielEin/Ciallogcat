@@ -2,26 +2,22 @@
 
 ## 版本与触发
 
-当前版本为 v0.2，Cargo 版本为 0.2.0。完整标签必须等于 Cargo 版本加 v 前缀；补丁号为零的正式版本也接受短标签，例如 v0.2 对应 0.2.0。预发布标签使用完整版本，例如 v0.3.0-rc.1。
+当前版本为 v0.3，Cargo 版本为 0.3.0。完整标签必须等于 Cargo 版本加 v 前缀；补丁号为零的正式版本也接受短标签，例如 v0.3 对应 0.3.0。预发布标签使用完整版本，例如 v0.3.0-rc.1。
 
-Release 工作流支持版本标签推送和手动运行。手动运行填写与 Cargo 匹配的 release_tag，执行检查和打包但不发布 Release：
+Release 工作流仅在推送版本标签时触发构建、打包和发布，不提供手动触发入口。
 
-```bash
-gh workflow run ci.yml --ref main -f release_tag=v0.2
-```
-
-分支推送和 Pull request 不触发发布。重跑旧标签任务仍使用该标签的旧代码。公开标签不移动或覆盖，修复通过新版本发布。
+分支推送和 Pull request 不触发构建或发布。重跑旧标签任务仍使用该标签的旧代码。公开标签不移动或覆盖，修复通过新版本发布。
 
 ## 发布流程
 
 1. 更新 Cargo.toml 版本并通过 cargo check 更新 Cargo.lock。
 2. 执行贡献指南中的格式、测试、Clippy 和 release 构建检查，检查待提交差异。
-3. 提交源码、资源和文档并推送 main，建议先手动运行双平台验证。
+3. 提交源码、资源和文档并推送 main；普通分支推送不触发 CI。
 4. 创建并推送对应版本标签，例如：
 
 ```bash
-git tag -a v0.2 -m "Ciallogcat v0.2"
-git push origin v0.2
+git tag -a v0.3 -m "Ciallogcat v0.3"
+git push origin v0.3
 ```
 
 CI 校验标签，然后在 Windows 和 Ubuntu 24.04 执行格式检查、测试、Clippy、release 构建和打包。Linux 使用固定版本 cargo-deb 3.8.0 额外生成 DEB，在干净 Ubuntu 24.04 容器中验证安装、桌面入口、图标、许可证、动态链接依赖和卸载。
@@ -32,9 +28,9 @@ CI 校验标签，然后在 Windows 和 Ubuntu 24.04 执行格式检查、测试
 
 | 平台 | 附件 |
 | --- | --- |
-| Windows x86_64 | ciallogcat-v0.2-windows-x86_64.zip |
-| Linux x86_64 | ciallogcat-v0.2-linux-x86_64.tar.gz |
-| Ubuntu 24.04 x86_64 | ciallogcat-v0.2-linux-x86_64.deb |
+| Windows x86_64 | ciallogcat-v0.3-windows-x86_64.zip |
+| Linux x86_64 | ciallogcat-v0.3-linux-x86_64.tar.gz |
+| Ubuntu 24.04 x86_64 | ciallogcat-v0.3-linux-x86_64.deb |
 
 每个附件都有同名 .sha256 文件。ZIP 和 tar.gz 包含程序、文档、MIT 与字体 OFL 许可及 BUILD-INFO.txt。DEB 安装程序到 /usr/bin，桌面入口到 /usr/share/applications，图标到 hicolor 图标目录，文档及许可到 /usr/share/doc/ciallogcat。
 

@@ -465,3 +465,65 @@ fn selecting_during_capture_stops_following_until_explicit_resume() {
     key_frame(&mut app, &ctx, egui::Key::Home, egui::Modifiers::NONE);
     assert!(!app.follow_logs);
 }
+
+#[test]
+fn query_history_records_finished_input_and_restores_only_query() {
+    let ctx = egui::Context::default();
+    let mut app = CiallogcatApp::with_config(&ctx, AppConfig::default(), None);
+    frame(&mut app, &ctx, 900.0);
+    key_frame(&mut app, &ctx, egui::Key::F, egui::Modifiers::COMMAND);
+    frame(&mut app, &ctx, 900.0);
+    let mut output = ctx.run_ui(
+        egui::RawInput {
+            events: vec![egui::Event::Text("timeout|失败".to_owned())],
+            ..Default::default()
+        },
+        |ui| app.toolbar(ui),
+    );
+    output.textures_delta.clear();
+    assert_eq!(app.query, "timeout|失败");
+    assert!(
+        app.query_history_open,
+        "focused input keeps history open while typing"
+    );
+    assert!(
+        app.filter_history.is_empty(),
+        "typing must not record fragments"
+    );
+    key_frame(&mut app, &ctx, egui::Key::Enter, egui::Modifiers::NONE);
+    assert_eq!(app.filter_history, ["timeout|失败"]);
+    assert!(!app.query_history_pending);
+    assert!(!app.query_history_open, "Enter closes history");
+    key_frame(&mut app, &ctx, egui::Key::F, egui::Modifiers::COMMAND);
+    frame(&mut app, &ctx, 900.0);
+    assert!(
+        app.query_history_open,
+        "focusing input opens history without a button"
+    );
+    key_frame(&mut app, &ctx, egui::Key::Escape, egui::Modifiers::NONE);
+    frame(&mut app, &ctx, 900.0);
+    assert!(!app.query_history_open, "Escape closes history");
+
+    app.package = "com.example.app".to_owned();
+    app.min_level = Level::Error;
+    app.use_regex = true;
+    app.case_sensitive = true;
+    app.apply_history_query("other".to_owned());
+    assert_eq!(app.filter_history, ["other", "timeout|失败"]);
+    app.apply_history_query("timeout|失败".to_owned());
+    assert_eq!(app.filter_history, ["timeout|失败", "other"]);
+    assert_eq!(app.package, "com.example.app");
+    assert_eq!(app.min_level, Level::Error);
+    assert!(app.use_regex && app.case_sensitive);
+    assert!(app.filter_dirty_since.is_some());
+
+    let json = serde_json::to_string(&app.app_config()).unwrap();
+    let mut restored = CiallogcatApp::with_config(&ctx, serde_json::from_str(&json).unwrap(), None);
+    assert_eq!(restored.filter_history, app.filter_history);
+    restored.filter_history.clear();
+    restored.record_query_history();
+    assert!(
+        restored.app_config().filter_history.is_empty(),
+        "cleared history must stay cleared"
+    );
+}

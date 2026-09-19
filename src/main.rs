@@ -1,6 +1,7 @@
 mod adb;
 mod config;
 mod filter;
+mod history;
 mod log_store;
 mod model;
 #[cfg(test)]
@@ -173,6 +174,9 @@ struct CiallogcatApp {
     logs_per_second: f64,
 
     saved_filters: Vec<SavedFilter>,
+    filter_history: Vec<String>,
+    query_history_pending: bool,
+    query_history_open: bool,
     show_save_filter: bool,
     save_filter_name: String,
     config_dirty_since: Option<Instant>,
@@ -267,6 +271,9 @@ impl CiallogcatApp {
             logs_per_second: 0.0,
 
             saved_filters: config.saved_filters,
+            filter_history: config.filter_history,
+            query_history_pending: false,
+            query_history_open: false,
             show_save_filter: false,
             save_filter_name: String::new(),
             config_dirty_since: None,
@@ -720,11 +727,14 @@ impl CiallogcatApp {
     }
 
     fn apply_saved_filter(&mut self, saved: SavedFilter) {
+        self.record_query_history();
         self.package = saved.package;
         self.min_level = saved.min_level;
         self.query = saved.query;
         self.use_regex = saved.regex;
         self.case_sensitive = saved.case_sensitive;
+        self.query_history_pending = true;
+        self.record_query_history();
         self.schedule_filter();
         self.mark_config_dirty();
     }
@@ -762,6 +772,22 @@ impl CiallogcatApp {
         self.config_dirty_since = Some(Instant::now());
     }
 
+    fn apply_history_query(&mut self, query: String) {
+        self.record_query_history();
+        self.query = query;
+        self.query_history_pending = true;
+        self.record_query_history();
+        self.queue_filter();
+    }
+
+    fn record_query_history(&mut self) {
+        if self.query_history_pending {
+            history::record(&mut self.filter_history, &self.query);
+            self.query_history_pending = false;
+            self.mark_config_dirty();
+        }
+    }
+
     fn app_config(&self) -> AppConfig {
         AppConfig {
             memory_limit_mib: self.memory_limit_mib,
@@ -775,6 +801,7 @@ impl CiallogcatApp {
             row_height: self.row_height,
             show_details: self.show_details,
             saved_filters: self.saved_filters.clone(),
+            filter_history: self.filter_history.clone(),
         }
     }
 
@@ -932,6 +959,91 @@ impl CiallogcatApp {
                             .id(egui::Id::new("query_shortcut")),
                     );
                     filter_changed |= query_response.changed();
+                    self.query_history_pending |= query_response.changed();
+                    if query_response.lost_focus()
+                        || (query_response.has_focus()
+                            && ui.input(|input| input.key_pressed(egui::Key::Enter)))
+                    {
+                        self.record_query_history();
+                    }
+                    let mut history_choice = None;
+                    let mut delete_history = None;
+                    let mut clear_history = false;
+                    let mut history_open = self.query_history_open;
+                    if query_response.gained_focus()
+                        || query_response.clicked()
+                        || query_response.changed()
+                    {
+                        history_open = true;
+                    }
+                    if (query_response.has_focus() || query_response.lost_focus())
+                        && ui.input(|input| input.key_pressed(egui::Key::Enter))
+                    {
+                        history_open = false;
+                    }
+                    egui::Popup::from_response(&query_response)
+                        .id(egui::Id::new("query_history"))
+                        .open_bool(&mut history_open)
+                        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                        .layout(Layout::top_down_justified(Align::Min))
+                        .width(360.0)
+                        .show(|ui| {
+                            ui.set_max_width(360.0);
+                            if self.filter_history.is_empty() {
+                                ui.label("暂无筛选历史");
+                            }
+                            egui::ScrollArea::vertical()
+                                .max_height(300.0)
+                                .show(ui, |ui| {
+                                    for (index, query) in self.filter_history.iter().enumerate() {
+                                        ui.horizontal(|ui| {
+                                            if ui
+                                                .add_sized(
+                                                    [290.0, 24.0],
+                                                    egui::Button::selectable(
+                                                        self.query == *query,
+                                                        query,
+                                                    )
+                                                    .truncate(),
+                                                )
+                                                .on_hover_text(query)
+                                                .clicked()
+                                            {
+                                                history_choice = Some(query.clone());
+                                                ui.close();
+                                            }
+                                            if ui
+                                                .button("×")
+                                                .on_hover_text("删除此条历史")
+                                                .clicked()
+                                            {
+                                                delete_history = Some(index);
+                                            }
+                                        });
+                                    }
+                                });
+                            if !self.filter_history.is_empty() {
+                                ui.separator();
+                                if ui.button("清空历史").clicked() {
+                                    clear_history = true;
+                                    ui.close();
+                                }
+                            }
+                        });
+                    if let Some(index) = delete_history {
+                        self.filter_history.remove(index);
+                        self.mark_config_dirty();
+                    }
+                    if clear_history {
+                        self.filter_history.clear();
+                        self.mark_config_dirty();
+                    }
+                    if let Some(query) = history_choice {
+                        self.apply_history_query(query);
+                        history_open = false;
+                        query_response.surrender_focus();
+                    }
+                    self.query_history_open = history_open;
                     filter_changed |= ui
                         .toggle_value(&mut self.use_regex, ".*")
                         .on_hover_text("Use a regular expression")
@@ -1505,6 +1617,7 @@ impl CiallogcatApp {
                     memory.surrender_focus(egui::Id::new("package_filter"));
                 });
                 self.package_popup_open = false;
+                self.query_history_open = false;
             } else {
                 self.selected = None;
                 self.selection.clear();
@@ -1629,6 +1742,7 @@ impl eframe::App for CiallogcatApp {
 
 impl Drop for CiallogcatApp {
     fn drop(&mut self) {
+        self.record_query_history();
         self.stop_capture();
         #[cfg(not(test))]
         let _ = self.app_config().save();

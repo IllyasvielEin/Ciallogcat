@@ -24,12 +24,12 @@ Ciallogcat 是一个独立的桌面 Logcat 查看器，用于调试个人开发�
 
 ## 安装发布版
 
-v0.2 提供 Windows x86_64 ZIP、Linux x86_64 tar.gz 和 Ubuntu 24.04 x86_64 DEB。Linux 产物在 Ubuntu 24.04 构建，不保证兼容旧版 Ubuntu 或其他 Debian 发行版。
+v0.3 提供 Windows x86_64 ZIP、Linux x86_64 tar.gz 和 Ubuntu 24.04 x86_64 DEB。Linux 产物在 Ubuntu 24.04 构建，不保证兼容旧版 Ubuntu 或其他 Debian 发行版。
 
 Ubuntu 24.04 下载 DEB 后安装：
 
 ```bash
-sudo apt install ./ciallogcat-v0.2-linux-x86_64.deb
+sudo apt install ./ciallogcat-v0.3-linux-x86_64.deb
 ```
 
 安装后可在应用菜单搜索 Ciallogcat，或执行 ciallogcat。运行库为必需依赖，adb 为推荐依赖；已有 Android SDK Platform-Tools 的用户可使用 --no-install-recommends 安装，并确保 adb 在 PATH 中。卸载使用 sudo apt remove ciallogcat，用户设置会保留。
@@ -70,6 +70,8 @@ cargo run --locked --release
 3. 输入关键词。右侧 `.*` 切换正则表达式，`Aa` 切换大小写匹配；级别栏设置最低日志级别。`View` 菜单调整日志内存预算、主题、行高和详情显示。
 4. 点击日志行查看完整内容；按 `Ctrl+C` 复制所选日志。
 5. 从 `Saved filters` 中保存或恢复常用筛选组合。
+
+关键词输入框按 Enter 或离开输入框时，将当前非空关键词记入“历史”；退出应用也会保留尚未记录的输入。历史仅保存关键词，不包含包名、级别、正则或大小写设置，复用时沿用当前设置。聚焦关键词输入框即弹出历史列表（也支持 Ctrl+F 或 / 聚焦），点击条目恢复关键词；点击外部、按 Enter 或 Esc 收起列表；重复使用的条目移到最前，最多保留 500 条。可删除单条或清空历史，历史随配置文件保存在本地，重启后仍可使用。
 
 采集栏提供两个按钮：运行时“开启”变为“暂停”，暂停会结束当前 adb logcat 进程，但保留设备选择与已有日志；再次开启从最新日志继续，不回补暂停期间的日志。“关闭”结束采集并取消设备选择，已有日志仍可查看、筛选和复制。选择设备后自动开始采集。
 

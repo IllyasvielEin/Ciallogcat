@@ -23,6 +23,7 @@ pub struct AppConfig {
     pub row_height: f32,
     pub show_details: bool,
     pub saved_filters: Vec<SavedFilter>,
+    pub filter_history: Vec<String>,
     pub memory_limit_mib: usize,
     pub buffers: Vec<LogBuffer>,
 }
@@ -39,6 +40,7 @@ impl Default for AppConfig {
             row_height: 25.0,
             show_details: true,
             saved_filters: Vec::new(),
+            filter_history: Vec::new(),
             memory_limit_mib: 300,
             buffers: LogBuffer::defaults(),
         }
@@ -119,6 +121,7 @@ mod tests {
     #[test]
     fn config_round_trip_keeps_saved_filters() {
         let mut config = AppConfig {
+            filter_history: vec!["timeout|失败".to_owned(), " error ".to_owned()],
             memory_limit_mib: 128,
             buffers: vec![LogBuffer::Events, LogBuffer::Crash],
             ..Default::default()
@@ -135,6 +138,7 @@ mod tests {
         let encoded = serde_json::to_string(&config).unwrap();
         let decoded: AppConfig = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded.saved_filters, config.saved_filters);
+        assert_eq!(decoded.filter_history, config.filter_history);
         assert_eq!(decoded.memory_limit_mib, 128);
         assert_eq!(decoded.buffers, config.buffers);
     }
@@ -143,6 +147,7 @@ mod tests {
     fn old_configuration_gets_memory_and_buffer_defaults() {
         let config: AppConfig = serde_json::from_str(r#"{"dark":false}"#).unwrap();
         assert_eq!(config.memory_limit_mib, 300);
+        assert!(config.filter_history.is_empty());
         assert_eq!(config.buffers, LogBuffer::defaults());
     }
 }
