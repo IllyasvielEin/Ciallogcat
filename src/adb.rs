@@ -1,9 +1,13 @@
 use std::collections::HashMap;
 use std::env;
-use std::io::{self, BufRead, BufReader};
+use std::io::{self, BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Condvar, Mutex, OnceLock, mpsc::SyncSender};
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::{
+    Arc, Condvar, Mutex, OnceLock,
+    mpsc::{self, SyncSender},
+};
+use std::time::{Duration, Instant};
 
 use eframe::egui::Context;
 use regex::Regex;
@@ -45,6 +49,7 @@ pub enum BackendEvent {
     },
     Processes {
         serial: String,
+        session_id: u64,
         result: Result<HashMap<u32, String>, String>,
     },
     Logcat {
@@ -65,6 +70,12 @@ pub enum LogcatEvent {
 
 const QUEUE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_LINE_BYTES: usize = 1024 * 1024;
+// Diagnostics need a bounded excerpt, not a full log payload. Together with the
+// bounded event channel, this caps queued stderr payload independently of the
+// entry-byte permits. The suffix is included in MAX_STDERR_EVENT_BYTES.
+const MAX_STDERR_LINE_BYTES: usize = 4096;
+const STDERR_TRUNCATION_NOTICE: &str = " [truncated: diagnostic exceeded 4 KiB]";
+const MAX_STDERR_EVENT_BYTES: usize = MAX_STDERR_LINE_BYTES + STDERR_TRUNCATION_NOTICE.len();
 
 #[derive(Default)]
 struct QueueBudget {
@@ -258,6 +269,7 @@ pub fn spawn_package_query(
 pub fn spawn_process_query(
     adb: PathBuf,
     serial: String,
+    session_id: u64,
     event_tx: SyncSender<BackendEvent>,
     ctx: Context,
 ) {
@@ -276,6 +288,7 @@ pub fn spawn_process_query(
             };
             let _ = event_tx.send(BackendEvent::Processes {
                 serial: serial.clone(),
+                session_id,
                 result,
             });
             ctx.request_repaint();
@@ -314,16 +327,13 @@ pub fn start_logcat(
         std::thread::Builder::new()
             .name("adb-logcat-stderr".to_owned())
             .spawn(move || {
-                for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                    if line.trim().is_empty() {
-                        continue;
-                    }
+                let _ = read_logcat_stderr(BufReader::new(stderr), |line| {
                     let _ = error_tx.send(BackendEvent::Logcat {
                         session_id,
                         event: LogcatEvent::Stderr(line),
                     });
                     error_ctx.request_repaint();
-                }
+                });
             })
             .expect("failed to start adb stderr reader");
     }
@@ -351,31 +361,33 @@ pub fn start_logcat(
             .err()
             .map(|error| format!("failed to read logcat output: {error}"));
 
-            let (code, error) = match reader_child.lock() {
-                Ok(mut child) => match child.try_wait() {
-                    Ok(Some(status)) => (status.code(), stream_error),
-                    Ok(None) => {
-                        let reason = stream_error
-                            .unwrap_or_else(|| "Logcat output ended unexpectedly".to_owned());
-                        match child.kill() {
-                            Ok(()) => match child.wait() {
+            // EOF can arrive just before the OS publishes the exit status. Give
+            // natural termination a bounded grace period, releasing the lock
+            // between polls so Stop never waits behind a blocking child.wait().
+            let deadline = Instant::now() + Duration::from_millis(250);
+            let (code, error) = loop {
+                match reader_child.lock() {
+                    Ok(mut child) => match child.try_wait() {
+                        Ok(Some(status)) => break (status.code(), stream_error),
+                        Ok(None) if Instant::now() < deadline && stream_error.is_none() => {}
+                        Ok(None) => {
+                            let reason = stream_error
+                                .unwrap_or_else(|| "Logcat output ended unexpectedly".to_owned());
+                            break match kill_and_reap(&mut child) {
                                 Ok(status) => (status.code(), Some(reason)),
-                                Err(error) => (
-                                    None,
-                                    Some(format!("{reason}; failed to wait for ADB: {error}")),
-                                ),
-                            },
-                            Err(error) => {
-                                (None, Some(format!("{reason}; failed to stop ADB: {error}")))
-                            }
+                                Err(error) => (None, Some(format!("{reason}; {error}"))),
+                            };
                         }
-                    }
-                    Err(error) => (
-                        None,
-                        Some(format!("failed to query ADB process status: {error}")),
-                    ),
-                },
-                Err(_) => (None, Some("adb process lock was poisoned".to_owned())),
+                        Err(error) => {
+                            break (
+                                None,
+                                Some(format!("failed to query ADB process status: {error}")),
+                            );
+                        }
+                    },
+                    Err(_) => break (None, Some("adb process lock was poisoned".to_owned())),
+                }
+                std::thread::sleep(Duration::from_millis(5));
             };
             let _ = event_tx.send(BackendEvent::Logcat {
                 session_id,
@@ -404,9 +416,50 @@ fn logcat_args(serial: &str, buffers: &[LogBuffer]) -> Vec<String> {
     args
 }
 
-fn read_logcat_stream(
+fn read_logcat_stream(reader: impl BufRead, mut on_entry: impl FnMut(LogEntry)) -> io::Result<()> {
+    read_bounded_lines(reader, MAX_LINE_BYTES, |line, truncated| {
+        let mut line = String::from_utf8_lossy(line);
+        if truncated {
+            line.to_mut()
+                .push_str(" [truncated: log line exceeded 1 MiB]");
+        }
+        if let Some(entry) = parse_logcat_line(&line) {
+            on_entry(entry);
+        }
+    })
+}
+
+fn read_logcat_stderr(reader: impl BufRead, mut on_line: impl FnMut(String)) -> io::Result<()> {
+    read_bounded_lines(reader, MAX_STDERR_LINE_BYTES, |line, mut truncated| {
+        let decoded = String::from_utf8_lossy(line);
+        // Replacement characters can expand invalid UTF-8. Bound decoded bytes
+        // too, and pre-size the final string so the suffix cannot double capacity.
+        let mut end = decoded.len().min(MAX_STDERR_LINE_BYTES);
+        while !decoded.is_char_boundary(end) {
+            end -= 1;
+        }
+        truncated |= end < decoded.len();
+        let suffix = if truncated {
+            STDERR_TRUNCATION_NOTICE
+        } else {
+            ""
+        };
+        let mut text = String::with_capacity(end + suffix.len());
+        text.push_str(&decoded[..end]);
+        text.push_str(suffix);
+        debug_assert!(text.len() <= MAX_STDERR_EVENT_BYTES);
+        if !text.trim().is_empty() {
+            on_line(text);
+        }
+    })
+}
+
+// Drain an oversized line through its newline before yielding the bounded prefix.
+// A final partial line is yielded too; empty/CRLF handling matches logcat's parser.
+fn read_bounded_lines(
     mut reader: impl BufRead,
-    mut on_entry: impl FnMut(LogEntry),
+    limit: usize,
+    mut on_line: impl FnMut(&[u8], bool),
 ) -> io::Result<()> {
     let mut line = Vec::new();
     loop {
@@ -422,7 +475,7 @@ fn read_logcat_stream(
                 .position(|byte| *byte == b'\n')
                 .map_or(available.len(), |index| index + 1);
             let ended = available[take - 1] == b'\n';
-            let keep = take.min(MAX_LINE_BYTES.saturating_sub(line.len()));
+            let keep = take.min(limit.saturating_sub(line.len()));
             line.extend_from_slice(&available[..keep]);
             truncated |= keep < take;
             reader.consume(take);
@@ -439,31 +492,90 @@ fn read_logcat_stream(
         {
             line.pop();
         }
-        if truncated {
-            line.extend_from_slice(b" [truncated: log line exceeded 1 MiB]");
-        }
-        let line = String::from_utf8_lossy(&line);
-        if let Some(entry) = parse_logcat_line(&line) {
-            on_entry(entry);
-        }
+        on_line(&line, truncated);
     }
 }
 
+const QUERY_TIMEOUT: Duration = Duration::from_secs(5);
+const QUERY_OUTPUT_LIMIT: u64 = 16 * 1024 * 1024;
+
 fn run_adb(adb: &Path, args: &[&str]) -> Result<String, String> {
-    let output = adb_command(adb)
+    let mut child = adb_command(adb)
         .args(args)
         .stdin(Stdio::null())
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|error| format!("failed to run {}: {error}", adb.display()))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    let deadline = Instant::now() + QUERY_TIMEOUT;
+    // Drain both pipes concurrently to avoid a full stderr pipe deadlocking
+    // stdout. Each query's buffered output is bounded independently.
+    fn read_pipe(pipe: impl Read + Send + 'static) -> mpsc::Receiver<io::Result<Vec<u8>>> {
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let result = pipe
+                .take(QUERY_OUTPUT_LIMIT + 1)
+                .read_to_end(&mut bytes)
+                .and_then(|_| {
+                    if bytes.len() as u64 > QUERY_OUTPUT_LIMIT {
+                        Err(io::Error::other("ADB query output exceeded 16 MiB"))
+                    } else {
+                        Ok(bytes)
+                    }
+                });
+            let _ = tx.send(result);
+        });
+        rx
+    }
+    let stdout = read_pipe(child.stdout.take().expect("piped stdout"));
+    let stderr = read_pipe(child.stderr.take().expect("piped stderr"));
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            result => {
+                let cleanup = kill_and_reap(&mut child);
+                let reason = match result {
+                    Err(error) => format!("failed to wait for ADB query: {error}"),
+                    _ => "ADB query timed out after 5 seconds".to_owned(),
+                };
+                return Err(match cleanup {
+                    Ok(_) => reason,
+                    Err(error) => format!("{reason}; {error}"),
+                });
+            }
+        }
+    };
+    let collect = |rx: mpsc::Receiver<io::Result<Vec<u8>>>| -> Result<Vec<u8>, String> {
+        rx.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .map_err(|_| "ADB query output timed out after 5 seconds".to_owned())?
+            .map_err(|error| format!("failed to read ADB query: {error}"))
+    };
+    let stdout = collect(stdout)?;
+    let stderr = collect(stderr)?;
+    if !status.success() {
+        let stderr = String::from_utf8_lossy(&stderr).trim().to_owned();
         return Err(if stderr.is_empty() {
-            format!("adb exited with {}", output.status)
+            format!("adb exited with {status}")
         } else {
             stderr
         });
     }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    Ok(String::from_utf8_lossy(&stdout).into_owned())
+}
+
+// Never enter blocking wait after a failed kill of a still-running child.
+fn kill_and_reap(child: &mut Child) -> Result<ExitStatus, String> {
+    match child.kill() {
+        Ok(()) => child
+            .wait()
+            .map_err(|error| format!("failed to wait for ADB: {error}")),
+        Err(error) => match child.try_wait() {
+            Ok(Some(status)) => Ok(status),
+            _ => Err(format!("failed to stop ADB: {error}")),
+        },
+    }
 }
 
 fn adb_command(path: &Path) -> Command {
@@ -831,3 +943,7 @@ mod tests {
         assert_eq!(entry.unwrap().message.as_ref(), "ready");
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "../tests/support/adb_integration.rs"]
+mod integration_tests;

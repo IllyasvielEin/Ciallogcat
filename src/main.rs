@@ -121,6 +121,7 @@ struct CiallogcatApp {
     selection: selection::RowSelection,
     unresolved_processes: HashMap<u32, Vec<usize>>,
     processes: HashMap<u32, Arc<str>>,
+    unresolved_count: usize,
     dropped_entries: usize,
     memory_limit_mib: usize,
     buffers: Vec<LogBuffer>,
@@ -159,6 +160,7 @@ struct CiallogcatApp {
     adb_status: String,
     devices: Vec<DeviceInfo>,
     selected_device: Option<String>,
+    retained_device: Option<String>,
     device_query_pending: bool,
     package_query_pending: bool,
     process_query_pending: bool,
@@ -214,6 +216,7 @@ impl CiallogcatApp {
             selection: selection::RowSelection::default(),
             unresolved_processes: HashMap::new(),
             processes: HashMap::new(),
+            unresolved_count: 0,
             dropped_entries: 0,
             memory_limit_mib: config.memory_limit_mib.clamp(16, 4096),
             buffers: config.buffers.clone(),
@@ -252,6 +255,7 @@ impl CiallogcatApp {
             adb_status: String::new(),
             devices: Vec::new(),
             selected_device: None,
+            retained_device: None,
             device_query_pending: false,
             package_query_pending: false,
             process_query_pending: false,
@@ -356,6 +360,9 @@ impl CiallogcatApp {
         }
 
         let index = self.entries.len();
+        if entry.process.is_none() {
+            self.unresolved_count += 1;
+        }
         if entry.pid != 0 && entry.process.is_none() {
             self.unresolved_processes
                 .entry(entry.pid)
@@ -388,15 +395,24 @@ impl CiallogcatApp {
         self.selected = None;
         self.selection.clear();
         self.detail_lines = None;
-        self.unresolved_processes = HashMap::new();
-        for (index, entry) in self.entries.iter().enumerate() {
-            if entry.pid != 0 && entry.process.is_none() {
-                self.unresolved_processes
-                    .entry(entry.pid)
-                    .or_default()
-                    .push(index);
-            }
-        }
+        // Rebase only this capture's unresolved indices. Older retained unknown
+        // rows must not be assigned to a reused PID after reconnect/resume.
+        self.unresolved_processes.retain(|_, indices| {
+            indices.retain_mut(|index| {
+                if *index < remove {
+                    false
+                } else {
+                    *index -= remove;
+                    true
+                }
+            });
+            !indices.is_empty()
+        });
+        self.unresolved_count = self
+            .entries
+            .iter()
+            .filter(|entry| entry.process.is_none())
+            .count();
         self.schedule_filter();
     }
 
@@ -408,6 +424,7 @@ impl CiallogcatApp {
         let mut resolved = Vec::new();
         for (pid, process) in &processes {
             if let Some(indices) = self.unresolved_processes.remove(pid) {
+                self.unresolved_count -= indices.len();
                 resolved.push((indices, Arc::clone(process)));
             }
         }
@@ -469,8 +486,14 @@ impl CiallogcatApp {
                         Err(error) => self.adb_status = error,
                     }
                 }
-                BackendEvent::Processes { serial, result } => {
-                    if self.selected_device.as_deref() != Some(&serial) {
+                BackendEvent::Processes {
+                    serial,
+                    session_id,
+                    result,
+                } => {
+                    if self.selected_device.as_deref() != Some(&serial)
+                        || session_id != self.capture_session_id
+                    {
                         continue;
                     }
                     self.process_query_pending = false;
@@ -541,7 +564,13 @@ impl CiallogcatApp {
         {
             self.process_query_pending = true;
             self.last_process_query = Instant::now();
-            adb::spawn_process_query(adb_path, serial, self.backend_tx.clone(), ctx.clone());
+            adb::spawn_process_query(
+                adb_path,
+                serial,
+                self.capture_session_id,
+                self.backend_tx.clone(),
+                ctx.clone(),
+            );
         }
     }
 
@@ -581,17 +610,20 @@ impl CiallogcatApp {
     }
 
     fn switch_device(&mut self, serial: String, ctx: &egui::Context) {
-        if self.selected_device.as_deref() == Some(&serial) && self.capture_handle.is_some() {
+        if self.selected_device.as_deref() == Some(&serial) {
             return;
         }
         self.stop_capture();
+        let same_history = self.retained_device.as_deref() == Some(&serial);
+        self.retained_device = Some(serial.clone());
         self.selected_device = Some(serial);
         self.package_query_pending = false;
         self.process_query_pending = false;
         self.packages.clear();
         self.processes.clear();
-        self.unresolved_processes.clear();
-        self.clear_logs();
+        if !same_history {
+            self.clear_logs();
+        }
 
         if self.selected_device_available() {
             self.query_packages(ctx);
@@ -613,6 +645,8 @@ impl CiallogcatApp {
         else {
             return;
         };
+        self.processes.clear();
+        self.unresolved_processes.clear();
         self.capture_session_id += 1;
         self.last_capture_error = None;
         self.capture_state = CaptureState::Connecting;
@@ -631,6 +665,7 @@ impl CiallogcatApp {
 
     fn stop_capture(&mut self) {
         self.capture_session_id += 1;
+        self.process_query_pending = false;
         if let Some(mut handle) = self.capture_handle.take() {
             handle.stop();
         }
@@ -690,6 +725,7 @@ impl CiallogcatApp {
         self.selection.clear();
         self.detail_lines = None;
         self.unresolved_processes = HashMap::new();
+        self.unresolved_count = 0;
         self.dropped_entries = 0;
         self.filter_generation += 1;
         self.filter_pending = false;
@@ -1970,3 +2006,6 @@ mod ui_tests {
         assert!(!package_matches_search("com.example.ciallogcat", "other"));
     }
 }
+
+#[cfg(test)]
+mod review_regressions;
