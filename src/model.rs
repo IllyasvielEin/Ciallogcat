@@ -157,10 +157,6 @@ impl LogEntry {
         self.process.as_deref().unwrap_or("—")
     }
 
-    pub fn first_line(&self) -> &str {
-        self.message.lines().next().unwrap_or_default()
-    }
-
     pub fn matches_package(&self, package: &str) -> bool {
         if package.is_empty() {
             return true;
@@ -175,8 +171,16 @@ impl LogEntry {
     }
 
     pub fn copy_text(&self) -> String {
+        let mut text = String::new();
+        self.append_copy_text(&mut text);
+        text
+    }
+
+    pub fn append_copy_text(&self, text: &mut String) {
+        use std::fmt::Write;
         let process = self.process_name();
-        format!(
+        write!(
+            text,
             "{} {:>5} {:>5} {} {:<24} {}: {}",
             self.time,
             self.pid,
@@ -186,6 +190,7 @@ impl LogEntry {
             self.tag,
             self.message
         )
+        .expect("writing to a String cannot fail");
     }
 }
 

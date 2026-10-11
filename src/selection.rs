@@ -64,7 +64,7 @@ impl RowSelection {
             if !text.is_empty() {
                 text.push('\n');
             }
-            text.push_str(&entries[index].copy_text());
+            entries[index].append_copy_text(&mut text);
         }
         text
     }
@@ -106,5 +106,41 @@ mod tests {
         selection.clear();
         assert!(selection.is_empty());
         assert!(selection.copy_text(&entries).is_empty());
+    }
+    #[test]
+    fn direct_copy_format_preserves_original_fields_and_multiline_text() {
+        let mut entries = LogStore::default();
+        let mut expected = Vec::new();
+        for (pid, process, message) in [
+            (7, None, "first\ncontinuation"),
+            (u32::MAX, Some("请求🦀worker"), "a\r\nb\n"),
+            (0, Some("a very long process identity beyond padding"), ""),
+        ] {
+            let mut entry = crate::model::LogEntry::new(
+                "12:34",
+                pid,
+                pid,
+                "标签",
+                crate::model::Level::Info,
+                message,
+            );
+            entry.process = process.map(std::sync::Arc::from);
+            let original = format!(
+                "{} {:>5} {:>5} {} {:<24} {}: {}",
+                entry.time,
+                entry.pid,
+                entry.tid,
+                entry.level.short(),
+                entry.process_name(),
+                entry.tag,
+                entry.message
+            );
+            assert_eq!(entry.copy_text(), original);
+            expected.push(original);
+            entries.push(entry);
+        }
+        let mut selection = RowSelection::default();
+        selection.select_all(&[0, 1, 2]);
+        assert_eq!(selection.copy_text(&entries), expected.join("\n"));
     }
 }

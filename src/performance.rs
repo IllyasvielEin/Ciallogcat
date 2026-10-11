@@ -318,8 +318,7 @@ fn filtering_during_capture_and_trim_keeps_valid_indices() {
     app.schedule_filter();
     app.clear_logs();
     app.append_entry(sample(0, "message"));
-    std::thread::sleep(Duration::from_millis(30));
-    app.poll_filter();
+    settle_worker(&mut app, &ctx, None);
     assert_eq!(app.matches, [0]);
     assert_eq!(app.entries.len(), 1);
 }
@@ -526,4 +525,123 @@ fn query_history_records_finished_input_and_restores_only_query() {
         restored.app_config().filter_history.is_empty(),
         "cleared history must stay cleared"
     );
+}
+
+fn settle_worker(app: &mut CiallogcatApp, ctx: &egui::Context, highlight: Option<&str>) {
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        app.poll_filter();
+        let highlighted = highlight.is_none_or(|text| {
+            app.highlight_matcher
+                .as_ref()
+                .is_some_and(|matcher| matcher.is_match(text))
+        });
+        if !app.filter_pending && highlighted {
+            return;
+        }
+        assert!(Instant::now() < deadline, "background query did not settle");
+        frame(app, ctx, 900.0);
+        std::thread::yield_now();
+    }
+}
+
+#[test]
+fn background_query_keeps_draft_and_active_matchers_separate() {
+    let ctx = egui::Context::default();
+    let mut app = CiallogcatApp::with_config(&ctx, AppConfig::default(), None);
+    app.append_entry(sample(0, "alpha"));
+    app.append_entry(sample(1, "beta"));
+    app.query = "alpha".to_owned();
+    app.schedule_filter();
+    frame(&mut app, &ctx, 900.0);
+    settle_worker(&mut app, &ctx, Some("alpha"));
+    assert_eq!(app.matches, [0]);
+
+    app.query = "beta".to_owned();
+    app.queue_filter();
+    frame(&mut app, &ctx, 900.0);
+    settle_worker(&mut app, &ctx, Some("beta"));
+    assert_eq!(
+        app.active_filter.query, "alpha",
+        "draft must not bypass debounce"
+    );
+    assert_eq!(app.matches, [0]);
+    app.append_entry(sample(2, "alpha"));
+    app.append_entry(sample(3, "beta"));
+    assert_eq!(app.matches, [0, 2], "capture uses the active matcher");
+    assert!(!app.highlight_matcher.as_ref().unwrap().is_match("alpha"));
+
+    app.query.clear();
+    frame(&mut app, &ctx, 900.0);
+    assert!(
+        app.highlight_matcher.is_none(),
+        "empty draft clears highlighting immediately"
+    );
+    assert_eq!(app.active_filter.query, "alpha");
+    app.schedule_filter();
+    settle_worker(&mut app, &ctx, None);
+    assert_eq!(app.matches, [0, 1, 2, 3]);
+}
+
+#[test]
+fn background_query_startup_clear_and_error_recovery_use_exact_generation() {
+    let ctx = egui::Context::default();
+    let config = AppConfig {
+        query: "alpha".to_owned(),
+        ..AppConfig::default()
+    };
+    let mut app = CiallogcatApp::with_config(&ctx, config, None);
+    assert!(
+        app.filter_pending,
+        "startup query is compiled asynchronously"
+    );
+    app.append_entry(sample(0, "beta"));
+    app.append_entry(sample(1, "alpha"));
+    settle_worker(&mut app, &ctx, None);
+    assert_eq!(app.matches, [1]);
+
+    app.use_regex = true;
+    app.query = r"\w{1000}".to_owned();
+    app.schedule_filter();
+    frame(&mut app, &ctx, 900.0);
+    app.query = "beta".to_owned();
+    app.schedule_filter();
+    app.clear_logs(); // invalidates both earlier snapshots while compilation is pending
+    app.append_entry(sample(0, "alpha"));
+    app.append_entry(sample(1, "beta"));
+    frame(&mut app, &ctx, 900.0);
+    settle_worker(&mut app, &ctx, Some("beta"));
+    assert!(app.filter_error.is_none());
+    assert_eq!(app.matches, [1]);
+    app.append_entry(sample(2, "alpha"));
+    app.append_entry(sample(3, "beta"));
+    assert_eq!(app.matches, [1, 3]);
+    assert!(!app.highlight_matcher.as_ref().unwrap().is_match("alpha"));
+}
+
+#[test]
+fn bounded_first_line_matches_original_utf8_and_crlf_edges() {
+    let mut cases = vec![
+        String::new(),
+        "\n".into(),
+        "\r\n".into(),
+        "bare\r".into(),
+        "a\r\nb".into(),
+    ];
+    for length in 2044..=2052 {
+        for suffix in ["\r\nrest", "\nrest", "🦀请求\nrest", "\r", ""] {
+            cases.push(format!("{}{suffix}", "x".repeat(length)));
+        }
+    }
+    cases.push("请求🦀完成\n第二行".repeat(10_000));
+    for text in cases {
+        let expected = preview_message(text.lines().next().unwrap_or_default());
+        assert_eq!(preview_first_line(&text), expected);
+        assert!(preview_first_line(&text).len() <= 2048);
+        let entry = sample(0, &text);
+        assert!(
+            entry.copy_text().ends_with(&text),
+            "preview cannot truncate originals"
+        );
+    }
 }

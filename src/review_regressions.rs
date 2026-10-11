@@ -159,3 +159,28 @@ fn trim_keeps_unknown_count_and_rebases_only_live_unresolved_indices() {
         }
     }
 }
+
+#[test]
+fn invalid_regex_clears_stale_results_and_recovers() {
+    let (_, mut app) = app();
+    app.append_entry(row());
+    assert_eq!(app.matches, [0]);
+    app.selected = Some(0);
+    app.selection.select_all(&app.matches);
+    app.schedule_filter(); // a stale valid generation may still be in flight
+    app.query = "[".to_owned();
+    app.use_regex = true;
+    app.schedule_filter();
+    settle(&mut app); // Invalid expressions are now compiled off the UI thread.
+    assert!(app.matches.is_empty());
+    assert!(app.selected.is_none());
+    assert!(app.selection.is_empty());
+    assert!(app.detail_lines.is_none());
+    settle(&mut app);
+    assert!(app.filter_error.is_some());
+    assert!(app.matches.is_empty());
+    app.query = "FATAL".to_owned();
+    app.schedule_filter();
+    settle(&mut app);
+    assert_eq!(app.matches, [0]);
+}

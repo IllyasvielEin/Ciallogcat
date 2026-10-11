@@ -23,10 +23,10 @@ use eframe::egui::{
     text::LayoutJob,
 };
 use egui_extras::{Column, TableBuilder};
-use filter::{FilterRequest, FilterResult, FilterSpec};
+use filter::{FilterRequest, FilterSpec};
 use log_store::LogStore;
 use model::{Level, LogBuffer, LogEntry, SavedFilter};
-use regex::{Regex, RegexBuilder};
+use regex::Regex;
 
 const MIB: usize = 1024 * 1024;
 const DEVICE_POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -137,7 +137,7 @@ struct CiallogcatApp {
     active_filter: FilterSpec,
     incremental_matcher: Result<Option<Regex>, String>,
     filter_tx: filter::FilterSender,
-    filter_rx: Receiver<FilterResult>,
+    filter_rx: filter::FilterReceiver,
     filter_generation: u64,
     filter_pending: bool,
     filter_dirty_since: Option<Instant>,
@@ -194,8 +194,7 @@ impl CiallogcatApp {
         configure_fonts(ctx);
         configure_style(ctx, config.dark);
 
-        let (filter_result_tx, filter_rx) = mpsc::channel::<FilterResult>();
-        let filter_tx = filter::spawn_filter_worker(filter_result_tx, ctx.clone());
+        let (filter_tx, filter_rx) = filter::spawn_filter_worker(ctx.clone());
 
         let (backend_tx, backend_rx) = mpsc::sync_channel::<BackendEvent>(BACKEND_QUEUE_CAPACITY);
         let active_filter = FilterSpec {
@@ -205,11 +204,11 @@ impl CiallogcatApp {
             regex: config.use_regex,
             case_sensitive: config.case_sensitive,
         };
-        let incremental_matcher = filter::compile_matcher(&active_filter);
+        let incremental_matcher = Ok(None);
         let now = Instant::now();
         let has_adb = adb_path.is_some();
 
-        Self {
+        let mut app = Self {
             entries: Arc::new(LogStore::default()),
             matches: Vec::new(),
             selected: None,
@@ -282,7 +281,11 @@ impl CiallogcatApp {
             save_filter_name: String::new(),
             config_dirty_since: None,
             config_error: None,
+        };
+        if !app.query.is_empty() {
+            app.schedule_filter();
         }
+        app
     }
 
     fn current_filter(&self) -> FilterSpec {
@@ -306,10 +309,6 @@ impl CiallogcatApp {
         self.filter_pending = true;
         self.filter_error = None;
         self.active_filter = self.current_filter();
-        self.incremental_matcher = filter::compile_matcher(&self.active_filter);
-        if let Err(error) = &self.incremental_matcher {
-            self.filter_error = Some(error.clone());
-        }
         self.filter_tx.send(FilterRequest {
             generation: self.filter_generation,
             entries: Arc::clone(&self.entries),
@@ -318,16 +317,31 @@ impl CiallogcatApp {
     }
 
     fn poll_filter(&mut self) {
-        while let Ok(mut result) = self.filter_rx.try_recv() {
+        while let Some(result) = self.filter_rx.take_highlight() {
+            if result.key.0 == self.query
+                && result.key.1 == self.use_regex
+                && result.key.2 == self.case_sensitive
+            {
+                self.highlight_matcher = result.matcher;
+                self.highlight_key = result.key;
+            }
+        }
+        while let Some(mut result) = self.filter_rx.take_filter() {
             if result.generation != self.filter_generation {
                 continue;
             }
             self.filter_pending = false;
             self.filter_elapsed = result.elapsed;
             self.filter_error = result.error;
-            if self.filter_error.is_some() {
+            if let Some(error) = &self.filter_error {
+                self.incremental_matcher = Err(error.clone());
+                self.matches.clear();
+                self.selected = None;
+                self.selection.clear();
+                self.detail_lines = None;
                 continue;
             }
+            self.incremental_matcher = Ok(result.matcher);
 
             if let Ok(matcher) = &self.incremental_matcher {
                 result.matches.extend(
@@ -728,8 +742,16 @@ impl CiallogcatApp {
         self.unresolved_count = 0;
         self.dropped_entries = 0;
         self.filter_generation += 1;
-        self.filter_pending = false;
         self.filter_elapsed = Duration::ZERO;
+        if self.filter_pending {
+            // The active expression is still compiling; do not append with the
+            // previous generation's matcher after invalidating its snapshot.
+            self.filter_tx.send(FilterRequest {
+                generation: self.filter_generation,
+                entries: Arc::clone(&self.entries),
+                spec: self.active_filter.clone(),
+            });
+        }
     }
 
     fn query_packages(&mut self, ctx: &egui::Context) {
@@ -1420,9 +1442,11 @@ impl CiallogcatApp {
             || self.highlight_key.1 != self.use_regex
             || self.highlight_key.2 != self.case_sensitive
         {
-            self.highlight_matcher =
-                compile_highlight_regex(&self.query, self.use_regex, self.case_sensitive);
+            self.highlight_matcher = None;
             self.highlight_key = (self.query.clone(), self.use_regex, self.case_sensitive);
+            if !self.query.is_empty() {
+                self.filter_tx.send_highlight(self.highlight_key.clone());
+            }
         }
         let highlight = self.highlight_matcher.as_ref();
         let selected = self.selected;
@@ -1543,7 +1567,7 @@ impl CiallogcatApp {
                         });
                         row.col(|ui| {
                             let job = highlighted_message(
-                                preview_message(entry.first_line()),
+                                preview_first_line(&entry.message),
                                 highlight,
                                 ui.visuals().text_color(),
                                 dark,
@@ -1835,21 +1859,6 @@ fn configure_fonts(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
-fn compile_highlight_regex(query: &str, use_regex: bool, case_sensitive: bool) -> Option<Regex> {
-    if query.is_empty() {
-        return None;
-    }
-    let pattern = if use_regex {
-        query.to_owned()
-    } else {
-        regex::escape(query)
-    };
-    RegexBuilder::new(&pattern)
-        .case_insensitive(!case_sensitive)
-        .build()
-        .ok()
-}
-
 fn highlighted_message(
     text: &str,
     matcher: Option<&Regex>,
@@ -1907,6 +1916,19 @@ fn preview_message(text: &str) -> &str {
         end -= 1;
     }
     &text[..end]
+}
+
+// Search only the display prefix. A CR immediately before a newline at the
+// byte cap must be stripped exactly as str::lines would strip the full line.
+fn preview_first_line(text: &str) -> &str {
+    let prefix = preview_message(text);
+    let end = prefix.find('\n').unwrap_or(prefix.len());
+    let line = &prefix[..end];
+    if text.as_bytes().get(end) == Some(&b'\n') {
+        line.strip_suffix('\r').unwrap_or(line)
+    } else {
+        line
+    }
 }
 
 fn detail_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
