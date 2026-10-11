@@ -14,7 +14,7 @@ if (Test-Path -LiteralPath $stage) { throw "Package staging directory already ex
 New-Item -ItemType Directory -Path "$stage/assets/fonts", $dist -Force | Out-Null
 $executable = if ($env:RELEASE_PLATFORM -eq 'windows-x86_64') { 'ciallogcat.exe' } else { 'ciallogcat' }
 Copy-Item -LiteralPath "target/release/$executable" -Destination $stage
-Copy-Item -LiteralPath 'README.md', 'LICENSE' -Destination $stage
+Copy-Item -LiteralPath 'README.md', 'README.zh-CN.md', 'LICENSE' -Destination $stage
 # Bundle the usage and maintenance guides with the executable.
 Copy-Item -LiteralPath 'CONTRIBUTING.md' -Destination $stage
 Copy-Item -LiteralPath 'docs' -Destination $stage -Recurse
