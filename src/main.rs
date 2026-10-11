@@ -3,6 +3,7 @@ mod config;
 mod filter;
 mod history;
 mod log_store;
+mod log_table_ui;
 mod model;
 #[cfg(test)]
 mod performance;
@@ -119,10 +120,15 @@ struct CiallogcatApp {
     matches: Vec<usize>,
     selected: Option<usize>,
     selection: selection::RowSelection,
+    log_columns: log_table_ui::LogColumns,
+    focused_log_row: Option<(egui::Id, usize)>,
+    focus_log_selection: bool,
+    visible_log_rows: Vec<(egui::Id, usize)>,
     unresolved_processes: HashMap<u32, Vec<usize>>,
     processes: HashMap<u32, Arc<str>>,
     unresolved_count: usize,
     dropped_entries: usize,
+    log_epoch: u64,
     memory_limit_mib: usize,
     buffers: Vec<LogBuffer>,
     buffer_draft: Vec<LogBuffer>,
@@ -161,6 +167,8 @@ struct CiallogcatApp {
     devices: Vec<DeviceInfo>,
     selected_device: Option<String>,
     retained_device: Option<String>,
+    pending_clear: bool,
+    pending_device: Option<String>,
     device_query_pending: bool,
     package_query_pending: bool,
     process_query_pending: bool,
@@ -181,6 +189,7 @@ struct CiallogcatApp {
     query_history_open: bool,
     show_save_filter: bool,
     save_filter_name: String,
+    save_filter_focused: bool,
     config_dirty_since: Option<Instant>,
     config_error: Option<String>,
 }
@@ -213,10 +222,15 @@ impl CiallogcatApp {
             matches: Vec::new(),
             selected: None,
             selection: selection::RowSelection::default(),
+            log_columns: log_table_ui::LogColumns::default(),
+            focused_log_row: None,
+            focus_log_selection: false,
+            visible_log_rows: Vec::new(),
             unresolved_processes: HashMap::new(),
             processes: HashMap::new(),
             unresolved_count: 0,
             dropped_entries: 0,
+            log_epoch: 0,
             memory_limit_mib: config.memory_limit_mib.clamp(16, 4096),
             buffers: config.buffers.clone(),
             buffer_draft: config.buffers,
@@ -255,6 +269,8 @@ impl CiallogcatApp {
             devices: Vec::new(),
             selected_device: None,
             retained_device: None,
+            pending_clear: false,
+            pending_device: None,
             device_query_pending: false,
             package_query_pending: false,
             process_query_pending: false,
@@ -279,6 +295,7 @@ impl CiallogcatApp {
             query_history_open: false,
             show_save_filter: false,
             save_filter_name: String::new(),
+            save_filter_focused: false,
             config_dirty_since: None,
             config_error: None,
         };
@@ -406,6 +423,8 @@ impl CiallogcatApp {
         }
         self.dropped_entries += remove;
         self.matches = Vec::new();
+        self.focused_log_row = None;
+        self.focus_log_selection = false;
         self.selected = None;
         self.selection.clear();
         self.detail_lines = None;
@@ -624,6 +643,8 @@ impl CiallogcatApp {
     }
 
     fn switch_device(&mut self, serial: String, ctx: &egui::Context) {
+        self.pending_clear = false;
+        self.pending_device = None;
         if self.selected_device.as_deref() == Some(&serial) {
             return;
         }
@@ -693,6 +714,8 @@ impl CiallogcatApp {
     }
 
     fn close_capture(&mut self) {
+        self.pending_clear = false;
+        self.pending_device = None;
         self.stop_capture();
         self.selected_device = None;
         self.packages.clear();
@@ -733,8 +756,12 @@ impl CiallogcatApp {
     }
 
     fn clear_logs(&mut self) {
+        self.log_epoch = self.log_epoch.wrapping_add(1);
+        self.visible_log_rows.clear();
         self.entries = Arc::new(LogStore::default());
         self.matches = Vec::new();
+        self.focused_log_row = None;
+        self.focus_log_selection = false;
         self.selected = None;
         self.selection.clear();
         self.detail_lines = None;
@@ -885,7 +912,7 @@ impl CiallogcatApp {
             .show(root_ui, |ui| {
                 ui.horizontal_centered(|ui| {
                     ui.add_space(6.0);
-                    ui.label(RichText::new("Device").weak());
+                    let device_label = ui.label(RichText::new("Device").weak());
 
                     let selected_label = self
                         .selected_device
@@ -901,29 +928,42 @@ impl CiallogcatApp {
                                 "选择设备".to_owned()
                             }
                         });
-                    egui::ComboBox::from_id_salt("device")
-                        .width(if compact { 130.0 } else { 170.0 })
-                        .truncate()
-                        .selected_text(selected_label)
-                        .show_ui(ui, |ui| {
-                            if self.devices.is_empty() {
-                                ui.add_enabled(false, egui::Button::new("无设备"));
-                            }
-                            for device in &self.devices {
-                                let response = ui.add_enabled(
-                                    device.available(),
-                                    egui::Button::selectable(
-                                        self.selected_device.as_deref() == Some(&device.serial),
-                                        device.display_name(),
-                                    ),
-                                );
-                                if response.clicked() {
-                                    response.request_focus();
-                                    selected_device = Some(device.serial.clone());
-                                    ui.close();
-                                }
-                            }
-                        });
+                    // ComboBox::width is a minimum; constrain its child layout so a
+                    // long model cannot consume the space reserved for filter controls.
+                    let device_width = if compact { 130.0 } else { 170.0 };
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(device_width, 28.0),
+                        Layout::left_to_right(Align::Center),
+                        |ui| {
+                            egui::ComboBox::from_id_salt("device")
+                                .width(device_width)
+                                .truncate()
+                                .selected_text(&selected_label)
+                                .show_ui(ui, |ui| {
+                                    if self.devices.is_empty() {
+                                        ui.add_enabled(false, egui::Button::new("无设备"));
+                                    }
+                                    for device in &self.devices {
+                                        let response = ui.add_enabled(
+                                            device.available(),
+                                            egui::Button::selectable(
+                                                self.selected_device.as_deref()
+                                                    == Some(&device.serial),
+                                                device.display_name(),
+                                            ),
+                                        );
+                                        if response.clicked() {
+                                            response.request_focus();
+                                            selected_device = Some(device.serial.clone());
+                                            ui.close();
+                                        }
+                                    }
+                                })
+                                .response
+                                .labelled_by(device_label.id)
+                                .on_hover_text(&selected_label);
+                        },
+                    );
                     if ui
                         .add_enabled(!self.device_query_pending, egui::Button::new("↻ 刷新"))
                         .on_hover_text("刷新设备")
@@ -939,7 +979,13 @@ impl CiallogcatApp {
                             .font(TextStyle::Monospace)
                             .id(egui::Id::new("package_filter")),
                     );
+                    ctx.accesskit_node_builder(package_response.id, |node| {
+                        node.set_label("Package filter");
+                    });
                     filter_changed |= package_response.changed();
+                    if package_response.gained_focus() {
+                        self.query_history_open = false;
+                    }
                     let mut package_popup_open = self.package_popup_open;
                     if package_response.clicked()
                         || package_response.gained_focus()
@@ -951,7 +997,7 @@ impl CiallogcatApp {
                     egui::Popup::from_response(&package_response)
                         .id(egui::Id::new("package_suggestions"))
                         .open_bool(&mut package_popup_open)
-                        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                        .close_behavior(input_popup_close_behavior(&package_response))
                         .layout(Layout::top_down_justified(Align::Min))
                         .width(320.0)
                         .show(|ui| {
@@ -1016,11 +1062,16 @@ impl CiallogcatApp {
                             .font(TextStyle::Monospace)
                             .id(egui::Id::new("query_shortcut")),
                     );
+                    ctx.accesskit_node_builder(query_response.id, |node| {
+                        node.set_label("Message filter");
+                    });
                     filter_changed |= query_response.changed();
+                    if query_response.gained_focus() {
+                        self.package_popup_open = false;
+                    }
                     self.query_history_pending |= query_response.changed();
-                    if query_response.lost_focus()
-                        || (query_response.has_focus()
-                            && ui.input(|input| input.key_pressed(egui::Key::Enter)))
+                    if query_response.has_focus()
+                        && ui.input(|input| input.key_pressed(egui::Key::Enter))
                     {
                         self.record_query_history();
                     }
@@ -1042,7 +1093,7 @@ impl CiallogcatApp {
                     egui::Popup::from_response(&query_response)
                         .id(egui::Id::new("query_history"))
                         .open_bool(&mut history_open)
-                        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                        .close_behavior(input_popup_close_behavior(&query_response))
                         .layout(Layout::top_down_justified(Align::Min))
                         .width(360.0)
                         .show(|ui| {
@@ -1094,6 +1145,7 @@ impl CiallogcatApp {
                     }
                     if clear_history {
                         self.filter_history.clear();
+                        self.query_history_pending = false;
                         self.mark_config_dirty();
                     }
                     if let Some(query) = history_choice {
@@ -1102,14 +1154,42 @@ impl CiallogcatApp {
                         query_response.surrender_focus();
                     }
                     self.query_history_open = history_open;
-                    filter_changed |= ui
+                    // Keep row identity stable while the user interacts with history.
+                    // Recording on TextEdit blur would insert the pending query between
+                    // a history button's press and release, selecting the wrong row.
+                    if !query_response.has_focus() && !history_open {
+                        self.record_query_history();
+                    }
+                    let regex_response = ui
                         .toggle_value(&mut self.use_regex, ".*")
-                        .on_hover_text("Use a regular expression")
-                        .changed();
-                    filter_changed |= ui
+                        .on_hover_text("Use a regular expression");
+                    regex_response.widget_info(|| {
+                        egui::WidgetInfo::selected(
+                            egui::WidgetType::Checkbox,
+                            regex_response.enabled(),
+                            self.use_regex,
+                            "Use a regular expression",
+                        )
+                    });
+                    if regex_response.clicked() {
+                        regex_response.request_focus();
+                    }
+                    filter_changed |= regex_response.changed();
+                    let case_response = ui
                         .toggle_value(&mut self.case_sensitive, "Aa")
-                        .on_hover_text("Match case")
-                        .changed();
+                        .on_hover_text("Match case");
+                    case_response.widget_info(|| {
+                        egui::WidgetInfo::selected(
+                            egui::WidgetType::Checkbox,
+                            case_response.enabled(),
+                            self.case_sensitive,
+                            "Match case",
+                        )
+                    });
+                    if case_response.clicked() {
+                        case_response.request_focus();
+                    }
+                    filter_changed |= case_response.changed();
 
                     egui::ComboBox::from_id_salt("saved_filters")
                         .width(112.0)
@@ -1144,7 +1224,7 @@ impl CiallogcatApp {
             });
 
         if let Some(serial) = selected_device {
-            self.switch_device(serial, &ctx);
+            self.request_device_switch(serial, &ctx);
         }
         if let Some(saved) = apply_saved {
             self.apply_saved_filter(saved);
@@ -1209,12 +1289,24 @@ impl CiallogcatApp {
                                 [28.0, 28.0],
                                 egui::Button::selectable(
                                     self.min_level == level,
-                                    RichText::new(level.short())
-                                        .strong()
-                                        .color(level.color(self.dark)),
+                                    RichText::new(level.short()).strong().color(
+                                        selected_level_color(
+                                            level,
+                                            self.dark,
+                                            self.min_level == level,
+                                        ),
+                                    ),
                                 ),
                             )
                             .on_hover_text(format!("{level:?} and above"));
+                        response.widget_info(|| {
+                            egui::WidgetInfo::selected(
+                                egui::WidgetType::RadioButton,
+                                response.enabled(),
+                                self.min_level == level,
+                                format!("Minimum level: {level:?} and above"),
+                            )
+                        });
                         if response.clicked() {
                             response.request_focus();
                             self.min_level = level;
@@ -1273,10 +1365,10 @@ impl CiallogcatApp {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if ui
                             .add_enabled(!self.entries.is_empty(), egui::Button::new("Clear"))
-                            .on_hover_text("Clear this view only")
+                            .on_hover_text("清空本地保留日志；确认后无法恢复，不影响设备日志")
                             .clicked()
                         {
-                            self.clear_logs();
+                            self.pending_clear = true;
                         }
                         ui.separator();
                         if ui
@@ -1333,9 +1425,12 @@ impl CiallogcatApp {
     }
 
     fn details(&mut self, root_ui: &mut egui::Ui) {
-        if !self.show_details || self.selected.is_none() {
+        if !self.show_details {
             return;
         }
+        let Some(index) = self.selected else {
+            return;
+        };
         let ctx = root_ui.ctx().clone();
 
         egui::Panel::bottom("details")
@@ -1344,54 +1439,56 @@ impl CiallogcatApp {
             .size_range(84.0..=260.0)
             .show(root_ui, |ui| {
                 ui.add_space(6.0);
-                if let Some(index) = self.selected {
-                    let entry = &self.entries[index];
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("Selected log").strong());
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if ui
-                                .button("Copy")
-                                .on_hover_text("Copy complete log · Ctrl+C")
-                                .clicked()
-                            {
-                                ctx.copy_text(entry.copy_text());
-                            }
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(format!(
-                                        "{}  ·  {}/{}  ·  {}  ·  {}",
-                                        entry.time,
-                                        entry.pid,
-                                        entry.tid,
-                                        entry.process_name(),
-                                        entry.tag
-                                    ))
-                                    .weak()
-                                    .monospace(),
-                                )
-                                .truncate(),
-                            );
-                        });
-                    });
-                    ui.separator();
-                    if entry.message.len() > 16_384 {
-                        if self
-                            .detail_lines
-                            .as_ref()
-                            .is_none_or(|(message, _)| !Arc::ptr_eq(message, &entry.message))
+                let entry = &self.entries[index];
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Selected log").strong());
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui
+                            .button("Copy")
+                            .on_hover_text("Copy complete log · Ctrl+C")
+                            .clicked()
                         {
-                            self.detail_lines =
-                                Some((Arc::clone(&entry.message), detail_ranges(&entry.message)));
+                            ctx.copy_text(entry.copy_text());
                         }
-                        let (message, ranges) = self.detail_lines.as_ref().unwrap();
-                        ui.label(
-                            RichText::new(
-                                "Long message · shown in segments · Copy preserves the original",
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(format!(
+                                    "{}  ·  {}/{}  ·  {}  ·  {}",
+                                    entry.time,
+                                    entry.pid,
+                                    entry.tid,
+                                    preview_message(entry.process_name()),
+                                    preview_message(&entry.tag)
+                                ))
+                                .weak()
+                                .monospace(),
                             )
-                            .weak()
-                            .size(11.0),
+                            .truncate(),
                         );
-                        egui::ScrollArea::both().id_salt("long_details").show_rows(
+                    });
+                });
+                ui.separator();
+                if entry.message.len() > 16_384 {
+                    if self
+                        .detail_lines
+                        .as_ref()
+                        .is_none_or(|(message, _)| !Arc::ptr_eq(message, &entry.message))
+                    {
+                        self.detail_lines =
+                            Some((Arc::clone(&entry.message), detail_ranges(&entry.message)));
+                    }
+                    let (message, ranges) = self.detail_lines.as_ref().unwrap();
+                    ui.label(
+                        RichText::new(
+                            "Long message · shown in segments · Copy preserves the original",
+                        )
+                        .weak()
+                        .size(11.0),
+                    );
+                    egui::ScrollArea::both()
+                        .auto_shrink([false, false])
+                        .id_salt("long_details")
+                        .show_rows(
                             ui,
                             ui.text_style_height(&TextStyle::Monospace),
                             ranges.len(),
@@ -1411,9 +1508,13 @@ impl CiallogcatApp {
                                 }
                             },
                         );
-                    } else {
-                        self.detail_lines = None;
-                        egui::ScrollArea::vertical().show(ui, |ui| {
+                } else {
+                    self.detail_lines = None;
+                    // Fill the resizable panel even for a one-line message;
+                    // content-driven shrinking would undo the user's drag.
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
                             ui.add(
                                 egui::Label::new(
                                     RichText::new(entry.message.as_ref())
@@ -1423,20 +1524,40 @@ impl CiallogcatApp {
                                 .selectable(true),
                             );
                         });
-                    }
-                } else {
-                    ui.centered_and_justified(|ui| {
-                        ui.label(
-                            RichText::new("Select a row to inspect and copy the full message")
-                                .weak(),
-                        );
-                    });
                 }
             });
     }
 
     fn log_table(&mut self, root_ui: &mut egui::Ui) {
         let ctx = root_ui.ctx().clone();
+        // A valid action can arrive with new capture rows. Pause before the
+        // ScrollArea schedules its tail offset, not only after focus resolves.
+        // The cache contains only last frame's viewport, never the whole store.
+        let accessible_browsing = ctx.input(|input| {
+            input.events.iter().any(|event| {
+                let egui::Event::AccessKitActionRequest(request) = event else {
+                    return false;
+                };
+                request.target_tree == egui::accesskit::TreeId::ROOT
+                    && matches!(
+                        request.action,
+                        egui::accesskit::Action::Focus | egui::accesskit::Action::Click
+                    )
+                    && self.visible_log_rows.iter().any(|(id, absolute)| {
+                        id.accesskit_id() == request.target_node
+                            && absolute
+                                .checked_sub(self.dropped_entries)
+                                .is_some_and(|index| self.matches.binary_search(&index).is_ok())
+                    })
+            })
+        });
+        if accessible_browsing {
+            self.follow_logs = false;
+            self.scroll_to_bottom = false;
+            self.scroll_to_selected = false;
+            self.focus_log_selection = false;
+        }
+        let mut visible_log_rows = Vec::new();
         let compact = root_ui.available_width() < 1050.0;
         if self.highlight_key.0 != self.query
             || self.highlight_key.1 != self.use_regex
@@ -1457,8 +1578,15 @@ impl CiallogcatApp {
         let matches = &self.matches;
         let mut clicked_row = None;
         let mut filter_process = None;
+        let mut focus_selected = self.focus_log_selection && !ctx.text_edit_focused();
+        let mut focused_selected = false;
+        let mut focused_log_row = None;
+        let mut row_focus_gained = false;
 
         egui::CentralPanel::default().show(root_ui, |ui| {
+            // Panel insertion (for example details opening) must not change
+            // table/row identity or invalidate a native accessibility focus event.
+            ui.scope_builder(egui::UiBuilder::new().id(egui::Id::new("log_table_content")), |ui| {
             ui.style_mut().interaction.selectable_labels = false;
             // Stop before laying out rows: a press and release can span many
             // capture updates, so waiting for clicked() lets the target move.
@@ -1467,6 +1595,7 @@ impl CiallogcatApp {
                     && (input.pointer.any_pressed() || input.smooth_scroll_delta.y > 0.0)
             });
             if browsing {
+                focus_selected = false;
                 self.follow_logs = false;
                 self.scroll_to_bottom = false;
                 self.scroll_to_selected = false;
@@ -1491,20 +1620,41 @@ impl CiallogcatApp {
                 });
                 return;
             }
+            let table_id = ui.id().with(egui::IdSalt::new("log_table"));
+            let table_rect = ui.max_rect();
+            let table_clip = ui.clip_rect();
+            let focus_stroke = egui::Stroke::new(1.0, ui.visuals().text_color());
+            let table_node = ui.unique_id();
+            ctx.accesskit_node_builder(table_node, |node| {
+                node.set_role(egui::accesskit::Role::Table);
+                node.set_label("Filtered logs");
+                node.set_row_count(matches.len() + 1);
+                node.set_column_count(6);
+                node.set_multiselectable();
+                node.set_description("Use arrow keys to select logs. Select a row for complete details; Copy full log includes the complete message.");
+            });
+            let reset_columns = self.log_columns.prepare(compact);
+            let widths = self.log_columns.widths(compact);
+            let mut painted_widths = [0.0; 2];
+            let mut header_ids = [egui::Id::NULL; 6];
             let mut table = TableBuilder::new(ui)
+                .id_salt("log_table")
                 .striped(true)
                 .resizable(true)
                 .cell_layout(Layout::left_to_right(Align::Center))
                 .column(Column::exact(145.0))
                 .column(Column::exact(32.0))
                 .column(Column::exact(90.0))
-                .column(Column::initial(if compact { 140.0 } else { 210.0 }).at_least(100.0))
-                .column(Column::initial(if compact { 110.0 } else { 165.0 }).at_least(80.0))
+                .column(Column::initial(widths[0]).at_least(100.0))
+                .column(Column::initial(widths[1]).at_least(80.0))
                 .column(Column::remainder().at_least(180.0))
                 .min_scrolled_height(0.0)
-                .sense(egui::Sense::click())
+                .sense(egui::Sense::CLICK)
                 .animate_scrolling(false)
                 .stick_to_bottom(self.follow_logs);
+            if reset_columns {
+                table.reset();
+            }
             if self.scroll_to_bottom && !matches.is_empty() {
                 table = table.scroll_to_row(matches.len() - 1, Some(Align::BOTTOM));
             } else if self.scroll_to_selected
@@ -1515,9 +1665,24 @@ impl CiallogcatApp {
 
             table
                 .header(30.0, |mut header| {
-                    for title in ["TIME", "LV", "PID / TID", "PROCESS", "TAG", "MESSAGE"] {
+                    let mut header_row = egui::Id::NULL;
+                    for (column, title) in log_table_ui::HEADERS.iter().enumerate() {
                         header.col(|ui| {
-                            ui.label(RichText::new(title).weak().size(11.0).strong());
+                            if column == 0 {
+                                header_row = ui.unique_id();
+                                ctx.accesskit_node_builder(header_row, |node| {
+                                    node.set_role(egui::accesskit::Role::Row);
+                                    node.set_row_index(0);
+                                });
+                            }
+                            if (3..=4).contains(&column) {
+                                painted_widths[column - 3] = ui.max_rect().width();
+                            }
+                            header_ids[column] = log_table_ui::cell(
+                                ui, header_row, 0, column, title, None, |ui| {
+                                    ui.label(RichText::new(*title).weak().size(11.0).strong());
+                                },
+                            );
                         });
                     }
                 })
@@ -1526,59 +1691,83 @@ impl CiallogcatApp {
                         let match_index = row.index();
                         let entry_index = matches[match_index];
                         let entry = &entries[entry_index];
-                        row.set_selected(selection.contains(entry_index));
+                        let is_selected = selection.contains(entry_index);
+                        row.set_selected(is_selected);
 
-                        row.col(|ui| {
-                            ui.label(RichText::new(entry.time.as_ref()).monospace().size(12.0));
-                        });
-                        row.col(|ui| {
-                            ui.label(
-                                RichText::new(entry.level.short())
-                                    .monospace()
-                                    .strong()
-                                    .color(entry.level.color(dark)),
-                            );
-                        });
-                        row.col(|ui| {
-                            ui.label(
-                                RichText::new(format!("{} / {}", entry.pid, entry.tid))
-                                    .monospace()
-                                    .size(12.0),
-                            );
-                        });
-                        row.col(|ui| {
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(entry.process_name()).monospace().size(12.0),
-                                )
-                                .truncate(),
-                            );
-                        });
-                        row.col(|ui| {
-                            ui.add(
-                                egui::Label::new(
-                                    RichText::new(entry.tag.as_ref())
-                                        .monospace()
-                                        .size(12.0)
-                                        .color(entry.level.color(dark)),
-                                )
-                                .truncate(),
-                            );
-                        });
-                        row.col(|ui| {
-                            let job = highlighted_message(
-                                preview_first_line(&entry.message),
-                                highlight,
-                                ui.visuals().text_color(),
-                                dark,
-                            );
-                            ui.add(egui::Label::new(job).truncate());
-                        });
+                        let mut row_id = egui::Id::NULL;
+                        let mut semantic_response = None;
+                        let pid_tid = format!("{} / {}", entry.pid, entry.tid);
+                        let values = [entry.time.as_ref(), entry.level.short(), &pid_tid,
+                            preview_message(entry.process_name()), preview_message(entry.tag.as_ref()),
+                            preview_first_line(&entry.message)];
+                        for (column, value) in values.iter().enumerate() {
+                            row.col(|ui| {
+                                if column == 0 {
+                                    let absolute = self.dropped_entries + entry_index;
+                                    let identity = egui::Id::new(("log_row", self.log_epoch, absolute));
+                                    visible_log_rows.push((identity, absolute));
+                                    let response = log_table_ui::row_response(ui, identity, table_rect, table_clip);
+                                    row_id = response.id;
+                                    semantic_response = Some(response);
+                                    ctx.accesskit_node_builder(row_id, |node| {
+                                        node.set_role(egui::accesskit::Role::Row);
+                                        node.set_row_index(match_index + 1);
+                                    });
+                                }
+                                log_table_ui::cell(ui, row_id, match_index + 1, column, value,
+                                    Some(header_ids[column]), |ui| {
+                                        if column == 5 {
+                                            let job = highlighted_message(value, highlight, ui.visuals().text_color(), dark);
+                                            ui.add(egui::Label::new(job).truncate());
+                                        } else {
+                                            let mut text = RichText::new(*value).monospace().size(12.0);
+                                            if column == 1 || column == 4 {
+                                                text = text.color(selected_level_color(entry.level, dark, is_selected));
+                                            }
+                                            if column == 1 { text = RichText::new(*value).monospace().strong().color(selected_level_color(entry.level, dark, is_selected)); }
+                                            ui.add(egui::Label::new(text).truncate());
+                                        }
+                                    });
+                            });
+                        }
 
-                        let response = row.response();
+                        let semantic_response = semantic_response.expect("first column creates row");
+                        let row_bounds = semantic_response.rect;
+                        let response = semantic_response | row.response();
+                        if focus_selected && selected == Some(entry_index) {
+                            response.request_focus();
+                            focused_selected = true;
+                        }
+                        let truncated = values[3].len() < entry.process_name().len()
+                            || values[4].len() < entry.tag.len()
+                            || values[5].len() < entry.message.len();
+                        response.widget_info(|| egui::WidgetInfo::selected(
+                            egui::WidgetType::SelectableLabel, true, is_selected,
+                            format!("Log row {}. Time {}. Level {:?}. PID / TID {}. Process {}. Tag {}. Message {}{}",
+                                match_index + 1, values[0], entry.level, values[2], values[3], values[4], values[5],
+                                if truncated { ". Preview truncated. Select for full details or use Copy full log." } else { "" }),
+                        ));
+                        ctx.accesskit_node_builder(row_id, |node| {
+                            node.set_role(egui::accesskit::Role::Row);
+                            node.set_row_index(match_index + 1);
+                            node.set_selected(is_selected);
+                            node.set_bounds(egui::accesskit::Rect {
+                                x0: row_bounds.min.x as f64, y0: row_bounds.min.y as f64,
+                                x1: row_bounds.max.x as f64, y1: row_bounds.max.y as f64,
+                            });
+                        });
                         if response.clicked() {
                             response.request_focus();
                             clicked_row = Some((entry_index, ctx.input(|input| input.modifiers)));
+                        }
+                        if response.has_focus() {
+                            row_focus_gained |= response.gained_focus();
+                            focused_log_row = Some((response.id, entry_index));
+                            if !is_selected {
+                                ctx.layer_painter(response.layer_id)
+                                    .with_clip_rect(response.interact_rect.intersect(table_clip))
+                                    .rect_stroke(row_bounds.shrink(0.5), 0.0, focus_stroke, egui::StrokeKind::Inside);
+                            }
                         }
                         response.context_menu(|ui| {
                             if selection.contains(entry_index) && ui.button("Copy selected logs").clicked() {
@@ -1597,8 +1786,18 @@ impl CiallogcatApp {
                         });
                     });
                 });
+            self.log_columns.finish(&ctx, table_id, painted_widths);
+            });
         });
 
+        self.visible_log_rows = visible_log_rows;
+        if row_focus_gained {
+            // Assistive/Tab browsing pauses the moving tail just like pointer
+            // browsing. Do not pause on every focused frame: Ctrl+End resumes.
+            self.follow_logs = false;
+        }
+        self.focused_log_row = focused_log_row;
+        self.focus_log_selection = focus_selected && !focused_selected && self.selected.is_some();
         self.scroll_to_bottom = false;
         self.scroll_to_selected = false;
         if let Some((index, modifiers)) = clicked_row {
@@ -1624,7 +1823,11 @@ impl CiallogcatApp {
                             .color(self.capture_state.color())
                             .size(10.0),
                     );
-                    ui.label(RichText::new(self.capture_state.label()).weak().size(11.0));
+                    if let CaptureState::Error(error) = &self.capture_state {
+                        Self::status_diagnostic(ui, "capture_diagnostic", "采集错误", error);
+                    } else {
+                        ui.label(RichText::new(self.capture_state.label()).weak().size(11.0));
+                    }
                     ui.separator();
                     let dropped = if self.dropped_entries > 0 {
                         format!(" · {} dropped", format_count(self.dropped_entries))
@@ -1641,19 +1844,122 @@ impl CiallogcatApp {
                         .monospace()
                         .size(11.0),
                     );
+                    // Independent compact indicators keep one long diagnostic from
+                    // hiding counts or an unrelated settings/query failure.
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if let Some(error) = self.config_error.as_ref() {
-                            ui.label(RichText::new(error).color(Color32::from_rgb(235, 91, 101)));
-                        } else if !self.adb_status.is_empty() {
-                            ui.label(RichText::new(&self.adb_status).weak().size(11.0));
+                            Self::status_diagnostic(
+                                ui,
+                                "settings_diagnostic",
+                                "设置保存失败",
+                                error,
+                            );
+                        }
+                        if !self.adb_status.is_empty() {
+                            Self::status_diagnostic(
+                                ui,
+                                "adb_diagnostic",
+                                "ADB 查询错误",
+                                &self.adb_status,
+                            );
                         }
                     });
                 });
             });
     }
 
+    fn status_diagnostic(ui: &mut egui::Ui, id: &'static str, label: &str, diagnostic: &str) {
+        ui.push_id(id, |ui| {
+            let response = ui.small_button(label).on_hover_text("查看并复制完整诊断");
+            if response.clicked() {
+                response.request_focus();
+            }
+            egui::Popup::from_toggle_button_response(&response)
+                .id(egui::Id::new(id))
+                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                .width(520.0)
+                .show(|ui| {
+                    ui.set_max_width(520.0);
+                    ui.label(RichText::new(label).strong());
+                    if ui.button("Copy diagnostic").clicked() {
+                        ui.ctx().copy_text(diagnostic.to_owned());
+                    }
+                    ui.separator();
+                    egui::ScrollArea::vertical()
+                        .max_height(260.0)
+                        .show(ui, |ui| {
+                            ui.add(egui::Label::new(diagnostic).wrap().selectable(true));
+                        });
+                });
+        });
+    }
+
+    fn request_device_switch(&mut self, serial: String, ctx: &egui::Context) {
+        if !self.entries.is_empty() && self.retained_device.as_deref() != Some(&serial) {
+            self.pending_device = Some(serial);
+        } else {
+            self.switch_device(serial, ctx);
+        }
+    }
+
+    fn clear_confirmation(&mut self, ctx: &egui::Context) {
+        if !self.pending_clear && self.pending_device.is_none() {
+            return;
+        }
+        let mut confirm = false;
+        let mut cancel =
+            ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+        let response = egui::Modal::new(egui::Id::new("clear_logs_confirmation")).show(ctx, |ui| {
+            ui.heading("清空本地保留日志？");
+            if let Some(serial) = &self.pending_device {
+                ui.label(format!("切换到 {serial} 会清空当前本地保留日志。"));
+            } else {
+                ui.label("清空所有本地保留日志，确认后无法恢复。采集状态不变。");
+            }
+            ui.label("不会清空设备上的日志，也不会重新补回这些历史记录。");
+            ui.horizontal(|ui| {
+                cancel |= ui.button("Cancel").clicked();
+                confirm = ui.button("清空并继续").clicked();
+            });
+        });
+        if cancel || response.should_close() {
+            self.pending_clear = false;
+            self.pending_device = None;
+        } else if confirm {
+            self.pending_clear = false;
+            if let Some(serial) = self.pending_device.take() {
+                self.switch_device(serial, ctx);
+            } else {
+                self.clear_logs();
+            }
+        }
+    }
+
+    fn filter_notice(&mut self, root_ui: &mut egui::Ui) {
+        if self.package.trim().is_empty() || self.unresolved_count == 0 {
+            return;
+        }
+        egui::Panel::top("unresolved_notice").show(root_ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(format!(
+                    "{} 条日志进程未归属，包名筛选会隐藏它们（可能包含崩溃）。",
+                    self.unresolved_count
+                ));
+                if ui.button("清除包名限制以查看").clicked() {
+                    self.package.clear();
+                    self.schedule_filter();
+                    self.mark_config_dirty();
+                }
+            });
+        });
+    }
+
     fn shortcuts(&mut self, ctx: &egui::Context) {
-        if self.show_save_filter || ctx.current_pass_index() != 0 {
+        if self.show_save_filter
+            || self.pending_clear
+            || self.pending_device.is_some()
+            || ctx.current_pass_index() != 0
+        {
             return;
         }
         let text_focused = ctx.text_edit_focused();
@@ -1662,11 +1968,19 @@ impl CiallogcatApp {
                 && ctx
                     .input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Slash)))
         {
+            egui::Popup::close_all(ctx);
+            self.package_popup_open = false;
+            self.query_history_open = true;
             ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("query_shortcut")));
             return;
         }
         if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+            // Escape dismisses the active input popup/menu before touching rows.
+            // open_bool popups are not included in Popup::is_any_open.
             if text_focused
+                || self.query_history_open
+                || self.package_popup_open
+                || egui::Popup::is_any_open(ctx)
                 || ctx.memory(|memory| {
                     memory.had_focus_last_frame(egui::Id::new("query_shortcut"))
                         || memory.had_focus_last_frame(egui::Id::new("package_filter"))
@@ -1678,13 +1992,18 @@ impl CiallogcatApp {
                 });
                 self.package_popup_open = false;
                 self.query_history_open = false;
+                egui::Popup::close_all(ctx);
             } else {
                 self.selected = None;
                 self.selection.clear();
             }
             return;
         }
-        if text_focused || self.package_popup_open || egui::Popup::is_any_open(ctx) {
+        if text_focused
+            || self.query_history_open
+            || self.package_popup_open
+            || egui::Popup::is_any_open(ctx)
+        {
             return;
         }
         if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::End)) {
@@ -1707,18 +2026,37 @@ impl CiallogcatApp {
             let extend = ctx.input_mut(|input| input.consume_key(egui::Modifiers::SHIFT, key));
             if extend || ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, key)) {
                 self.follow_logs = false;
-                self.selected = navigated_selection(&self.matches, self.selected, key);
+                // This shortcut owns row navigation; egui must not also move
+                // directional focus at end-of-pass after we focus the target.
+                ctx.memory_mut(|memory| memory.move_focus(egui::FocusDirection::None));
+                let origin = self
+                    .focused_log_row
+                    .filter(|(id, index)| {
+                        ctx.memory(|memory| memory.has_focus(*id))
+                            && self.matches.binary_search(index).is_ok()
+                    })
+                    .map(|(_, index)| index)
+                    .or(self.selected);
+                self.selected = navigated_selection(&self.matches, origin, key);
                 if let Some(index) = self.selected {
                     self.selection.select(&self.matches, index, extend, false);
                 }
                 self.scroll_to_selected = true;
+                self.focus_log_selection = self.selected.is_some();
                 break;
             }
         }
     }
 
     fn copy_shortcut(&self, ctx: &egui::Context) {
-        if self.show_save_filter || ctx.text_edit_focused() || egui::Popup::is_any_open(ctx) {
+        if self.show_save_filter
+            || self.pending_clear
+            || self.pending_device.is_some()
+            || ctx.text_edit_focused()
+            || self.query_history_open
+            || self.package_popup_open
+            || egui::Popup::is_any_open(ctx)
+        {
             return;
         }
         // Native integrations translate Ctrl+C into Event::Copy. Let selectable
@@ -1737,44 +2075,58 @@ impl CiallogcatApp {
     }
 
     fn dialogs(&mut self, ctx: &egui::Context) {
+        if self.pending_clear || self.pending_device.is_some() {
+            self.show_save_filter = false;
+            self.save_filter_focused = false;
+            self.clear_confirmation(ctx);
+            return;
+        }
         if self.show_save_filter {
-            let mut open = true;
+            if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+                self.show_save_filter = false;
+                self.save_filter_focused = false;
+                return;
+            }
             let mut save = false;
             let mut cancel = false;
-            egui::Window::new("Save filter")
-                .open(&mut open)
-                .collapsible(false)
-                .resizable(false)
-                .show(ctx, |ui| {
-                    ui.label("Name");
-                    let response = ui.add_sized(
-                        [320.0, 28.0],
-                        egui::TextEdit::singleline(&mut self.save_filter_name)
-                            .hint_text("e.g. Network failures"),
-                    );
+            let modal = egui::Modal::new(egui::Id::new("save_filter_dialog")).show(ctx, |ui| {
+                ui.heading("Save filter");
+                ui.label("Name");
+                let response = ui.add_sized(
+                    [320.0, 28.0],
+                    egui::TextEdit::singleline(&mut self.save_filter_name)
+                        .id(egui::Id::new("save_filter_name"))
+                        .hint_text("e.g. Network failures"),
+                );
+                if !self.save_filter_focused {
                     response.request_focus();
-                    ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        if ui
-                            .add_enabled(
-                                !self.save_filter_name.trim().is_empty(),
-                                egui::Button::new("Save"),
-                            )
-                            .clicked()
-                            || (response.lost_focus()
-                                && ui.input(|input| input.key_pressed(egui::Key::Enter)))
-                        {
-                            save = true;
-                        }
-                        if ui.button("Cancel").clicked() {
-                            cancel = true;
-                        }
-                    });
+                    self.save_filter_focused = true;
+                }
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(
+                            !self.save_filter_name.trim().is_empty(),
+                            egui::Button::new("Save"),
+                        )
+                        .clicked()
+                        || (response.lost_focus()
+                            && ui.input(|input| input.key_pressed(egui::Key::Enter)))
+                    {
+                        save = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
                 });
-            self.show_save_filter = open && !cancel;
+            });
+            self.show_save_filter = !modal.should_close() && !cancel;
             if save {
                 self.save_current_filter();
             }
+        }
+        if !self.show_save_filter {
+            self.save_filter_focused = false;
         }
     }
 }
@@ -1792,6 +2144,7 @@ impl eframe::App for CiallogcatApp {
         self.shortcuts(&ctx);
 
         self.toolbar(root_ui);
+        self.filter_notice(root_ui);
         self.status_bar(root_ui);
         self.details(root_ui);
         self.log_table(root_ui);
@@ -1806,6 +2159,26 @@ impl Drop for CiallogcatApp {
         self.stop_capture();
         #[cfg(not(test))]
         let _ = self.app_config().save();
+    }
+}
+
+// TextEdit gains focus on press, before a click completes on release. Treat the
+// anchor click as part of its popup, or egui dismisses the newly opened popup as
+// an outside click on the release frame. Genuine outside clicks still dismiss it.
+fn input_popup_close_behavior(response: &egui::Response) -> egui::PopupCloseBehavior {
+    if response.clicked() {
+        egui::PopupCloseBehavior::IgnoreClicks
+    } else {
+        egui::PopupCloseBehavior::CloseOnClickOutside
+    }
+}
+
+// Neutral selected text preserves contrast while the severity letter remains explicit.
+fn selected_level_color(level: Level, dark: bool, selected: bool) -> Color32 {
+    if selected {
+        if dark { Color32::WHITE } else { Color32::BLACK }
+    } else {
+        level.color(dark)
     }
 }
 
@@ -2031,3 +2404,15 @@ mod ui_tests {
 
 #[cfg(test)]
 mod review_regressions;
+
+#[cfg(test)]
+mod popup_regressions;
+
+#[cfg(test)]
+mod ui_test_support;
+
+#[cfg(test)]
+mod ui_audit_regressions;
+
+#[cfg(test)]
+mod log_table_regressions;
