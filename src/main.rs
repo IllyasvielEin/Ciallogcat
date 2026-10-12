@@ -1,5 +1,6 @@
 mod adb;
 mod config;
+mod copy;
 mod filter;
 mod history;
 mod log_store;
@@ -38,6 +39,28 @@ const APP_FONT_NAME: &str = "Cascadia Next SC NF";
 const BACKEND_QUEUE_CAPACITY: usize = 4096;
 const BACKEND_FRAME_BUDGET: Duration = Duration::from_millis(4);
 const BACKEND_EVENTS_PER_FRAME: usize = 2048;
+const FILTER_CATCHUP_ROWS: usize = 2048;
+const FILTER_CATCHUP_BYTES: usize = 2 * MIB;
+const FILTER_CATCHUP_BUDGET: Duration = Duration::from_millis(2);
+
+#[derive(Clone, Copy)]
+struct FilterProgress {
+    generation: u64,
+    log_epoch: u64,
+    next_absolute: usize,
+}
+
+#[derive(Clone, Copy)]
+enum CopyTarget {
+    Selection,
+    Row(usize),
+}
+
+fn memory_budget_bytes(mib: usize) -> usize {
+    (mib as u64)
+        .saturating_mul(MIB as u64)
+        .min(usize::MAX as u64) as usize
+}
 
 fn main() -> eframe::Result {
     let mut options = eframe::NativeOptions {
@@ -130,6 +153,11 @@ struct CiallogcatApp {
     dropped_entries: usize,
     log_epoch: u64,
     memory_limit_mib: usize,
+    memory_limit_draft: Option<usize>,
+    copy_notice: Option<String>,
+    table_scroll_offset: f32,
+    table_row_stride: f32,
+    restore_scroll_offset: Option<f32>,
     buffers: Vec<LogBuffer>,
     buffer_draft: Vec<LogBuffer>,
 
@@ -146,6 +174,7 @@ struct CiallogcatApp {
     filter_rx: filter::FilterReceiver,
     filter_generation: u64,
     filter_pending: bool,
+    filter_progress: Option<FilterProgress>,
     filter_dirty_since: Option<Instant>,
     filter_error: Option<String>,
     filter_elapsed: Duration,
@@ -232,6 +261,11 @@ impl CiallogcatApp {
             dropped_entries: 0,
             log_epoch: 0,
             memory_limit_mib: config.memory_limit_mib.clamp(16, 4096),
+            memory_limit_draft: None,
+            copy_notice: None,
+            table_scroll_offset: 0.0,
+            table_row_stride: 0.0,
+            restore_scroll_offset: None,
             buffers: config.buffers.clone(),
             buffer_draft: config.buffers,
 
@@ -248,6 +282,11 @@ impl CiallogcatApp {
             filter_rx,
             filter_generation: 0,
             filter_pending: false,
+            filter_progress: Some(FilterProgress {
+                generation: 0,
+                log_epoch: 0,
+                next_absolute: 0,
+            }),
             filter_dirty_since: None,
             filter_error: None,
             filter_elapsed: Duration::ZERO,
@@ -322,15 +361,122 @@ impl CiallogcatApp {
 
     fn schedule_filter(&mut self) {
         self.filter_dirty_since = None;
-        self.filter_generation += 1;
-        self.filter_pending = true;
-        self.filter_error = None;
         self.active_filter = self.current_filter();
+        self.restart_filter_snapshot();
+    }
+
+    fn restart_filter_snapshot(&mut self) {
+        self.filter_generation = self.filter_generation.wrapping_add(1);
+        self.filter_pending = true;
+        self.filter_progress = None;
+        self.filter_error = None;
         self.filter_tx.send(FilterRequest {
             generation: self.filter_generation,
+            log_epoch: self.log_epoch,
+            snapshot_base: self.dropped_entries,
             entries: Arc::clone(&self.entries),
             spec: self.active_filter.clone(),
         });
+    }
+
+    fn prune_classified_selection(&mut self, range: std::ops::Range<usize>) {
+        self.selection
+            .retain_classified(&self.matches, range.clone());
+        if self.selected.is_some_and(|index| {
+            range.contains(&index) && self.matches.binary_search(&index).is_err()
+        }) {
+            self.selected = None;
+            self.detail_lines = None;
+        }
+        if self.focused_log_row.is_some_and(|(_, index)| {
+            range.contains(&index) && self.matches.binary_search(&index).is_err()
+        }) {
+            self.focused_log_row = None;
+        }
+    }
+
+    fn accept_filter_result(&mut self, mut result: filter::FilterResult) {
+        if result.generation != self.filter_generation || result.log_epoch != self.log_epoch {
+            return;
+        }
+        let Some(removed) = self.dropped_entries.checked_sub(result.snapshot_base) else {
+            return;
+        };
+        let Some(scanned_end) = result.snapshot_base.checked_add(result.processed_len) else {
+            return;
+        };
+        self.filter_elapsed = result.elapsed;
+        self.filter_error = result.error;
+        if let Some(error) = &self.filter_error {
+            self.incremental_matcher = Err(error.clone());
+            self.matches.clear();
+            self.selected = None;
+            self.selection.clear();
+            self.detail_lines = None;
+            self.filter_pending = false;
+            self.filter_progress = None;
+            return;
+        }
+        self.incremental_matcher = Ok(result.matcher);
+        result.matches.retain_mut(|index| {
+            if let Some(rebased) = index
+                .checked_sub(removed)
+                .filter(|index| *index < self.entries.len())
+            {
+                *index = rebased;
+                true
+            } else {
+                false
+            }
+        });
+        self.matches = result.matches;
+        let next_absolute = scanned_end
+            .max(self.dropped_entries)
+            .min(self.dropped_entries + self.entries.len());
+        self.filter_progress = Some(FilterProgress {
+            generation: self.filter_generation,
+            log_epoch: self.log_epoch,
+            next_absolute,
+        });
+        self.prune_classified_selection(0..next_absolute - self.dropped_entries);
+        self.filter_pending = next_absolute < self.dropped_entries + self.entries.len();
+    }
+
+    fn advance_filter_catchup(&mut self, max_rows: usize, max_bytes: usize, budget: Duration) {
+        let Some(mut progress) = self.filter_progress else {
+            return;
+        };
+        if progress.generation != self.filter_generation
+            || progress.log_epoch != self.log_epoch
+            || !self.filter_pending
+        {
+            return;
+        }
+        progress.next_absolute = progress.next_absolute.max(self.dropped_entries);
+        let start = progress.next_absolute - self.dropped_entries;
+        let end = self.entries.len().min(start.saturating_add(max_rows));
+        let started = Instant::now();
+        let mut bytes = 0usize;
+        let mut next = start;
+        if let Ok(matcher) = &self.incremental_matcher {
+            while next < end {
+                // Direct indexing is O(1): repeating iter().skip(cursor) here
+                // would rescan the prefix and starve a long moving tail.
+                let entry = &self.entries[next];
+                if filter::entry_matches(entry, &self.active_filter, matcher.as_ref()) {
+                    self.matches.push(next);
+                }
+                bytes = bytes.saturating_add(entry.payload_bytes());
+                next += 1;
+                if bytes >= max_bytes || started.elapsed() >= budget {
+                    break;
+                }
+            }
+        }
+        progress.next_absolute = self.dropped_entries + next;
+        self.filter_progress = Some(progress);
+        self.prune_classified_selection(start..next);
+        self.filter_pending = next < self.entries.len();
     }
 
     fn poll_filter(&mut self) {
@@ -343,44 +489,73 @@ impl CiallogcatApp {
                 self.highlight_key = result.key;
             }
         }
-        while let Some(mut result) = self.filter_rx.take_filter() {
-            if result.generation != self.filter_generation {
-                continue;
-            }
-            self.filter_pending = false;
-            self.filter_elapsed = result.elapsed;
-            self.filter_error = result.error;
-            if let Some(error) = &self.filter_error {
-                self.incremental_matcher = Err(error.clone());
-                self.matches.clear();
-                self.selected = None;
-                self.selection.clear();
-                self.detail_lines = None;
-                continue;
-            }
-            self.incremental_matcher = Ok(result.matcher);
+        while let Some(result) = self.filter_rx.take_filter() {
+            self.accept_filter_result(result);
+        }
+        self.advance_filter_catchup(
+            FILTER_CATCHUP_ROWS,
+            FILTER_CATCHUP_BYTES,
+            FILTER_CATCHUP_BUDGET,
+        );
+    }
 
-            if let Ok(matcher) = &self.incremental_matcher {
-                result.matches.extend(
-                    self.entries
-                        .iter()
-                        .enumerate()
-                        .skip(result.processed_len)
-                        .filter_map(|(index, entry)| {
-                            filter::entry_matches(entry, &self.active_filter, matcher.as_ref())
-                                .then_some(index)
-                        }),
-                );
+    fn classification_pending(&self, index: usize) -> bool {
+        self.filter_progress.is_none_or(|progress| {
+            progress.generation != self.filter_generation
+                || progress.log_epoch != self.log_epoch
+                || self.dropped_entries + index >= progress.next_absolute
+        })
+    }
+
+    fn copy_logs(&mut self, ctx: &egui::Context, target: CopyTarget) {
+        let last = match target {
+            CopyTarget::Selection => self.selection.last(),
+            CopyTarget::Row(index) => Some(index),
+        };
+        if last.is_some_and(|index| self.classification_pending(index)) {
+            self.copy_notice = Some("Selection is still being checked. Copy again when filtering catches up; nothing was copied.".to_owned());
+            return;
+        }
+        let result = match target {
+            CopyTarget::Selection => copy::build_copy(
+                &self.entries,
+                self.selection.indices(),
+                copy::MAX_COPY_BYTES,
+            ),
+            CopyTarget::Row(index) => {
+                copy::build_copy(&self.entries, std::iter::once(index), copy::MAX_COPY_BYTES)
             }
-            self.matches = result.matches;
-            self.selection.retain(&self.matches);
-            if self
-                .selected
-                .is_some_and(|index| self.matches.binary_search(&index).is_err())
-            {
-                self.selected = None;
+        };
+        match result {
+            Ok(text) if !text.is_empty() => {
+                self.copy_notice = None;
+                ctx.copy_text(text);
+            }
+            Ok(_) => {}
+            Err(error) => self.copy_notice = Some(error.to_string()),
+        }
+    }
+
+    fn apply_memory_budget(&mut self, draft: usize) {
+        let applied = draft.clamp(16, 4096);
+        self.memory_limit_draft = None;
+        if applied == self.memory_limit_mib {
+            return;
+        }
+        let downshift = applied < self.memory_limit_mib;
+        self.memory_limit_mib = applied;
+        if self.entries.memory_bytes() > memory_budget_bytes(applied) {
+            self.trim_old_entries();
+        }
+        // Capacity reclamation belongs at an explicit lifecycle boundary, not
+        // every hysteresis trim. Allocator RSS need not immediately shrink.
+        if downshift {
+            self.matches.shrink_to_fit();
+            if self.filter_pending && self.filter_progress.is_none() {
+                self.restart_filter_snapshot();
             }
         }
+        self.mark_config_dirty();
     }
 
     fn append_entry(&mut self, mut entry: LogEntry) {
@@ -408,45 +583,76 @@ impl CiallogcatApp {
         if matches {
             self.matches.push(index);
         }
+        if !self.filter_pending
+            && let Some(progress) = &mut self.filter_progress
+        {
+            progress.next_absolute = self.dropped_entries + self.entries.len();
+        }
         self.logs_in_rate_window += 1;
 
-        if self.entries.memory_bytes() > self.memory_limit_mib * MIB {
+        if self.entries.memory_bytes() > memory_budget_bytes(self.memory_limit_mib) {
             self.trim_old_entries();
         }
     }
 
     fn trim_old_entries(&mut self) {
-        let remove =
-            Arc::make_mut(&mut self.entries).trim_to_bytes(self.memory_limit_mib * MIB * 9 / 10);
+        let target = (memory_budget_bytes(self.memory_limit_mib) as u64 * 9 / 10) as usize;
+        let remove = Arc::make_mut(&mut self.entries).trim_to_bytes(target);
+        self.rebase_after_trim(remove);
+    }
+
+    fn rebase_after_trim(&mut self, remove: usize) {
         if remove == 0 {
             return;
         }
+        let removed_matches = self.matches.partition_point(|index| *index < remove);
+        // Keep the previous viewport available even while following: a pointer
+        // or cached accessibility action may pause follow before the next layout.
+        // If follow stays on, log_table consumes and ignores this restoration.
+        let previous = self
+            .restore_scroll_offset
+            .unwrap_or(self.table_scroll_offset);
+        self.restore_scroll_offset =
+            Some((previous - removed_matches as f32 * self.table_row_stride).max(0.0));
         self.dropped_entries += remove;
-        self.matches = Vec::new();
-        self.focused_log_row = None;
-        self.focus_log_selection = false;
-        self.selected = None;
-        self.selection.clear();
-        self.detail_lines = None;
-        // Rebase only this capture's unresolved indices. Older retained unknown
-        // rows must not be assigned to a reused PID after reconnect/resume.
+        self.matches.drain(..removed_matches);
+        for index in &mut self.matches {
+            *index -= remove;
+        }
+        self.selection.rebase(remove);
+        let expired_details = self.selected.is_some_and(|index| index < remove);
+        self.selected = self.selected.and_then(|index| index.checked_sub(remove));
+        self.focused_log_row = self
+            .focused_log_row
+            .and_then(|(id, index)| index.checked_sub(remove).map(|index| (id, index)));
+        self.visible_log_rows
+            .retain(|(_, absolute)| *absolute >= self.dropped_entries);
+        if expired_details {
+            self.detail_lines = None;
+            self.copy_notice = Some("Selected log expired from the retained history.".to_owned());
+        }
+        if self.selected.is_none() {
+            self.focus_log_selection = false;
+        }
+        // These indices belong only to this capture session. Never rebuild from
+        // all unknown retained rows, which could resolve a previous session PID.
         self.unresolved_processes.retain(|_, indices| {
             indices.retain_mut(|index| {
-                if *index < remove {
-                    false
-                } else {
-                    *index -= remove;
+                if let Some(rebased) = index.checked_sub(remove) {
+                    *index = rebased;
                     true
+                } else {
+                    false
                 }
             });
             !indices.is_empty()
         });
-        self.unresolved_count = self
-            .entries
-            .iter()
-            .filter(|entry| entry.process.is_none())
-            .count();
-        self.schedule_filter();
+        self.unresolved_count = self.entries.unresolved_count();
+        if let Some(progress) = &mut self.filter_progress {
+            progress.next_absolute = progress.next_absolute.max(self.dropped_entries);
+            self.filter_pending =
+                progress.next_absolute < self.dropped_entries + self.entries.len();
+        }
     }
 
     fn update_processes(&mut self, processes: HashMap<u32, String>) {
@@ -472,11 +678,13 @@ impl CiallogcatApp {
                 entries.set_process(index, Arc::clone(&process));
             }
         }
-        if !self.package.trim().is_empty() {
-            self.schedule_filter();
-        }
-        if self.entries.memory_bytes() > self.memory_limit_mib * MIB {
+        if self.entries.memory_bytes() > memory_budget_bytes(self.memory_limit_mib) {
             self.trim_old_entries();
+        }
+        // A package snapshot must observe the final, budget-trimmed store.
+        if !self.active_filter.package.is_empty() {
+            // Process metadata changes the active result, not a debounced draft.
+            self.restart_filter_snapshot();
         }
     }
 
@@ -768,13 +976,25 @@ impl CiallogcatApp {
         self.unresolved_processes = HashMap::new();
         self.unresolved_count = 0;
         self.dropped_entries = 0;
-        self.filter_generation += 1;
+        self.filter_generation = self.filter_generation.wrapping_add(1);
         self.filter_elapsed = Duration::ZERO;
+        self.filter_tx.cancel();
+        self.restore_scroll_offset = None;
+        self.table_scroll_offset = 0.0;
+        self.copy_notice = None;
+        self.filter_progress = Some(FilterProgress {
+            generation: self.filter_generation,
+            log_epoch: self.log_epoch,
+            next_absolute: 0,
+        });
         if self.filter_pending {
             // The active expression is still compiling; do not append with the
             // previous generation's matcher after invalidating its snapshot.
+            self.filter_progress = None;
             self.filter_tx.send(FilterRequest {
                 generation: self.filter_generation,
+                log_epoch: self.log_epoch,
+                snapshot_base: self.dropped_entries,
                 entries: Arc::clone(&self.entries),
                 spec: self.active_filter.clone(),
             });
@@ -1271,7 +1491,7 @@ impl CiallogcatApp {
                     }
                 });
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.label(format!("日志内存 {:.1} / {} MiB", self.entries.memory_bytes() as f64 / MIB as f64, self.memory_limit_mib))
+                    ui.label(format!("Retained ≈ {:.1} / {} MiB", self.entries.memory_bytes() as f64 / MIB as f64, self.memory_limit_mib))
                         .on_hover_text("文本、存储结构与索引的估算预算；不包含图形后端等进程开销。可在 View 中调整。");
                 });
             });
@@ -1315,21 +1535,28 @@ impl CiallogcatApp {
                     }
 
                     ui.separator();
-                    ui.menu_button("View", |ui| {
+                    let view = egui::containers::menu::MenuButton::new("View")
+                        .config(egui::containers::menu::MenuConfig::new()
+                            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside))
+                        .ui(ui, |ui| {
+                        let mut draft = self.memory_limit_draft.unwrap_or(self.memory_limit_mib);
                         ui.horizontal(|ui| {
                             ui.label("日志内存预算");
-                            if ui
-                                .add(
-                                    egui::DragValue::new(&mut self.memory_limit_mib)
-                                        .range(16..=4096)
-                                        .suffix(" MiB"),
-                                )
-                                .changed()
-                            {
-                                if self.entries.memory_bytes() > self.memory_limit_mib * MIB {
-                                    self.trim_old_entries();
-                                }
-                                self.mark_config_dirty();
+                            ui.add(egui::DragValue::new(&mut draft).range(16..=4096).suffix(" MiB"));
+                        });
+                        self.memory_limit_draft = Some(draft);
+                        ui.label("Retained-log estimate only; excludes snapshots, queues, clipboard and process RSS.");
+                        if self.entries.memory_bytes() > memory_budget_bytes(draft) {
+                            ui.colored_label(Color32::from_rgb(239, 190, 82), "Apply removes oldest logs immediately to about 90% of this budget. This cannot be undone.");
+                        }
+                        ui.horizontal(|ui| {
+                            if ui.button("Apply budget").clicked() {
+                                self.apply_memory_budget(draft);
+                                ui.close();
+                            }
+                            if ui.button("Cancel budget").clicked() {
+                                self.memory_limit_draft = None;
+                                ui.close();
                             }
                         });
                         ui.separator();
@@ -1361,6 +1588,7 @@ impl CiallogcatApp {
                         ui.label("Ctrl+A    Select all filtered logs");
                         ui.label("Esc    Leave input / selection");
                     });
+                    if view.1.is_none() { self.memory_limit_draft = None; }
 
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if ui
@@ -1399,7 +1627,11 @@ impl CiallogcatApp {
                             .on_hover_text(error);
                         } else if self.filter_pending || self.filter_dirty_since.is_some() {
                             ui.spinner();
-                            ui.label(RichText::new("Filtering…").weak());
+                            let label = if let Some(progress) = self.filter_progress {
+                                format!("Filtering… {} matches · {} unchecked", format_count(self.matches.len()),
+                                    (self.dropped_entries + self.entries.len()).saturating_sub(progress.next_absolute))
+                            } else { "Filtering…".to_owned() };
+                            ui.label(RichText::new(label).weak());
                         } else {
                             ui.label(
                                 RichText::new(if compact {
@@ -1432,6 +1664,8 @@ impl CiallogcatApp {
             return;
         };
         let ctx = root_ui.ctx().clone();
+        let checking = self.classification_pending(index);
+        let mut copy_requested = false;
 
         egui::Panel::bottom("details")
             .resizable(true)
@@ -1441,14 +1675,21 @@ impl CiallogcatApp {
                 ui.add_space(6.0);
                 let entry = &self.entries[index];
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Selected log").strong());
+                    ui.label(
+                        RichText::new(if checking {
+                            "Selected log · checking filter…"
+                        } else {
+                            "Selected log"
+                        })
+                        .strong(),
+                    );
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if ui
                             .button("Copy")
                             .on_hover_text("Copy complete log · Ctrl+C")
                             .clicked()
                         {
-                            ctx.copy_text(entry.copy_text());
+                            copy_requested = true;
                         }
                         ui.add(
                             egui::Label::new(
@@ -1526,6 +1767,9 @@ impl CiallogcatApp {
                         });
                 }
             });
+        if copy_requested {
+            self.copy_logs(&ctx, CopyTarget::Row(index));
+        }
     }
 
     fn log_table(&mut self, root_ui: &mut egui::Ui) {
@@ -1533,24 +1777,30 @@ impl CiallogcatApp {
         // A valid action can arrive with new capture rows. Pause before the
         // ScrollArea schedules its tail offset, not only after focus resolves.
         // The cache contains only last frame's viewport, never the whole store.
-        let accessible_browsing = ctx.input(|input| {
-            input.events.iter().any(|event| {
+        let accessible_target = ctx.input(|input| {
+            input.events.iter().find_map(|event| {
                 let egui::Event::AccessKitActionRequest(request) = event else {
-                    return false;
+                    return None;
                 };
-                request.target_tree == egui::accesskit::TreeId::ROOT
-                    && matches!(
+                if request.target_tree != egui::accesskit::TreeId::ROOT
+                    || !matches!(
                         request.action,
                         egui::accesskit::Action::Focus | egui::accesskit::Action::Click
                     )
-                    && self.visible_log_rows.iter().any(|(id, absolute)| {
-                        id.accesskit_id() == request.target_node
-                            && absolute
-                                .checked_sub(self.dropped_entries)
-                                .is_some_and(|index| self.matches.binary_search(&index).is_ok())
-                    })
+                {
+                    return None;
+                }
+                self.visible_log_rows.iter().find_map(|(id, absolute)| {
+                    if id.accesskit_id() != request.target_node {
+                        return None;
+                    }
+                    absolute
+                        .checked_sub(self.dropped_entries)
+                        .filter(|index| self.matches.binary_search(index).is_ok())
+                })
             })
         });
+        let accessible_browsing = accessible_target.is_some();
         if accessible_browsing {
             self.follow_logs = false;
             self.scroll_to_bottom = false;
@@ -1577,6 +1827,7 @@ impl CiallogcatApp {
         let entries = Arc::clone(&self.entries);
         let matches = &self.matches;
         let mut clicked_row = None;
+        let mut copy_requested = None;
         let mut filter_process = None;
         let mut focus_selected = self.focus_log_selection && !ctx.text_edit_focused();
         let mut focused_selected = false;
@@ -1649,7 +1900,7 @@ impl CiallogcatApp {
                 .column(Column::initial(widths[1]).at_least(80.0))
                 .column(Column::remainder().at_least(180.0))
                 .min_scrolled_height(0.0)
-                .sense(egui::Sense::CLICK)
+                .sense(egui::Sense::hover())
                 .animate_scrolling(false)
                 .stick_to_bottom(self.follow_logs);
             if reset_columns {
@@ -1661,9 +1912,16 @@ impl CiallogcatApp {
                 && let Some(position) = selected.and_then(|index| matches.binary_search(&index).ok())
             {
                 table = table.scroll_to_row(position, None);
+            } else if let Some(position) = accessible_target.and_then(|index| matches.binary_search(&index).ok()) {
+                table = table.scroll_to_row(position, None);
             }
 
-            table
+            let restore = self.restore_scroll_offset.take();
+            if !self.follow_logs && !self.scroll_to_bottom && !self.scroll_to_selected
+                && let Some(offset) = restore {
+                table = table.vertical_scroll_offset(offset);
+            }
+            let table_output = table
                 .header(30.0, |mut header| {
                     let mut header_row = egui::Id::NULL;
                     for (column, title) in log_table_ui::HEADERS.iter().enumerate() {
@@ -1771,11 +2029,11 @@ impl CiallogcatApp {
                         }
                         response.context_menu(|ui| {
                             if selection.contains(entry_index) && ui.button("Copy selected logs").clicked() {
-                                ctx.copy_text(selection.copy_text(&entries));
+                                copy_requested = Some(CopyTarget::Selection);
                                 ui.close();
                             }
                             if ui.button("Copy full log").clicked() {
-                                ctx.copy_text(entry.copy_text());
+                                copy_requested = Some(CopyTarget::Row(entry_index));
                                 ui.close();
                             }
                             if entry.process.is_some() && ui.button("Filter this process").clicked()
@@ -1786,10 +2044,15 @@ impl CiallogcatApp {
                         });
                     });
                 });
+            self.table_scroll_offset = table_output.state.offset.y;
+            self.table_row_stride = row_height + ui.spacing().item_spacing.y;
             self.log_columns.finish(&ctx, table_id, painted_widths);
             });
         });
 
+        if let Some(target) = copy_requested {
+            self.copy_logs(&ctx, target);
+        }
         self.visible_log_rows = visible_log_rows;
         if row_focus_gained {
             // Assistive/Tab browsing pauses the moving tail just like pointer
@@ -1800,9 +2063,11 @@ impl CiallogcatApp {
         self.focus_log_selection = focus_selected && !focused_selected && self.selected.is_some();
         self.scroll_to_bottom = false;
         self.scroll_to_selected = false;
-        if let Some((index, modifiers)) = clicked_row {
-            self.selection
-                .select(&self.matches, index, modifiers.shift, modifiers.command);
+        if let Some((index, modifiers)) = clicked_row
+            && self
+                .selection
+                .select(&self.matches, index, modifiers.shift, modifiers.command)
+        {
             self.selected = self.selection.contains(index).then_some(index);
             self.scroll_to_selected = true;
         }
@@ -1847,6 +2112,9 @@ impl CiallogcatApp {
                     // Independent compact indicators keep one long diagnostic from
                     // hiding counts or an unrelated settings/query failure.
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if let Some(notice) = self.copy_notice.as_ref() {
+                            Self::status_diagnostic(ui, "copy_notice", "Copy / history", notice);
+                        }
                         if let Some(error) = self.config_error.as_ref() {
                             Self::status_diagnostic(
                                 ui,
@@ -2014,7 +2282,10 @@ impl CiallogcatApp {
         if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::A)) {
             self.follow_logs = false;
             self.selection.select_all(&self.matches);
-            self.selected = self.selected.or_else(|| self.matches.first().copied());
+            self.selected = self
+                .selected
+                .filter(|index| self.selection.contains(*index))
+                .or_else(|| self.matches.first().copied());
             return;
         }
         for key in [
@@ -2037,18 +2308,19 @@ impl CiallogcatApp {
                     })
                     .map(|(_, index)| index)
                     .or(self.selected);
-                self.selected = navigated_selection(&self.matches, origin, key);
-                if let Some(index) = self.selected {
-                    self.selection.select(&self.matches, index, extend, false);
+                if let Some(index) = navigated_selection(&self.matches, origin, key)
+                    && self.selection.select(&self.matches, index, extend, false)
+                {
+                    self.selected = Some(index);
+                    self.scroll_to_selected = true;
+                    self.focus_log_selection = true;
                 }
-                self.scroll_to_selected = true;
-                self.focus_log_selection = self.selected.is_some();
                 break;
             }
         }
     }
 
-    fn copy_shortcut(&self, ctx: &egui::Context) {
+    fn copy_shortcut(&mut self, ctx: &egui::Context) {
         if self.show_save_filter
             || self.pending_clear
             || self.pending_device.is_some()
@@ -2070,7 +2342,7 @@ impl CiallogcatApp {
                 .any(|command| matches!(command, egui::OutputCommand::CopyText(_)))
         });
         if requested && !text_already_copied && !self.selection.is_empty() {
-            ctx.copy_text(self.selection.copy_text(&self.entries));
+            self.copy_logs(ctx, CopyTarget::Selection);
         }
     }
 
@@ -2135,6 +2407,9 @@ impl eframe::App for CiallogcatApp {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_filter();
         self.poll_backend(ctx);
+        if self.filter_pending && self.filter_progress.is_some() {
+            ctx.request_repaint();
+        }
         ctx.request_repaint_after(Duration::from_millis(100));
     }
 
@@ -2416,3 +2691,6 @@ mod ui_audit_regressions;
 
 #[cfg(test)]
 mod log_table_regressions;
+
+#[cfg(test)]
+mod memory_regressions;

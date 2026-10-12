@@ -1,4 +1,7 @@
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{
+    Arc, Condvar, Mutex,
+    atomic::{AtomicU64, Ordering},
+};
 use std::time::{Duration, Instant};
 
 use regex::{Regex, RegexBuilder};
@@ -6,7 +9,7 @@ use regex::{Regex, RegexBuilder};
 use crate::log_store::LogStore;
 use crate::model::{Level, LogEntry};
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct FilterSpec {
     pub package: String,
     pub min_level: Level,
@@ -18,12 +21,16 @@ pub struct FilterSpec {
 #[derive(Clone)]
 pub struct FilterRequest {
     pub generation: u64,
+    pub log_epoch: u64,
+    pub snapshot_base: usize,
     pub entries: Arc<LogStore>,
     pub spec: FilterSpec,
 }
 
 pub struct FilterResult {
     pub generation: u64,
+    pub log_epoch: u64,
+    pub snapshot_base: usize,
     pub processed_len: usize,
     pub matches: Vec<usize>,
     pub elapsed: Duration,
@@ -56,8 +63,8 @@ impl FilterReceiver {
 
 #[derive(Default)]
 struct PendingFilter {
-    request: Option<FilterRequest>,
-    highlight: Option<QueryKey>,
+    request: Option<(u64, FilterRequest)>,
+    highlight: Option<(u64, QueryKey)>,
     closed: bool,
 }
 
@@ -65,17 +72,39 @@ struct PendingFilter {
 struct FilterMailbox {
     pending: Mutex<PendingFilter>,
     ready: Condvar,
+    revision: AtomicU64,
+    highlight_revision: AtomicU64,
+    #[cfg(test)]
+    before_scan: Mutex<Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
 }
 
 pub struct FilterSender(Arc<FilterMailbox>);
 impl FilterSender {
     pub fn send(&self, request: FilterRequest) {
-        self.0.pending.lock().unwrap().request = Some(request);
+        let mut pending = self.0.pending.lock().unwrap();
+        let revision = self
+            .0
+            .revision
+            .fetch_add(1, Ordering::AcqRel)
+            .wrapping_add(1);
+        pending.request = Some((revision, request));
         self.0.ready.notify_one();
     }
 
+    pub fn cancel(&self) {
+        let mut pending = self.0.pending.lock().unwrap();
+        self.0.revision.fetch_add(1, Ordering::AcqRel);
+        pending.request = None;
+    }
+
     pub fn send_highlight(&self, key: QueryKey) {
-        self.0.pending.lock().unwrap().highlight = Some(key);
+        let mut pending = self.0.pending.lock().unwrap();
+        let revision = self
+            .0
+            .highlight_revision
+            .fetch_add(1, Ordering::AcqRel)
+            .wrapping_add(1);
+        pending.highlight = Some((revision, key));
         self.0.ready.notify_one();
     }
 }
@@ -83,6 +112,8 @@ impl Drop for FilterSender {
     fn drop(&mut self) {
         let mut pending = self.0.pending.lock().unwrap();
         pending.closed = true;
+        self.0.revision.fetch_add(1, Ordering::AcqRel);
+        self.0.highlight_revision.fetch_add(1, Ordering::AcqRel);
         pending.request = None;
         pending.highlight = None;
         self.0.ready.notify_one();
@@ -91,8 +122,8 @@ impl Drop for FilterSender {
 
 pub fn spawn_filter_worker(ctx: eframe::egui::Context) -> (FilterSender, FilterReceiver) {
     enum Work {
-        Filter(FilterRequest),
-        Highlight(QueryKey),
+        Filter(u64, FilterRequest),
+        Highlight(u64, QueryKey),
     }
     let mailbox = Arc::new(FilterMailbox::default());
     let receiver = Arc::clone(&mailbox);
@@ -118,56 +149,80 @@ pub fn spawn_filter_worker(ctx: eframe::egui::Context) -> (FilterSender, FilterR
                     if pending.closed {
                         break;
                     }
-                    if let Some(request) = pending.request.take() {
-                        Work::Filter(request)
+                    if let Some((revision, request)) = pending.request.take() {
+                        Work::Filter(revision, request)
                     } else {
-                        Work::Highlight(pending.highlight.take().unwrap())
+                        let (revision, key) = pending.highlight.take().unwrap();
+                        Work::Highlight(revision, key)
                     }
                 };
                 let started = Instant::now();
+                let current = || match &work {
+                    Work::Filter(revision, _) => {
+                        receiver.revision.load(Ordering::Acquire) == *revision
+                    }
+                    Work::Highlight(revision, _) => {
+                        receiver.highlight_revision.load(Ordering::Acquire) == *revision
+                    }
+                };
+                if !current() {
+                    continue;
+                }
                 let key = match &work {
-                    Work::Filter(request) => (
+                    Work::Filter(_, request) => (
                         request.spec.query.clone(),
                         request.spec.regex,
                         request.spec.case_sensitive,
                     ),
-                    Work::Highlight(key) => key.clone(),
+                    Work::Highlight(_, key) => key.clone(),
                 };
                 if cached.as_ref().is_none_or(|(previous, _)| previous != &key) {
                     let compiled = match &work {
-                        Work::Filter(request) => compile_matcher(&request.spec),
-                        Work::Highlight(key) => compile_query(&key.0, key.1, key.2),
+                        Work::Filter(_, request) => compile_matcher(&request.spec),
+                        Work::Highlight(_, key) => compile_query(&key.0, key.1, key.2),
                     };
                     cached = Some((key.clone(), compiled));
                 }
+                if !current() {
+                    continue;
+                }
                 let matcher = cached.as_ref().unwrap().1.clone();
-                match work {
-                    Work::Highlight(key) => {
+                match &work {
+                    Work::Highlight(_, key) => {
                         results.lock().unwrap().highlight = Some(HighlightResult {
-                            key,
+                            key: key.clone(),
                             matcher: matcher.ok().flatten(),
                         });
                     }
-                    Work::Filter(request) => {
+                    Work::Filter(_, request) => {
                         let (matcher, error) = match matcher {
                             Ok(matcher) => (matcher, None),
                             Err(error) => (None, Some(error)),
                         };
+                        #[cfg(test)]
+                        if let Some((started, release)) =
+                            receiver.before_scan.lock().unwrap().take()
+                        {
+                            started.send(()).unwrap();
+                            release.recv().unwrap();
+                        }
                         let matches = if error.is_none() {
-                            request
-                                .entries
-                                .iter()
-                                .enumerate()
-                                .filter_map(|(index, entry)| {
-                                    entry_matches(entry, &request.spec, matcher.as_ref())
-                                        .then_some(index)
-                                })
-                                .collect()
+                            let Some(matches) =
+                                scan_entries(request, matcher.as_ref(), || !current())
+                            else {
+                                continue;
+                            };
+                            matches
                         } else {
                             Vec::new()
                         };
+                        if !current() {
+                            continue;
+                        }
                         results.lock().unwrap().filter = Some(FilterResult {
                             generation: request.generation,
+                            log_epoch: request.log_epoch,
+                            snapshot_base: request.snapshot_base,
                             processed_len: request.entries.len(),
                             matches,
                             elapsed: started.elapsed(),
@@ -181,6 +236,34 @@ pub fn spawn_filter_worker(ctx: eframe::egui::Context) -> (FilterSender, FilterR
         })
         .expect("failed to start filter worker");
     (FilterSender(mailbox), FilterReceiver(completed))
+}
+
+// Cooperative cancellation: compile and an individual regex match are not
+// preemptible. Check both rows and examined bytes so a few large lines do not
+// pin an obsolete snapshot until its entire scan finishes.
+const CANCEL_ROWS: usize = 256;
+const CANCEL_BYTES: usize = 128 * 1024;
+
+fn scan_entries(
+    request: &FilterRequest,
+    matcher: Option<&Regex>,
+    mut cancelled: impl FnMut() -> bool,
+) -> Option<Vec<usize>> {
+    let mut matches = Vec::new();
+    let mut bytes = 0usize;
+    for (index, entry) in request.entries.iter().enumerate() {
+        if (index % CANCEL_ROWS == 0 || bytes >= CANCEL_BYTES) && cancelled() {
+            return None;
+        }
+        if index % CANCEL_ROWS == 0 || bytes >= CANCEL_BYTES {
+            bytes = 0;
+        }
+        if entry_matches(entry, &request.spec, matcher) {
+            matches.push(index);
+        }
+        bytes = bytes.saturating_add(entry.payload_bytes());
+    }
+    (!cancelled()).then_some(matches)
 }
 
 pub fn compile_matcher(spec: &FilterSpec) -> Result<Option<Regex>, String> {
@@ -257,5 +340,103 @@ mod tests {
             &spec,
             Some(&matcher)
         ));
+    }
+    #[test]
+    fn obsolete_scans_cancel_at_row_and_byte_checkpoints() {
+        for payload in [1, CANCEL_BYTES] {
+            let mut entries = LogStore::default();
+            let rows = if payload == 1 { CANCEL_ROWS * 3 } else { 3 };
+            for _ in 0..rows {
+                entries.push(LogEntry::marker("x".repeat(payload)));
+            }
+            let request = FilterRequest {
+                generation: 1,
+                log_epoch: 0,
+                snapshot_base: 0,
+                entries: Arc::new(entries),
+                spec: FilterSpec {
+                    package: String::new(),
+                    min_level: Level::Verbose,
+                    query: String::new(),
+                    regex: false,
+                    case_sensitive: false,
+                },
+            };
+            let mut calls = 0;
+            let result = scan_entries(&request, None, || {
+                calls += 1;
+                calls == 2
+            });
+            assert!(result.is_none());
+            assert_eq!(calls, 2);
+            assert_eq!(
+                scan_entries(&request, None, || false).unwrap().len(),
+                request.entries.len()
+            );
+        }
+    }
+    #[test]
+    fn superseding_and_closing_worker_release_obsolete_snapshot_ownership() {
+        fn request(generation: u64, entries: Arc<LogStore>) -> FilterRequest {
+            FilterRequest {
+                generation,
+                log_epoch: 1,
+                snapshot_base: 0,
+                entries,
+                spec: FilterSpec {
+                    package: String::new(),
+                    min_level: Level::Verbose,
+                    query: "missing|needle".to_owned(),
+                    regex: true,
+                    case_sensitive: false,
+                },
+            }
+        }
+        for close in [false, true] {
+            let (sender, receiver) = spawn_filter_worker(eframe::egui::Context::default());
+            let mut entries = LogStore::default();
+            let message: Arc<str> = Arc::from("x".repeat(4096));
+            for _ in 0..20_000 {
+                entries.push(LogEntry::marker(Arc::clone(&message)));
+            }
+            let entries = Arc::new(entries);
+            let obsolete = Arc::downgrade(&entries);
+            let (started_tx, started_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            *sender.0.before_scan.lock().unwrap() = Some((started_tx, release_rx));
+            sender.send(request(1, entries));
+            started_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("worker owns active snapshot");
+            assert!(obsolete.upgrade().is_some());
+            if !close {
+                sender.send(request(2, Arc::new(LogStore::default())));
+            }
+            let deadline = Instant::now() + Duration::from_secs(5);
+            if close {
+                drop(sender);
+            }
+            release_tx.send(()).unwrap();
+            while obsolete.upgrade().is_some() && Instant::now() < deadline {
+                std::thread::yield_now();
+            }
+            assert!(
+                obsolete.upgrade().is_none(),
+                "obsolete snapshot ownership released"
+            );
+            if !close {
+                loop {
+                    if let Some(result) = receiver.take_filter()
+                        && result.generation == 2
+                    {
+                        assert_eq!(result.log_epoch, 1);
+                        assert!(result.matches.is_empty());
+                        break;
+                    }
+                    assert!(Instant::now() < deadline, "latest result published");
+                    std::thread::yield_now();
+                }
+            }
+        }
     }
 }

@@ -1,3 +1,4 @@
+#[cfg(test)]
 use crate::log_store::LogStore;
 use std::collections::BTreeSet;
 
@@ -19,29 +20,61 @@ impl RowSelection {
         self.rows.clear();
         self.anchor = None;
     }
-    pub fn retain(&mut self, matches: &[usize]) {
-        self.rows
-            .retain(|index| matches.binary_search(index).is_ok());
+    pub fn indices(&self) -> impl DoubleEndedIterator<Item = usize> + Clone + '_ {
+        self.rows.iter().copied()
+    }
+    pub fn last(&self) -> Option<usize> {
+        self.rows.last().copied()
+    }
+    pub fn rebase(&mut self, removed: usize) {
+        self.rows = std::mem::take(&mut self.rows)
+            .into_iter()
+            .filter_map(|index| index.checked_sub(removed))
+            .collect();
+        self.anchor = self.anchor.and_then(|index| index.checked_sub(removed));
+    }
+    pub fn retain_classified(&mut self, matches: &[usize], range: std::ops::Range<usize>) {
+        // A suffix not yet classified by this generation is still selected.
+        // Only visit selected rows in this slice, not the entire set per frame.
+        let excluded: Vec<_> = self
+            .rows
+            .range(range.clone())
+            .filter(|index| matches.binary_search(index).is_err())
+            .copied()
+            .collect();
+        for index in excluded {
+            self.rows.remove(&index);
+        }
         if self
             .anchor
-            .is_some_and(|index| matches.binary_search(&index).is_err())
+            .is_some_and(|index| range.contains(&index) && matches.binary_search(&index).is_err())
         {
             self.anchor = None;
         }
+    }
+    #[cfg(test)]
+    pub fn retain(&mut self, matches: &[usize]) {
+        self.retain_classified(matches, 0..usize::MAX);
     }
     pub fn select_all(&mut self, matches: &[usize]) {
         self.rows = matches.iter().copied().collect();
         self.anchor = matches.first().copied();
     }
-    pub fn select(&mut self, matches: &[usize], index: usize, extend: bool, toggle: bool) {
+    pub fn select(&mut self, matches: &[usize], index: usize, extend: bool, toggle: bool) -> bool {
         let Ok(end) = matches.binary_search(&index) else {
-            return;
+            return false;
         };
         if extend {
-            let start = self
-                .anchor
-                .and_then(|anchor| matches.binary_search(&anchor).ok())
-                .unwrap_or(end);
+            let start = if let Some(anchor) = self.anchor {
+                // Pending membership is not a new anchor. Wait for this range
+                // to be classified instead of silently changing Shift behavior.
+                let Ok(start) = matches.binary_search(&anchor) else {
+                    return false;
+                };
+                start
+            } else {
+                end
+            };
             if !toggle {
                 self.rows.clear();
             }
@@ -57,7 +90,9 @@ impl RowSelection {
             }
             self.anchor = Some(index);
         }
+        true
     }
+    #[cfg(test)]
     pub fn copy_text(&self, entries: &LogStore) -> String {
         let mut text = String::new();
         for &index in &self.rows {
@@ -142,5 +177,22 @@ mod tests {
         let mut selection = RowSelection::default();
         selection.select_all(&[0, 1, 2]);
         assert_eq!(selection.copy_text(&entries), expected.join("\n"));
+    }
+    #[test]
+    fn independent_pending_anchor_survives_trim_and_blocks_range_reinterpretation() {
+        let mut selection = RowSelection::default();
+        selection.select(&[0, 2, 4, 6, 8], 6, false, false);
+        selection.select(&[0, 2, 4, 6, 8], 6, false, true); // toggled out, still anchor
+        selection.select(&[0, 2, 4, 6, 8], 8, true, true);
+        selection.rebase(3);
+        assert_eq!(selection.anchor, Some(3));
+        selection.retain_classified(&[1], 0..2);
+        assert_eq!(selection.anchor, Some(3));
+        let before = selection.rows.clone();
+        assert!(!selection.select(&[1], 1, true, false));
+        assert_eq!(selection.rows, before);
+        selection.retain_classified(&[1, 5], 2..5);
+        assert_eq!(selection.anchor, None);
+        assert_eq!(selection.rows, BTreeSet::from([5]));
     }
 }

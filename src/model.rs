@@ -170,10 +170,38 @@ impl LogEntry {
                 .is_some_and(|suffix| suffix.starts_with(':'))
     }
 
+    #[cfg(test)]
     pub fn copy_text(&self) -> String {
         let mut text = String::new();
         self.append_copy_text(&mut text);
         text
+    }
+
+    /// Exact UTF-8 length of `append_copy_text`, without formatting allocations.
+    /// Rust's minimum field width counts characters, rather than UTF-8 bytes.
+    pub fn copy_text_bytes(&self) -> Option<usize> {
+        fn digits(mut number: u32) -> usize {
+            let mut count = 1;
+            while number >= 10 {
+                number /= 10;
+                count += 1;
+            }
+            count
+        }
+        let process = self.process_name();
+        [
+            self.time.len(),
+            digits(self.pid).max(5),
+            digits(self.tid).max(5),
+            self.level.short().len(),
+            process.len(),
+            24usize.saturating_sub(process.chars().take(24).count()),
+            self.tag.len(),
+            self.message.len(),
+            7, // Fixed spaces and the tag's colon-space separator.
+        ]
+        .into_iter()
+        .try_fold(0usize, usize::checked_add)
     }
 
     pub fn append_copy_text(&self, text: &mut String) {
@@ -207,6 +235,28 @@ pub struct SavedFilter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copy_byte_count_matches_formatter_unicode_padding_and_numeric_widths() {
+        for process in [
+            None,
+            Some(""),
+            Some("请求🦀worker"),
+            Some("a very long process identity beyond padding"),
+            Some("e\u{301}👩\u{200d}💻"),
+        ] {
+            for pid in [0, 7, 99_999, 100_000, u32::MAX] {
+                for tid in [0, 7, 99_999, 100_000, u32::MAX] {
+                    for message in ["", "a\r\nb\n", "🦀\0中", "full text"] {
+                        let mut entry =
+                            LogEntry::new("12:34", pid, tid, "标签", Level::Info, message);
+                        entry.process = process.map(Arc::from);
+                        assert_eq!(entry.copy_text_bytes(), Some(entry.copy_text().len()));
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn package_filter_includes_secondary_processes() {

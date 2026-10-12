@@ -99,7 +99,7 @@ ciallogcat
 2. Focus the package field to choose an installed third-party app, or enter a package name. Set a minimum log level and enter a keyword. `.*` toggles regular expressions; **Aa** toggles case sensitivity.
 3. Click a log row to read its full message. Use **Ctrl+C** to copy, **Shift+click** for a range, or **Ctrl+click** to toggle individual rows.
 4. Use **Saved filters** to save or restore a filter combination. Keyword history appears when the keyword field is focused and stores up to 500 entries; it does not store the other filter settings.
-5. Use **View** to change the theme, row height, detail display, or log memory budget.
+5. Use **View** to change the theme, row height, detail display, or log memory budget. Edit the budget draft and choose **Apply budget**; **Cancel budget**, Escape, or closing the menu discards it.
 
 ### Capture and filtering
 
@@ -118,13 +118,17 @@ ciallogcat
 - **Esc**: dismiss input/popups or cancel row selection without clearing filters
 - **Ctrl+End** or **回到最新**: return to the latest logs and resume following
 
-Browsing or selecting logs pauses automatic following without stopping capture. Input fields keep their normal editing shortcuts. Filtering keeps only selections that still match; clearing or memory trimming cancels row selection.
+Browsing or selecting logs pauses automatic following without stopping capture. Input fields keep their normal editing shortcuts. Filtering keeps matching selections; while a row is still being checked, its selection and details remain visible. Copy waits for the entire selection to be classified and must be retried explicitly. Memory trimming removes only expired selected rows and preserves surviving rows and the reading position; Clear cancels selection.
 
 ### Memory retention
 
 The default log budget is **300 MiB**, adjustable from **16–4096 MiB** in **View**. When exceeded, the oldest records are removed until the estimate falls to 90% of the budget. This covers retained log data, **not total process RSS**. Graphics, fonts, temporary work, and shared background snapshots add overhead.
 
 Individual incoming lines are limited to 1 MiB; longer lines are truncated and marked. Long-message previews are shortened, but filtering and copying use the full received text. See [log storage and rendering](docs/ui-review.md#日志存储与绘制) for queue, snapshot, and rendering details.
+
+Full-record clipboard actions share a **16 MiB UTF-8 output limit**, independent of the retention budget. They preflight the exact formatted size, allocate once, and either copy complete records or report an error without changing the clipboard. Choose fewer rows after an oversized request. This is a conservative product limit, not a measured operating-system clipboard or RSS guarantee; native clipboard copies and selected-text copying have their own overhead.
+
+Background filtering cancels obsolete scans cooperatively. Completed snapshot results appear immediately, and newer rows are checked in bounded UI slices with an explicit unchecked-row count. A single regex operation, allocation, or destructor is not preemptible, so the slices are not hard real-time guarantees.
 
 ## Configuration
 

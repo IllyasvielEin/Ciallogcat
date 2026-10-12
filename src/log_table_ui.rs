@@ -71,8 +71,8 @@ pub(super) fn cell(
     paint: impl FnOnce(&mut egui::Ui),
 ) -> egui::Id {
     if column != 0 {
-        // The table's outer cells remain pointer targets, but their semantic
-        // children belong to the one real row response, not six fake buttons.
+        // Field cells are hover-only; the stable full-width row owns pointer
+        // actions as well as focus. Its semantic children are not six buttons.
         ui.ctx()
             .accesskit_node_builder(ui.unique_id(), |node| node.set_hidden());
     }

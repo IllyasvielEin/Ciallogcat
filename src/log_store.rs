@@ -5,13 +5,28 @@ use crate::model::LogEntry;
 const CHUNK_SIZE: usize = 1024;
 const CHUNK_BYTES: usize = CHUNK_SIZE * std::mem::size_of::<LogEntry>() + 64;
 
-struct Chunk(VecDeque<LogEntry>);
+struct Chunk {
+    entries: VecDeque<LogEntry>,
+    payload_bytes: usize,
+    unresolved: usize,
+}
+
+#[cfg(test)]
+thread_local! {
+    static CHUNK_CLONES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 impl Clone for Chunk {
     fn clone(&self) -> Self {
         let mut entries = VecDeque::with_capacity(CHUNK_SIZE);
-        entries.extend(self.0.iter().cloned());
-        Self(entries)
+        entries.extend(self.entries.iter().cloned());
+        #[cfg(test)]
+        CHUNK_CLONES.with(|count| count.set(count.get() + 1));
+        Self {
+            entries,
+            payload_bytes: self.payload_bytes,
+            unresolved: self.unresolved,
+        }
     }
 }
 
@@ -23,6 +38,7 @@ pub struct LogStore {
     offset: usize,
     len: usize,
     bytes: usize,
+    unresolved: usize,
 }
 
 impl LogStore {
@@ -36,9 +52,13 @@ impl LogStore {
         self.bytes
     }
 
+    pub fn unresolved_count(&self) -> usize {
+        self.unresolved
+    }
+
     pub fn push(&mut self, entry: LogEntry) {
         if self.chunks.back().is_none_or(|chunk| {
-            chunk.0.len()
+            chunk.entries.len()
                 + if self.chunks.len() == 1 {
                     self.offset
                 } else {
@@ -46,19 +66,26 @@ impl LogStore {
                 }
                 == CHUNK_SIZE
         }) {
-            self.chunks
-                .push_back(Arc::new(Chunk(VecDeque::with_capacity(CHUNK_SIZE))));
+            self.chunks.push_back(Arc::new(Chunk {
+                entries: VecDeque::with_capacity(CHUNK_SIZE),
+                payload_bytes: 0,
+                unresolved: 0,
+            }));
             self.bytes += CHUNK_BYTES;
         }
-        self.bytes += entry.payload_bytes();
-        Arc::make_mut(self.chunks.back_mut().unwrap())
-            .0
-            .push_back(entry);
+        let payload = entry.payload_bytes();
+        let unresolved = usize::from(entry.process.is_none());
+        self.bytes += payload;
+        self.unresolved += unresolved;
+        let chunk = Arc::make_mut(self.chunks.back_mut().unwrap());
+        chunk.payload_bytes += payload;
+        chunk.unresolved += unresolved;
+        chunk.entries.push_back(entry);
         self.len += 1;
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &LogEntry> {
-        self.chunks.iter().flat_map(|chunk| chunk.0.iter())
+        self.chunks.iter().flat_map(|chunk| chunk.entries.iter())
     }
 
     pub fn set_process(&mut self, index: usize, process: Arc<str>) {
@@ -72,34 +99,74 @@ impl LogStore {
         } else {
             absolute % CHUNK_SIZE
         };
-        let entry = &mut Arc::make_mut(&mut self.chunks[chunk]).0[position];
-        self.bytes -= entry.payload_bytes();
+        let chunk = Arc::make_mut(&mut self.chunks[chunk]);
+        let entry = &mut chunk.entries[position];
+        let before = entry.payload_bytes();
+        if entry.process.is_none() {
+            chunk.unresolved -= 1;
+            self.unresolved -= 1;
+        }
         entry.process = Some(process);
-        self.bytes += entry.payload_bytes();
+        let after = entry.payload_bytes();
+        self.bytes = self.bytes - before + after;
+        chunk.payload_bytes = chunk.payload_bytes - before + after;
     }
 
-    pub fn drain_front(&mut self, count: usize) {
+    fn drop_front_chunk(&mut self) -> usize {
+        let chunk = self.chunks.pop_front().unwrap();
+        let removed = chunk.entries.len();
+        self.bytes -= CHUNK_BYTES + chunk.payload_bytes;
+        self.unresolved -= chunk.unresolved;
+        self.len -= removed;
+        self.offset = 0;
+        // In particular, never make_mut a chunk that is about to be discarded.
+        removed
+    }
+
+    pub fn drain_front(&mut self, mut count: usize) {
         assert!(count <= self.len);
-        for _ in 0..count {
-            let chunk = Arc::make_mut(self.chunks.front_mut().unwrap());
-            self.bytes -= chunk.0.pop_front().unwrap().payload_bytes();
-            self.offset += 1;
-            self.len -= 1;
-            if chunk.0.is_empty() {
-                self.chunks.pop_front();
-                self.bytes -= CHUNK_BYTES;
-                self.offset = 0;
+        while count > 0 {
+            if count >= self.chunks.front().unwrap().entries.len() {
+                count -= self.drop_front_chunk();
+                continue;
             }
+            let chunk = Arc::make_mut(self.chunks.front_mut().unwrap());
+            for _ in 0..count {
+                let entry = chunk.entries.pop_front().unwrap();
+                let payload = entry.payload_bytes();
+                let unresolved = usize::from(entry.process.is_none());
+                chunk.payload_bytes -= payload;
+                chunk.unresolved -= unresolved;
+                self.bytes -= payload;
+                self.unresolved -= unresolved;
+            }
+            self.offset += count;
+            self.len -= count;
+            break;
         }
     }
 
     pub fn trim_to_bytes(&mut self, target: usize) -> usize {
-        let mut removed = 0;
+        let before = self.len;
         while self.bytes > target && !self.is_empty() {
-            self.drain_front(1);
-            removed += 1;
+            let front = self.chunks.front().unwrap();
+            if self.bytes - (CHUNK_BYTES + front.payload_bytes) >= target {
+                self.drop_front_chunk();
+            } else {
+                // Only the final boundary chunk can require copy-on-write.
+                let mut count = 0;
+                let mut remaining = self.bytes;
+                for entry in &front.entries {
+                    count += 1;
+                    remaining -= entry.payload_bytes();
+                    if remaining <= target {
+                        break;
+                    }
+                }
+                self.drain_front(count);
+            }
         }
-        removed
+        before - self.len
     }
 }
 
@@ -109,7 +176,7 @@ impl Index<usize> for LogStore {
         assert!(index < self.len);
         let absolute = self.offset + index;
         let chunk = absolute / CHUNK_SIZE;
-        &self.chunks[chunk].0[if chunk == 0 {
+        &self.chunks[chunk].entries[if chunk == 0 {
             index
         } else {
             absolute % CHUNK_SIZE
@@ -195,5 +262,54 @@ mod tests {
         store.push(LogEntry::marker("new"));
         assert_eq!(store[0].message.as_ref(), "new");
         store.set_process(1, Arc::from("ignored"));
+    }
+    #[test]
+    fn trimming_shared_whole_chunks_never_clones_discarded_rows() {
+        let mut store = LogStore::default();
+        for index in 0..4096 {
+            store.push(LogEntry::marker(index.to_string()));
+        }
+        let snapshot = store.clone();
+        let first_two_bytes: usize = store
+            .chunks
+            .iter()
+            .take(2)
+            .map(|chunk| CHUNK_BYTES + chunk.payload_bytes)
+            .sum();
+        let before = CHUNK_CLONES.with(|count| count.get());
+        assert_eq!(
+            store.trim_to_bytes(store.memory_bytes() - first_two_bytes),
+            2048
+        );
+        assert_eq!(CHUNK_CLONES.with(|count| count.get()), before);
+        assert_eq!(store[0].message.as_ref(), "2048");
+        assert_eq!(snapshot[0].message.as_ref(), "0");
+        let before = CHUNK_CLONES.with(|count| count.get());
+        store.trim_to_bytes(store.memory_bytes() - 1000);
+        assert_eq!(CHUNK_CLONES.with(|count| count.get()), before + 1);
+    }
+
+    #[test]
+    fn cached_chunk_counts_match_full_recount_after_resolution_and_trim() {
+        let mut store = LogStore::default();
+        for _ in 0..2500 {
+            store.push(LogEntry::marker("x"));
+        }
+        let snapshot = store.clone();
+        for index in (0..2500).step_by(3) {
+            store.set_process(index, Arc::from("resolved"));
+        }
+        store.drain_front(1041);
+        store.trim_to_bytes(store.memory_bytes() - 15000);
+        assert_eq!(
+            store.unresolved_count(),
+            store.iter().filter(|entry| entry.process.is_none()).count()
+        );
+        assert_eq!(
+            store.memory_bytes(),
+            store.iter().map(LogEntry::payload_bytes).sum::<usize>()
+                + store.chunks.len() * CHUNK_BYTES
+        );
+        assert_eq!(snapshot.unresolved_count(), 2500);
     }
 }
