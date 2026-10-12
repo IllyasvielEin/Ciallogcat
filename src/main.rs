@@ -1841,7 +1841,9 @@ impl CiallogcatApp {
             ui.style_mut().interaction.selectable_labels = false;
             // Stop before laying out rows: a press and release can span many
             // capture updates, so waiting for clicked() lets the target move.
-            let browsing = ctx.input(|input| {
+            // Modal pointer presses belong to its buttons/backdrop, never to
+            // the obscured table. Preserve the existing follow choice on Cancel.
+            let browsing = !(self.pending_clear || self.pending_device.is_some()) && ctx.input(|input| {
                 input.pointer.hover_pos().is_some_and(|pos| ui.max_rect().contains(pos))
                     && (input.pointer.any_pressed() || input.smooth_scroll_delta.y > 0.0)
             });
@@ -2694,3 +2696,6 @@ mod log_table_regressions;
 
 #[cfg(test)]
 mod memory_regressions;
+
+#[cfg(test)]
+mod clear_cancel_regressions;
