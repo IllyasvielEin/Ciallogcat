@@ -1,11 +1,10 @@
-mod adb;
+use ciallogcat::{WakeSignal, adb, filter, log_store, model};
+mod level_color;
+use level_color::LevelColor;
 mod config;
 mod copy;
-mod filter;
 mod history;
-mod log_store;
 mod log_table_ui;
-mod model;
 #[cfg(test)]
 mod performance;
 mod selection;
@@ -60,6 +59,11 @@ fn memory_budget_bytes(mib: usize) -> usize {
     (mib as u64)
         .saturating_mul(MIB as u64)
         .min(usize::MAX as u64) as usize
+}
+
+fn wake_signal(ctx: &egui::Context) -> WakeSignal {
+    let ctx = ctx.clone();
+    WakeSignal::new(move || ctx.request_repaint())
 }
 
 fn main() -> eframe::Result {
@@ -232,7 +236,7 @@ impl CiallogcatApp {
         configure_fonts(ctx);
         configure_style(ctx, config.dark);
 
-        let (filter_tx, filter_rx) = filter::spawn_filter_worker(ctx.clone());
+        let (filter_tx, filter_rx) = filter::spawn_filter_worker(wake_signal(ctx));
 
         let (backend_tx, backend_rx) = mpsc::sync_channel::<BackendEvent>(BACKEND_QUEUE_CAPACITY);
         let active_filter = FilterSpec {
@@ -795,7 +799,7 @@ impl CiallogcatApp {
         if !self.device_query_pending && self.last_device_query.elapsed() >= DEVICE_POLL_INTERVAL {
             self.device_query_pending = true;
             self.last_device_query = Instant::now();
-            adb::spawn_device_query(adb_path.clone(), self.backend_tx.clone(), ctx.clone());
+            adb::spawn_device_query(adb_path.clone(), self.backend_tx.clone(), wake_signal(ctx));
         }
         if let Some(serial) = self.selected_device.clone()
             && self.selected_device_available()
@@ -810,7 +814,7 @@ impl CiallogcatApp {
                 serial,
                 self.capture_session_id,
                 self.backend_tx.clone(),
-                ctx.clone(),
+                wake_signal(ctx),
             );
         }
     }
@@ -899,7 +903,7 @@ impl CiallogcatApp {
             &self.buffers,
             self.capture_session_id,
             self.backend_tx.clone(),
-            ctx.clone(),
+            wake_signal(ctx),
         ) {
             Ok(handle) => self.capture_handle = Some(handle),
             Err(error) => self.capture_state = CaptureState::Error(error),
@@ -1007,7 +1011,7 @@ impl CiallogcatApp {
             return;
         };
         self.package_query_pending = true;
-        adb::spawn_package_query(adb_path, serial, self.backend_tx.clone(), ctx.clone());
+        adb::spawn_package_query(adb_path, serial, self.backend_tx.clone(), wake_signal(ctx));
     }
 
     fn refresh_devices(&mut self, ctx: &egui::Context) {
@@ -1028,7 +1032,7 @@ impl CiallogcatApp {
         }
         self.device_query_pending = true;
         self.last_device_query = Instant::now();
-        adb::spawn_device_query(adb_path, self.backend_tx.clone(), ctx.clone());
+        adb::spawn_device_query(adb_path, self.backend_tx.clone(), wake_signal(ctx));
     }
 
     fn apply_saved_filter(&mut self, saved: SavedFilter) {

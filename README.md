@@ -1,23 +1,24 @@
 # Ciallogcat
 
-A desktop Android Logcat viewer built with Rust and egui
+An Android Logcat viewer and headless capture tool, built with Rust.
 
 English | [简体中文](README.zh-CN.md)
 
-Ciallogcat is a standalone tool for debugging your Android apps, with Linux as its primary desktop target and Windows builds available. The Cargo package and executable use the lowercase name `ciallogcat`.
+Use the desktop app to browse live logs, or the CLI to capture and query them from scripts and local agents. Both use the same Rust core and an external ADB installation. Linux is the primary desktop target; release packaging supports Linux and Windows x86_64.
 
-- Live logs with timestamp, level, PID/TID, process name, tag, and message
-- Package, minimum-level, and keyword filters, including regular expressions and case-sensitive matching
+- Live logs with timestamps, levels, PID/TID, process names, tags, and full messages
+- Desktop filters for package, minimum level, and keywords, including regex and case-sensitive matching
 - Saved filters, keyword history, multiple Logcat buffers, and manual device selection
-- Multi-row selection and copying, full-message details, and independent live-follow controls
-- Light/dark themes, adjustable row height, and bundled Chinese/English fonts
-- Virtualized log display and a configurable memory budget
+- Multi-row copying, keyboard navigation, and live follow that pauses while you browse
+- Light/dark themes, bundled Chinese/English fonts, and a configurable log memory budget
+- A separate, display-free CLI with JSONL capture and finite local background sessions
 
 ## Table of Contents
 
 - [Background](#background)
 - [Install](#install)
-- [Usage](#usage)
+- [Desktop usage](#desktop-usage)
+- [Headless CLI](#headless-cli)
 - [Configuration](#configuration)
 - [Documentation](#documentation)
 - [Platform status](#platform-status)
@@ -27,123 +28,123 @@ Ciallogcat is a standalone tool for debugging your Android apps, with Linux as i
 
 ## Background
 
-Ciallogcat focuses on live Logcat debugging for personal Android app development. It runs ADB as a subprocess and filters captured logs locally. It does not currently support offline log files, side-by-side devices, log export, or other ADB utilities.
+Ciallogcat focuses on Android app debugging. The desktop app, `ciallogcat`, reads live Logcat through ADB and filters locally. The separate `ciallogcat-cli` executable writes normalized JSONL for scripts and agents without opening a window.
 
-The interface currently mixes English and Chinese labels. The instructions below include the labels used in the app.
+The desktop app does not currently import offline files, export logs to a file, or show devices side by side. Use the CLI for file capture; its output cannot yet be opened in the GUI. The desktop interface currently mixes English and Chinese labels.
 
 ## Install
 
-### Dependencies
+### ADB prerequisite
 
-Install [Android SDK Platform-Tools](https://developer.android.com/tools/releases/platform-tools) and make `adb` available on your `PATH`, or use an existing Android SDK installation. ADB is not bundled. Enable USB debugging on your device and accept its authorization prompt, then check:
+Install [Android SDK Platform-Tools](https://developer.android.com/tools/releases/platform-tools) and put `adb` on your `PATH`, or use an existing Android SDK. **ADB is not bundled.** Enable USB debugging, connect your Android device, and accept its authorization prompt. Check the connection with:
 
 ```sh
 adb devices
 ```
 
-Linux requires a graphical X11 or Wayland session, compatible graphics drivers, and system libraries. Linux release packages target Ubuntu 24.04 x86_64; compatibility with older Ubuntu or other Debian-based distributions is not guaranteed. See [Platform status](#platform-status) for verification limits.
-
 ### Release packages
 
-Choose an available version from [GitHub Releases](https://github.com/IllyasvielEin/Ciallogcat/releases). The release workflow packages Windows x86_64 ZIP, Linux x86_64 tar.gz, and Ubuntu 24.04 x86_64 DEB files, each with a `.sha256` checksum. The examples below use the v0.4 filenames; use the filename of the version you downloaded.
+Check [GitHub Releases](https://github.com/IllyasvielEin/Ciallogcat/releases) for published downloads. This source tree defines the following packages; older releases may not include the CLI. `<TAG>` below is the release tag, such as `v1.0`, rather than a literal part of the filename.
 
-On Ubuntu 24.04, install the DEB from its download directory:
+- **Desktop GUI:** `ciallogcat-<TAG>-windows-x86_64.zip`, `ciallogcat-<TAG>-linux-x86_64.tar.gz`, or `ciallogcat-<TAG>-linux-x86_64.deb`
+- **Headless CLI:** `ciallogcat-cli-<TAG>-windows-x86_64.zip` or `ciallogcat-cli-<TAG>-linux-x86_64.tar.gz`
 
-```sh
-sudo apt install ./ciallogcat-v0.4-linux-x86_64.deb
-ciallogcat
-```
+Each archive/package has a `.sha256` checksum. GUI and CLI downloads are separate; there is no CLI DEB or standalone core-library download.
 
-You can also launch it from the application menu. ADB is a recommended package dependency; if you already provide it through Android SDK Platform-Tools, install with `--no-install-recommends`. Uninstall with `sudo apt remove ciallogcat`; your user configuration is retained.
+Extract a portable archive and run `ciallogcat` / `ciallogcat.exe` for the desktop app, or `ciallogcat-cli` / `ciallogcat-cli.exe` for the CLI. From the extracted directory, launch the GUI with `./ciallogcat` on Linux or `.\ciallogcat.exe` in Windows PowerShell. For CLI help, use `./ciallogcat-cli --help` or `.\ciallogcat-cli.exe --help`, respectively. Add that directory to `PATH` to use the bare command names below.
 
-For the portable Linux archive:
+On Ubuntu 24.04, install the downloaded GUI DEB with `sudo apt install ./<downloaded-filename>.deb`, then launch **Ciallogcat** from the application menu or run `ciallogcat`. ADB is a recommended package dependency; if you provide it through the Android SDK, use `--no-install-recommends`. Uninstall with `sudo apt remove ciallogcat`; user settings are retained.
 
-```sh
-tar -xzf ciallogcat-v0.4-linux-x86_64.tar.gz
-cd ciallogcat-v0.4-linux-x86_64
-./ciallogcat
-```
-
-Install its runtime libraries and ADB separately. On Windows, extract the ZIP and run `ciallogcat.exe` inside the extracted folder.
+Linux packages are built on Ubuntu 24.04 x86_64; older distributions are not guaranteed compatible. **The GUI** needs an X11 or Wayland desktop, compatible graphics drivers, and runtime libraries. **The CLI** needs no display server, GPU, or GUI libraries.
 
 ### Build from source
 
-Install current [Rust stable](https://rustup.rs/), including Cargo, and Git. On Windows, use the MSVC toolchain with Visual Studio Build Tools' **Desktop development with C++** workload and Windows SDK.
-
-On Ubuntu / Debian, install build dependencies:
+Install current [Rust stable](https://rustup.rs/) with Cargo, and Git. Windows builds use the MSVC toolchain, Visual Studio Build Tools' **Desktop development with C++** workload, and the Windows SDK. Linux CLI builds need a C linker; GUI builds additionally need window-system development libraries. On Ubuntu / Debian, install the GUI build dependencies with:
 
 ```sh
 sudo apt-get update
 sudo apt-get install -y build-essential pkg-config libudev-dev libx11-dev libxi-dev libxrandr-dev libxcursor-dev libxkbcommon-dev libwayland-dev libegl1-mesa-dev
 ```
 
-Use equivalent packages on other distributions. Clone and run:
+Clone the repository, then choose a frontend:
 
 ```sh
 git clone https://github.com/IllyasvielEin/Ciallogcat.git
 cd Ciallogcat
-cargo run --locked --release
+
+# Run the desktop app
+cargo run --locked --release --bin ciallogcat
+
+# Build only the CLI, without GUI dependencies
+cargo build --locked --release --no-default-features --bin ciallogcat-cli
+./target/release/ciallogcat-cli --help
 ```
 
-To build without launching, use `cargo build --locked --release`. The executable is `target/release/ciallogcat` on Linux or `target/release/ciallogcat.exe` on Windows.
+To build the GUI without launching it, use `cargo build --locked --release --bin ciallogcat`. Binaries are in `target/release/`, with an `.exe` suffix on Windows. Rust consumers can also use the [shared core](docs/headless-core.md) with default features disabled.
 
-## Usage
+## Desktop usage
 
-Launch the installed application from your desktop menu or terminal:
+1. Launch `ciallogcat`, connect and authorize a device, then select it in **Device**. Selection is manual; use **刷新** (Refresh) if needed. Selecting an available device starts capture.
+2. Choose or enter a package name, set the minimum level, and enter a keyword. `.*` toggles regex and **Aa** toggles case sensitivity. **Saved filters** stores combinations; keyword history remembers recent searches.
+3. Click a row for its full message. **Shift+click** selects a range, **Ctrl+click** toggles rows, and **Ctrl+C** copies. **Ctrl+F** or **/** focuses search.
+4. Browsing or selecting pauses live follow without stopping capture. Use **Ctrl+End** or **回到最新** to follow new logs again.
+5. Use **View** for themes, row height, details, and the log memory budget. Budget edits take effect only after **Apply budget**.
 
-```sh
-ciallogcat
-```
+A few useful details:
 
-1. Connect and authorize an Android device, then select it in **Device**. Selection is manual; use **刷新** (Refresh) if needed. Capture starts when you select an available device.
-2. Focus the package field to choose an installed third-party app, or enter a package name. Set a minimum log level and enter a keyword. `.*` toggles regular expressions; **Aa** toggles case sensitivity.
-3. Click a log row to read its full message. Use **Ctrl+C** to copy, **Shift+click** for a range, or **Ctrl+click** to toggle individual rows.
-4. Use **Saved filters** to save or restore a filter combination. Keyword history appears when the keyword field is focused and stores up to 500 entries; it does not store the other filter settings.
-5. Use **View** to change the theme, row height, detail display, or log memory budget. Edit the budget draft and choose **Apply budget**; **Cancel budget**, Escape, or closing the menu discards it.
-
-### Capture and filtering
-
-- **暂停** (Pause) stops capture while keeping the device and logs. **开启** (Start) resumes from recent logs without replaying the paused interval. **关闭** (Close) stops capture and deselects the device; retained logs remain readable.
-- Reselecting the same paused device does not resume capture. Reconnecting to the same device preserves retained logs. Switching to another device asks before clearing them.
-- Buffers default to `main + system + crash`. You can also select `events`, `radio`, or exclusive `all`. Changes take effect after **应用** (Apply); active capture restarts, while paused capture stays paused. Existing logs remain, so the view can contain records from previous buffer selections. Starts and restarts use `-T 1`, with no historical backfill; switching may leave a short gap.
-- Package filtering includes subprocesses such as `com.example.app:sync`. It uses known process names, not message contents. Short-lived processes may go unidentified; their logs are retained but hidden by a package filter. Clear the package restriction to inspect them. Keyword and level filters still apply.
-- An invalid regular expression shows an error and clears the current results until corrected. **Clear** asks for confirmation and removes local logs only; it never clears the device's Logcat buffers.
-
-### Keyboard and live follow
-
-- **Ctrl+F** or **/**: focus keyword search
-- **↑ / ↓**, **Home / End**: select logs when an input or popup is not active
-- **Ctrl+A**: select all filtered logs; **Shift+navigation**: extend selection
-- **Ctrl+C**: copy selected text first, otherwise selected full log records in display order
-- **Esc**: dismiss input/popups or cancel row selection without clearing filters
-- **Ctrl+End** or **回到最新**: return to the latest logs and resume following
-
-Browsing or selecting logs pauses automatic following without stopping capture. Input fields keep their normal editing shortcuts. Filtering keeps matching selections; while a row is still being checked, its selection and details remain visible. Copy waits for the entire selection to be classified and must be retried explicitly. Memory trimming removes only expired selected rows and preserves surviving rows and the reading position; Clear cancels selection.
+- **暂停** (Pause) stops capture but keeps logs; **开启** (Start) resumes without backfilling the paused interval. **关闭** (Close) also deselects the device. Same-device reconnects preserve retained logs; switching devices asks before clearing them.
+- Buffers default to `main + system + crash`. Changes take effect after **应用** (Apply). Starts and restarts use `-T 1`, so they do not backfill history and may leave gaps.
+- Package filtering includes subprocesses such as `com.example.app:sync`. Unknown or short-lived processes can be hidden by that filter; clear the package restriction to inspect their logs.
+- Invalid regex shows an error until corrected. **Clear** removes local records after confirmation, never the device's Logcat buffers.
 
 ### Memory retention
 
-The default log budget is **300 MiB**, adjustable from **16–4096 MiB** in **View**. When exceeded, the oldest records are removed until the estimate falls to 90% of the budget. This covers retained log data, **not total process RSS**. Graphics, fonts, temporary work, and shared background snapshots add overhead.
+- The default retained-log budget is **300 MiB**, adjustable from **16–4096 MiB**. It is not a total-process memory limit. Oldest records are removed when the budget is exceeded.
+- Incoming lines are limited to **1 MiB** and truncation is marked. Full-record copying has a **16 MiB UTF-8** limit; oversized selections report an error without changing the clipboard.
 
-Individual incoming lines are limited to 1 MiB; longer lines are truncated and marked. Long-message previews are shortened, but filtering and copying use the full received text. See [log storage and rendering](docs/ui-review.md#日志存储与绘制) for queue, snapshot, and rendering details.
+See the [UI guide](docs/ui-review.md) for more on keyboard navigation, selection behavior, memory accounting, and graphics diagnostics.
 
-Full-record clipboard actions share a **16 MiB UTF-8 output limit**, independent of the retention budget. They preflight the exact formatted size, allocate once, and either copy complete records or report an error without changing the clipboard. Choose fewer rows after an oversized request. This is a conservative product limit, not a measured operating-system clipboard or RSS guarantee; native clipboard copies and selected-text copying have their own overhead.
+## Headless CLI
 
-Background filtering cancels obsolete scans cooperatively. Completed snapshot results appear immediately, and newer rows are checked in bounded UI slices with an explicit unchecked-row count. A single regex operation, allocation, or destructor is not preemptible, so the slices are not hard real-time guarantees.
+`ciallogcat-cli` is useful for terminal workflows, scripts, and local agents. After installing it or adding `target/release` to `PATH`, find your device and replace `DEVICE_SERIAL` below with its serial:
+
+```sh
+ciallogcat-cli devices
+
+# Foreground capture to a new file
+ciallogcat-cli capture --serial DEVICE_SERIAL --output capture.jsonl --duration-secs 30
+
+# A finite local background session, using a new directory
+ciallogcat-cli start --serial DEVICE_SERIAL --session-dir ./capture-session --duration-secs 300
+ciallogcat-cli status --session-dir ./capture-session
+ciallogcat-cli query --session-dir ./capture-session --after-seq 0 --limit 100 --query "timeout"
+ciallogcat-cli stop --session-dir ./capture-session
+```
+
+- Control responses are JSON. Captured records are **normalized JSONL**, not raw Logcat bytes. `capture --output -` streams records to stdout and sends its summary to stderr.
+- Both time and output-size bounds remain active: defaults are **600 seconds** and **64 MiB**. Use `--duration-secs` and `--max-bytes` to change them. Sessions end on a limit, ADB exit, a stop request, or an error; this is not an indefinite daemon.
+- `start` reporting `adb_process_started` means the worker and ADB process started. It does **not** prove device readiness or that logs will arrive. Inspect `status` and query the output.
+- `query --query` matches a case-sensitive literal substring of the message. For another page, pass its `next_after_seq` as `--after-seq`. The CLI does not expose all desktop filters.
+- Output files and session directories must be new. Keep captures private and review them before sharing; device logs can contain sensitive information.
+
+The [CLI guide](docs/cli.md) covers options, paging limits, exit codes, shutdown, and packaging. Run `ciallogcat-cli --help` for a quick reference.
 
 ## Configuration
 
-Settings, saved filters, and keyword history are stored locally:
+Desktop settings, saved filters, and keyword history are stored locally:
 
 - Linux: `$XDG_CONFIG_HOME/ciallogcat/config.json`, or `~/.config/ciallogcat/config.json` when unset
 - Windows: `%APPDATA%\Ciallogcat\config.json`
 
-Set `CIALLOGCAT_CONFIG_DIR` to use another configuration directory, or `CIALLOGCAT_ADB` to specify an ADB executable. Otherwise, the app searches SDK environment variables, `PATH`, and common SDK locations. Graphics diagnostic variables are documented in the [UI guide](docs/ui-review.md#图形诊断).
+Set `CIALLOGCAT_CONFIG_DIR` to change the desktop configuration directory. Both frontends support `CIALLOGCAT_ADB` for the ADB executable; the CLI also accepts `--adb PATH`. Otherwise, ADB discovery checks SDK environment variables, `PATH`, and common SDK locations. CLI sessions use the directory specified by `--session-dir`.
 
 ## Documentation
 
-The detailed guides are currently in Chinese:
+Detailed guides are in English or Chinese:
 
-- [UI behavior, performance, and graphics diagnostics](docs/ui-review.md)
+- [Desktop behavior and diagnostics](docs/ui-review.md)
+- [CLI commands and sessions](docs/cli.md)
+- [Shared Rust core](docs/headless-core.md)
 - [ADB subprocess tests and mocks](docs/adb-testing.md)
 - [Release workflow and packaging](docs/release.md)
 - [Contribution guide](CONTRIBUTING.md)
@@ -151,9 +152,9 @@ The detailed guides are currently in Chinese:
 
 ## Platform status
 
-Linux X11 and nested Wayland desktop checks have exercised ordinary interaction with mock logs. These checks do not establish real Android-device capture, long-running stability, or compatibility with every desktop.
+Release jobs target **Linux and Windows x86_64**. Linux fake-ADB tests exercise capture and session lifecycles; Windows CLI coverage includes help, version, argument, and packaging checks, but its capture/session lifecycles have not been validated. These tests do not establish real-device reliability or long-running stability.
 
-Known limits include misplaced Chinese IME candidates on the tested X11/XIM path, incomplete Wayland IME verification, and a nested Weston resize test blocked by a compositor crash. Windows window dragging may stutter. See the [verification notes](docs/ui-review.md#验证范围) for scope and details.
+Desktop checks have exercised ordinary interaction on Linux X11 and nested Wayland with mock logs. Known limits include Chinese IME candidate placement on the tested X11/XIM path, incomplete Wayland IME verification, and a nested Weston resize check blocked by a compositor crash. Windows window dragging may stutter. See the [verification notes](docs/ui-review.md#验证范围).
 
 ## Maintainers
 
@@ -166,13 +167,14 @@ Known limits include misplaced Chinese IME candidates on the tested X11/XIM path
 ```sh
 cargo fmt --all --check
 cargo test --locked
+cargo test --locked --no-default-features
 cargo clippy --locked --all-targets -- -D warnings
+cargo clippy --locked --no-default-features --all-targets -- -D warnings
 cargo build --locked --release
+cargo build --locked --release --no-default-features --bin ciallogcat-cli
 ```
 
-ADB subprocess tests use a Python 3 mock and currently run on Linux; they do not need an Android device. See the [test guide](docs/adb-testing.md) for commands and isolation boundaries. Synthetic [performance tests](docs/ui-review.md#性能测量) measure CPU-side work, not GPU frame rate or real-device throughput.
-
-The release workflow runs checks and packaging on version-tag pushes only. Branch pushes and pull requests do not trigger CI. See the [release guide](docs/release.md) before publishing.
+Mock ADB tests require Python 3 on Linux, not an Android device. See the [test guide](docs/adb-testing.md) and [CLI validation guide](docs/cli.md#validation-and-packaging). The release workflow runs only on version-tag pushes; branch pushes and pull requests do not trigger it. See the [release guide](docs/release.md) before publishing.
 
 ## License
 

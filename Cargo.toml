@@ -1,15 +1,30 @@
 [package]
 name = "ciallogcat"
-version = "0.4.0"
+version = "1.0.0"
 edition = "2024"
+default-run = "ciallogcat"
 description = "A desktop Android Logcat viewer built with Rust and egui"
 repository = "https://github.com/IllyasvielEin/Ciallogcat"
 license = "MIT"
 publish = false
 
+[features]
+default = ["gui"]
+gui = ["dep:eframe", "dep:egui_extras"]
+
+[[bin]]
+name = "ciallogcat"
+path = "src/main.rs"
+required-features = ["gui"]
+
+[[bin]]
+name = "ciallogcat-cli"
+path = "src/bin/ciallogcat-cli.rs"
+
 [dependencies]
-eframe = "0.36.1"
-egui_extras = "0.36.1"
+ctrlc = "3.5"
+eframe = { version = "0.36.1", optional = true }
+egui_extras = { version = "0.36.1", optional = true }
 regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

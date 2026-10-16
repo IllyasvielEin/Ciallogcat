@@ -10,26 +10,37 @@
 # 独立验证 mock 的命令协议和 watchdog
 python3 -B tests/fixtures/test_fake_adb.py
 
-# 运行所有 ADB 插桩场景；忽略项是仅由外层测试调用的内部 worker
-cargo test --locked adb::integration_tests -- --nocapture
+# 无 GUI 构建核心库与所有 ADB 插桩场景；忽略项是仅由外层测试调用的内部 worker
+cargo check --locked --no-default-features --lib
+cargo test --locked --no-default-features --lib adb::integration_tests -- --nocapture
+
+# 公共核心 API 回归：解析、过滤一致性、快照及通知顺序
+cargo test --locked --no-default-features --test headless_core
+
+# 验证无 GUI 依赖的完整目标集；依赖树不应包含 egui/eframe/epaint/winit/wgpu
+cargo test --locked --no-default-features --all-targets
+cargo tree --locked --no-default-features -e normal
 
 # 完整项目检查
 cargo fmt --all --check
 cargo test --locked
 cargo clippy --locked --all-targets -- -D warnings
+cargo clippy --locked --no-default-features --all-targets -- -D warnings
 cargo build --locked --release
 ```
 
-本次云端配置把 Rust stable、rustfmt 和 Clippy 安装到被忽略的 `target/toolchains/`，可以用 `. target/toolchains/env.sh` 激活。该文件仅存在于配置过的工作目录，普通开发环境继续使用自己的 Rust stable。清理 `target/` 会同时移除此本地工具链；可按 README 的官方 rustup 指引重新安装。测试不依赖这个安装位置。构建时使用已有 GCC、pkg-config 与系统运行库，未更改系统软件包。
+测试不依赖特定的 Rust 安装目录；普通开发环境使用自己的 Rust stable、rustfmt 和 Clippy。默认启用 `gui` 功能，完整项目检查仍会编译并测试桌面应用；`--no-default-features` 构建共享核心及独立的 `ciallogcat-cli`，无需 GUI 依赖；CLI 使用与桌面应用相同的 ADB 核心，详见 [CLI 指南](cli.md)。
 
 ## 文件与隔离
 
 - `tests/fixtures/fake_adb.py`：可复用、严格匹配命令的 Python fake ADB。
 - `tests/fixtures/test_fake_adb.py`：mock 自测，确认异常命令、退出码和 watchdog 等行为。
-- `tests/support/adb_integration.rs`：由 `src/adb.rs` 在 Linux 测试构建中引入，直接测试生产后端。应用运行时不包含这些测试。
-- 运行时副本、独立配置、JSONL 命令轨迹和 worker 输出放在 `target/adb-integration/`；Python 自测的临时文件也位于 `target/`。源码中的 fixture 是版本管理素材，不是生成的诊断文件。
+- `tests/support/adb_integration.rs`：由核心库的 `src/adb.rs` 在 Linux 测试构建中引入，直接测试生产后端，使用默认无操作 `WakeSignal`，不依赖 egui。应用运行时不包含这些测试。
+- `tests/headless_core.rs`：通过公共库 API 验证 threadtime / marker 解析、字面量与正则过滤、大小写、包名及级别规则、同步 / 异步结果一致性、快照隔离，以及过滤 / 高亮 / 后端事件发布后才调用通知。
+- `tests/support/config_integration.rs`：仅在默认 GUI 的 Linux 测试中由 `src/config.rs` 引入，独立验证配置目录覆盖与文件保存 / 读回。
+- 运行时副本、独立配置、JSONL 命令轨迹和 worker 输出放在 `target/adb-integration/`；Python 自测的临时文件也位于 `target/`；GUI 配置测试诊断文件位于 `target/config-integration/`。源码中的 fixture 是版本管理素材，不是生成的诊断文件。
 
-每个场景单独启动当前 Rust 测试程序，在创建进程时设置 `CIALLOGCAT_ADB`、`CIALLOGCAT_CONFIG_DIR`、`CIALLOGCAT_FAKE_SCENARIO` 和 `CIALLOGCAT_FAKE_TRACE`。不修改共享测试进程的环境变量，因此普通并行 `cargo test` 不会相互污染。每个场景会实际写入并读回自己的配置，并断言发现的 ADB 路径就是该场景的 mock。
+每个场景单独启动当前 Rust 测试程序，在创建进程时设置 `CIALLOGCAT_ADB`、`CIALLOGCAT_CONFIG_DIR`、`CIALLOGCAT_FAKE_SCENARIO` 和 `CIALLOGCAT_FAKE_TRACE`。不修改共享测试进程的环境变量，因此普通并行 `cargo test` 不会相互污染。每个场景断言发现的 ADB 路径就是该场景的 mock。配置文件的路径覆盖、保存和读回由单独的 GUI 配置子进程测试验证；其环境同样只在创建子进程时设置，不修改共享测试进程环境。
 
 外层 worker 有 20 秒硬截止；后台事件收集使用总截止时间；每个 mock 进程另有独立 8 秒 watchdog，堵塞在 stdout 写入时仍可退出。异常清理只对轨迹记录中、且 `/proc/<pid>/cmdline` 精确包含本场景独有可执行路径的进程发信号。正常场景检查所有 mock 子进程均已回收，包含避免僵尸进程的检查。轨迹和 worker 日志保留在 `target/` 方便诊断。
 

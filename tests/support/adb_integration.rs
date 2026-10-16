@@ -3,7 +3,6 @@
 //! Every scenario runs in a separate test process: environment overrides never
 //! race other tests, and a stuck backend cannot hang the outer test indefinitely.
 use super::*;
-use crate::config::AppConfig;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -176,7 +175,7 @@ fn receive(rx: &Receiver<BackendEvent>) -> BackendEvent {
 
 fn queries(adb: &Path, scenario: &str) {
     let (tx, rx) = mpsc::sync_channel(16);
-    spawn_device_query(adb.to_owned(), tx.clone(), Context::default());
+    spawn_device_query(adb.to_owned(), tx.clone(), WakeSignal::default());
     let BackendEvent::Devices(devices) = receive(&rx) else {
         panic!("wrong device event")
     };
@@ -210,7 +209,7 @@ fn queries(adb: &Path, scenario: &str) {
                     adb.to_owned(),
                     "192.0.2.1:5555".into(),
                     tx.clone(),
-                    Context::default(),
+                    WakeSignal::default(),
                 );
                 let BackendEvent::Packages { serial, result } = receive(&rx) else {
                     panic!("wrong package event")
@@ -231,7 +230,7 @@ fn queries(adb: &Path, scenario: &str) {
         adb.to_owned(),
         "TEST-USB".into(),
         tx.clone(),
-        Context::default(),
+        WakeSignal::default(),
     );
     let BackendEvent::Packages { serial, result } = receive(&rx) else {
         panic!("wrong package event")
@@ -242,7 +241,13 @@ fn queries(adb: &Path, scenario: &str) {
     } else {
         assert_eq!(result.unwrap(), ["com.example.alpha", "com.example.zeta"]);
     }
-    spawn_process_query(adb.to_owned(), "TEST-USB".into(), 7, tx, Context::default());
+    spawn_process_query(
+        adb.to_owned(),
+        "TEST-USB".into(),
+        7,
+        tx,
+        WakeSignal::default(),
+    );
     let BackendEvent::Processes {
         serial,
         session_id,
@@ -332,7 +337,7 @@ fn stream(adb: &Path, scenario: &str) {
         &[LogBuffer::Crash, LogBuffer::System],
         41,
         tx,
-        Context::default(),
+        WakeSignal::default(),
     )
     .unwrap();
     let mut capture = Capture::default();
@@ -408,8 +413,15 @@ fn repeated_capture(adb: &Path) {
         } else {
             vec![]
         };
-        let mut handle =
-            start_logcat(adb, "TEST-USB", &buffers, session, tx, Context::default()).unwrap();
+        let mut handle = start_logcat(
+            adb,
+            "TEST-USB",
+            &buffers,
+            session,
+            tx,
+            WakeSignal::default(),
+        )
+        .unwrap();
         let mut capture = Capture::default();
         while capture.entries.len() < 3 {
             capture.push(receive(&rx), session);
@@ -443,7 +455,7 @@ fn repeated_capture(adb: &Path) {
 
 fn burst(adb: &Path, stop: bool) {
     let (tx, rx) = mpsc::sync_channel(if stop { 1 } else { 4096 });
-    let mut handle = start_logcat(adb, "TEST-USB", &[], 90, tx, Context::default()).unwrap();
+    let mut handle = start_logcat(adb, "TEST-USB", &[], 90, tx, WakeSignal::default()).unwrap();
     if stop {
         // Started or stderr fills the channel; a reader then blocks trying to
         // send. Stopping must remain prompt, even without a draining UI.
@@ -520,7 +532,7 @@ fn burst(adb: &Path, stop: bool) {
 
 fn hung_query(adb: &Path) {
     let (tx, rx) = mpsc::sync_channel(1);
-    spawn_device_query(adb.to_owned(), tx, Context::default());
+    spawn_device_query(adb.to_owned(), tx, WakeSignal::default());
     assert!(matches!(
         rx.recv_timeout(Duration::from_millis(200)),
         Err(RecvTimeoutError::Timeout)
@@ -561,17 +573,6 @@ fn scenario_worker() {
     let expected = PathBuf::from(env::var_os("CIALLOGCAT_ADB").unwrap());
     let adb = find_adb().expect("fixture must be discoverable through CIALLOGCAT_ADB");
     assert_eq!(adb, expected);
-    let config_dir = PathBuf::from(env::var_os("CIALLOGCAT_CONFIG_DIR").unwrap());
-    assert_eq!(
-        crate::config::config_path().unwrap(),
-        config_dir.join("config.json")
-    );
-    let config = AppConfig {
-        query: scenario.clone(),
-        ..AppConfig::default()
-    };
-    config.save().unwrap();
-    assert_eq!(AppConfig::load().query, scenario);
     match scenario.as_str() {
         "stream_edges" | "eof_open" => stream(&adb, &scenario),
         "stderr_exit" => {

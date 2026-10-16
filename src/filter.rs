@@ -120,7 +120,7 @@ impl Drop for FilterSender {
     }
 }
 
-pub fn spawn_filter_worker(ctx: eframe::egui::Context) -> (FilterSender, FilterReceiver) {
+pub fn spawn_filter_worker(wake: crate::WakeSignal) -> (FilterSender, FilterReceiver) {
     enum Work {
         Filter(u64, FilterRequest),
         Highlight(u64, QueryKey),
@@ -231,7 +231,7 @@ pub fn spawn_filter_worker(ctx: eframe::egui::Context) -> (FilterSender, FilterR
                         });
                     }
                 }
-                ctx.request_repaint();
+                wake.notify();
             }
         })
         .expect("failed to start filter worker");
@@ -393,7 +393,7 @@ mod tests {
             }
         }
         for close in [false, true] {
-            let (sender, receiver) = spawn_filter_worker(eframe::egui::Context::default());
+            let (sender, receiver) = spawn_filter_worker(crate::WakeSignal::default());
             let mut entries = LogStore::default();
             let message: Arc<str> = Arc::from("x".repeat(4096));
             for _ in 0..20_000 {

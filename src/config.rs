@@ -151,3 +151,7 @@ mod tests {
         assert_eq!(config.buffers, LogBuffer::defaults());
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "../tests/support/config_integration.rs"]
+mod integration_tests;

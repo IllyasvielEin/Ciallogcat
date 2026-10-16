@@ -9,7 +9,7 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-use eframe::egui::Context;
+use crate::WakeSignal;
 use regex::Regex;
 
 use crate::model::{Level, LogBuffer, LogEntry};
@@ -232,13 +232,13 @@ fn parse_scoop_shim_target(config: &str) -> Option<PathBuf> {
     })
 }
 
-pub fn spawn_device_query(adb: PathBuf, event_tx: SyncSender<BackendEvent>, ctx: Context) {
+pub fn spawn_device_query(adb: PathBuf, event_tx: SyncSender<BackendEvent>, wake: WakeSignal) {
     std::thread::Builder::new()
         .name("adb-devices".to_owned())
         .spawn(move || {
             let result = run_adb(&adb, &["devices", "-l"]).map(|text| parse_devices(&text));
             let _ = event_tx.send(BackendEvent::Devices(result));
-            ctx.request_repaint();
+            wake.notify();
         })
         .expect("failed to start device query");
 }
@@ -247,7 +247,7 @@ pub fn spawn_package_query(
     adb: PathBuf,
     serial: String,
     event_tx: SyncSender<BackendEvent>,
-    ctx: Context,
+    wake: WakeSignal,
 ) {
     std::thread::Builder::new()
         .name("adb-packages".to_owned())
@@ -261,7 +261,7 @@ pub fn spawn_package_query(
                 serial: serial.clone(),
                 result,
             });
-            ctx.request_repaint();
+            wake.notify();
         })
         .expect("failed to start package query");
 }
@@ -271,7 +271,7 @@ pub fn spawn_process_query(
     serial: String,
     session_id: u64,
     event_tx: SyncSender<BackendEvent>,
-    ctx: Context,
+    wake: WakeSignal,
 ) {
     std::thread::Builder::new()
         .name("adb-processes".to_owned())
@@ -291,18 +291,24 @@ pub fn spawn_process_query(
                 session_id,
                 result,
             });
-            ctx.request_repaint();
+            wake.notify();
         })
         .expect("failed to start process query");
 }
 
+/// Start bounded Logcat capture for a caller-owned session.
+///
+/// Keep draining the event channel independently of `wake`: entry wake hints
+/// retain a 16 ms throttle with no trailing timer, so callbacks alone cannot
+/// guarantee that every queued entry is observed. Use channel `recv` /
+/// `recv_timeout` or an independent periodic pump. See [`WakeSignal`].
 pub fn start_logcat(
     adb: &Path,
     serial: &str,
     buffers: &[LogBuffer],
     session_id: u64,
     event_tx: SyncSender<BackendEvent>,
-    ctx: Context,
+    wake: WakeSignal,
 ) -> Result<LogcatHandle, String> {
     let mut command = adb_command(adb);
     command
@@ -323,7 +329,7 @@ pub fn start_logcat(
 
     if let Some(stderr) = stderr {
         let error_tx = event_tx.clone();
-        let error_ctx = ctx.clone();
+        let error_wake = wake.clone();
         std::thread::Builder::new()
             .name("adb-logcat-stderr".to_owned())
             .spawn(move || {
@@ -332,7 +338,7 @@ pub fn start_logcat(
                         session_id,
                         event: LogcatEvent::Stderr(line),
                     });
-                    error_ctx.request_repaint();
+                    error_wake.notify();
                 });
             })
             .expect("failed to start adb stderr reader");
@@ -346,7 +352,7 @@ pub fn start_logcat(
                 session_id,
                 event: LogcatEvent::Started,
             });
-            ctx.request_repaint();
+            wake.notify();
             let mut last_repaint = std::time::Instant::now();
             let stream_error = read_logcat_stream(BufReader::new(stdout), |entry| {
                 let _ = event_tx.send(BackendEvent::Logcat {
@@ -354,7 +360,7 @@ pub fn start_logcat(
                     event: LogcatEvent::Entry(entry.into()),
                 });
                 if last_repaint.elapsed() >= std::time::Duration::from_millis(16) {
-                    ctx.request_repaint();
+                    wake.notify();
                     last_repaint = std::time::Instant::now();
                 }
             })
@@ -393,7 +399,7 @@ pub fn start_logcat(
                 session_id,
                 event: LogcatEvent::Exited { code, error },
             });
-            ctx.request_repaint();
+            wake.notify();
         })
         .map_err(|error| format!("failed to start logcat reader: {error}"))?;
 
@@ -918,7 +924,7 @@ mod tests {
             &LogBuffer::defaults(),
             7,
             event_tx,
-            Context::default(),
+            WakeSignal::default(),
         )
         .unwrap();
 
