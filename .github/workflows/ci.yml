@@ -118,6 +118,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'CLI help smoke test failed' }
           & $binary --version
           if ($LASTEXITCODE -ne 0) { throw 'CLI version smoke test failed' }
+      - name: Install CLI Debian packaging tools
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dpkg-dev
       - name: CLI packaging tests
         run: python -m unittest discover -s .github/scripts -p test_package_cli.py
       - name: Package CLI only
@@ -126,6 +131,17 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
           RELEASE_PLATFORM: ${{ matrix.platform }}
         run: python .github/scripts/package-cli.py
+      - name: Verify CLI Debian installation and removal
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          docker run --rm \
+            -v "$PWD/target/cli-release-dist:/packages:ro" \
+            -v "$PWD/.github/scripts/verify-cli-deb.sh:/verify-cli-deb.sh:ro" \
+            -e DEBIAN_FRONTEND=noninteractive \
+            ubuntu:24.04 bash /verify-cli-deb.sh "/packages/ciallogcat-cli-${RELEASE_TAG}-linux-x86_64.deb"
       - uses: actions/upload-artifact@v6
         with:
           name: cli-${{ matrix.platform }}
@@ -165,7 +181,7 @@ jobs:
           else
             gh release create "$RELEASE_TAG" --verify-tag --draft \
               --title "Ciallogcat $RELEASE_TAG" --generate-notes \
-              --notes 'v1.0 introduces a shared headless Logcat core and a separate ciallogcat-cli for device discovery, bounded JSONL capture, and local background session start/status/query/stop. The default desktop application is retained. CLI-only builds omit GUI dependencies; standalone Windows x86_64 ZIP and Linux x86_64 tar.gz archives contain the CLI, MIT license and usage guide. GUI archives and an Ubuntu 24.04 DEB are also included. Install ADB separately. All GUI and CLI matrix jobs must pass before publication; DEB installation and removal are checked in a clean Ubuntu 24.04 container. Automated checks do not establish real-device capture, long-running memory behavior, Windows runtime or desktop interaction acceptance. Linux GUI packages require compatible system libraries and a graphical desktop.'
+              --notes 'v1.0 introduces a shared headless Logcat core and a separate ciallogcat-cli for device discovery, bounded JSONL capture, and local background session start/status/query/stop. The default desktop application is retained. CLI-only builds omit GUI dependencies; standalone Windows x86_64 ZIP and Linux x86_64 tar.gz/DEB packages contain the CLI, MIT license and usage guide. GUI archives and an Ubuntu 24.04 DEB are also included. Install ADB separately. All GUI and CLI matrix jobs must pass before publication; DEB installation and removal are checked in a clean Ubuntu 24.04 container. Automated checks do not establish real-device capture, long-running memory behavior, Windows runtime or desktop interaction acceptance. Linux GUI packages require compatible system libraries and a graphical desktop.'
           fi
           gh release upload "$RELEASE_TAG" ./*.zip ./*.tar.gz ./*.deb ./*.sha256 --clobber
           gh release edit "$RELEASE_TAG" --draft=false --prerelease="$prerelease"

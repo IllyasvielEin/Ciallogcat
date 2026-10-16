@@ -41,7 +41,7 @@ GUI 与 CLI 的四个矩阵作业成功后，发布作业核验所有 SHA-256 �
 | Linux x86_64 | ciallogcat-v1.0-linux-x86_64.tar.gz |
 | Ubuntu 24.04 x86_64 | ciallogcat-v1.0-linux-x86_64.deb |
 
-CLI 工作流另行生成 `ciallogcat-cli-v<VERSION>-linux-x86_64.tar.gz` 与 `ciallogcat-cli-v<VERSION>-windows-x86_64.zip`，名称使用校验后的实际版本标签。每个 CLI 压缩包仅包含版本目录下的 CLI 可执行文件、MIT `LICENSE` 和使用指南 `README.md`，不包含 GUI、字体或共享核心 `.rlib`。CLI 不生成 DEB。详情见 [CLI 指南](cli.md)。
+CLI 工作流另行生成 `ciallogcat-cli-v<VERSION>-linux-x86_64.tar.gz` 与 `ciallogcat-cli-v<VERSION>-windows-x86_64.zip`，名称使用校验后的实际版本标签。每个 CLI 压缩包仅包含版本目录下的 CLI 可执行文件、MIT `LICENSE` 和使用指南 `README.md`，不包含 GUI、字体或共享核心 `.rlib`。Linux CLI 还生成独立的 `ciallogcat-cli-v<VERSION>-linux-x86_64.deb` 与校验文件，Debian 包名为 `ciallogcat-cli`。依赖由 `dpkg-shlibdeps` 从无 GUI 的二进制自动生成，ADB 为推荐依赖；文件仅包含 `/usr/bin/ciallogcat-cli` 与自己的文档目录。干净 Ubuntu 24.04 容器验证安装、运行时链接、版本、帮助与卸载。详情见 [CLI 指南](cli.md)。
 
 每个附件都有同名 .sha256 文件。GUI ZIP 和 tar.gz 包含程序、文档、MIT 与字体 OFL 许可及 BUILD-INFO.txt。DEB 安装程序到 /usr/bin，桌面入口到 /usr/share/applications，图标到 hicolor 图标目录，文档及许可到 /usr/share/doc/ciallogcat。
 
@@ -52,3 +52,13 @@ DEB 自动分析链接库依赖，并显式声明运行时动态加载的图形�
 CI 成功不代表桌面交互和真机采集已完成验收。发布前检查设备授权与选择、开启/暂停/关闭、缓冲区多选、筛选、多行复制、跟随与浏览切换、断连重连，以及达到日志内存预算后的长期走势。安装/卸载检查不启动图形窗口。
 
 源码采用 MIT，内置字体采用 SIL OFL 1.1。临时诊断和构建产物保存在被忽略的 target 目录。不要提交设备日志、个人配置或凭据。
+
+
+## 为既有 v1.0 追加 CLI DEB
+
+独立的 `Supplement v1.0 CLI Debian package` 工作流只能从 main 手动触发，
+使用固定的原始 v1.0 提交 `fdb6956886e9ac144b43b4b6e80bb807b535fad7`
+构建 CLI，检查现有标签与当前 Cargo/源码一致，并使用新的打包脚本和安装指南。
+在干净 Ubuntu 24.04 容器验证与已发布 GUI DEB 的共存及独立卸载后，
+仅追加缺少的 CLI DEB 和 `.sha256`。已有同名资产必须与本次文件逐字节相同；
+否则失败并等待人工检查。不会移动 v1.0 标签、覆盖其他资产或重新发布 release。

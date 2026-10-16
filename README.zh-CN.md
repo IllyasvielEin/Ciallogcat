@@ -47,13 +47,15 @@ adb devices
 在 [GitHub Releases](https://github.com/IllyasvielEin/Ciallogcat/releases) 查看已发布的下载。当前源码定义了以下发布包；较早版本可能不含 CLI。下面的 `<TAG>` 代表实际版本标签，例如 `v1.0`，不是文件名中的字面内容。
 
 - **桌面 GUI：** `ciallogcat-<TAG>-windows-x86_64.zip`、`ciallogcat-<TAG>-linux-x86_64.tar.gz` 或 `ciallogcat-<TAG>-linux-x86_64.deb`
-- **无界面 CLI：** `ciallogcat-cli-<TAG>-windows-x86_64.zip` 或 `ciallogcat-cli-<TAG>-linux-x86_64.tar.gz`
+- **无界面 CLI：** `ciallogcat-cli-<TAG>-windows-x86_64.zip` 或 `ciallogcat-cli-<TAG>-linux-x86_64.tar.gz`；Ubuntu 24.04 DEB：`ciallogcat-cli-<TAG>-linux-x86_64.deb`
 
-每个压缩包或安装包都有 `.sha256` 校验文件。GUI 与 CLI 分开下载；目前没有 CLI DEB 或独立的核心库下载包。
+每个压缩包或安装包都有 `.sha256` 校验文件。GUI 与 CLI 分开下载；CLI DEB 与 GUI DEB 独立，可以同时安装；没有独立的核心库下载包。
 
 解压免安装包，运行 `ciallogcat` / `ciallogcat.exe` 启动桌面应用，或运行 `ciallogcat-cli` / `ciallogcat-cli.exe` 使用 CLI。在解压目录中，Linux 用 `./ciallogcat` 启动 GUI，Windows PowerShell 用 `.\ciallogcat.exe`。查看 CLI 帮助则分别使用 `./ciallogcat-cli --help` 或 `.\ciallogcat-cli.exe --help`。将该目录加入 `PATH` 后，即可使用下文不带路径的命令。
 
 Ubuntu 24.04 用户可用 `sudo apt install ./<下载的文件名>.deb` 安装 GUI DEB，再从应用菜单启动 **Ciallogcat** 或运行 `ciallogcat`。ADB 是推荐依赖；已有 Android SDK 的用户可加上 `--no-install-recommends`。卸载使用 `sudo apt remove ciallogcat`，用户设置会保留。
+
+CLI DEB 使用 `sudo apt install ./ciallogcat-cli-<TAG>-linux-x86_64.deb` 安装，运行 `ciallogcat-cli --help`，使用 `sudo apt remove ciallogcat-cli` 卸载。ADB 为推荐依赖，也可由 Android SDK Platform-Tools 提供。
 
 Linux 发布包在 Ubuntu 24.04 x86_64 上构建，不保证兼容较旧发行版。**GUI** 需要 X11 或 Wayland 桌面、兼容的图形驱动和运行库；**CLI** 无需显示服务器、GPU 或 GUI 库。
 

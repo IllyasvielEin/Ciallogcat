@@ -1,0 +1,134 @@
+name: Supplement v1.0 CLI Debian package
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: supplement-v1.0-cli-deb
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: v1.0
+  RELEASE_COMMIT: fdb6956886e9ac144b43b4b6e80bb807b535fad7
+  RELEASE_PLATFORM: linux-x86_64
+
+jobs:
+  build:
+    name: Build and validate immutable v1.0 CLI
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out packaging helpers
+        uses: actions/checkout@v5
+        with:
+          path: packaging
+      - name: Check out existing release source
+        uses: actions/checkout@v5
+        with:
+          ref: v1.0
+          path: source
+          fetch-depth: 0
+      - name: Verify immutable tag and unchanged CLI sources
+        working-directory: source
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$RELEASE_COMMIT"
+          test "$(git rev-parse 'refs/tags/v1.0^{commit}')" = "$RELEASE_COMMIT"
+          # Only packaging/docs may differ from the reviewed release source.
+          diff -u Cargo.toml ../packaging/Cargo.toml
+          diff -u Cargo.lock ../packaging/Cargo.lock
+          diff -ru src ../packaging/src
+          diff -ru tests ../packaging/tests
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install CLI packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential dpkg-dev
+      - name: Test packaging helpers
+        working-directory: packaging
+        run: python -m unittest discover -s .github/scripts -p test_package_cli.py
+      - name: Build headless CLI from immutable release source
+        working-directory: source
+        run: |
+          cargo test --locked --no-default-features
+          cargo build --locked --release --no-default-features --bin ciallogcat-cli
+          ./target/release/ciallogcat-cli --help
+          ./target/release/ciallogcat-cli --version
+      - name: Package CLI Debian supplement
+        working-directory: source
+        run: |
+          # Use the new packaging helper and current install guide only;
+          # the executable and Cargo/source inputs remain from the old tag.
+          cp ../packaging/docs/cli.md docs/cli.md
+          python ../packaging/.github/scripts/package-cli.py --deb-only
+          test "$(dpkg-deb --field target/cli-release-dist/*.deb Version)" = 1.0.0
+      - name: Verify install, GUI coexistence and independent removal
+        working-directory: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release download "$RELEASE_TAG" --pattern 'ciallogcat-v1.0-linux-x86_64.deb' --pattern 'ciallogcat-v1.0-linux-x86_64.deb.sha256' --dir target/cli-release-dist
+          (cd target/cli-release-dist && sha256sum --check ciallogcat-v1.0-linux-x86_64.deb.sha256)
+          docker run --rm \
+            -v "$PWD/target/cli-release-dist:/packages:ro" \
+            -v "$PWD/../packaging/.github/scripts/verify-cli-deb.sh:/verify-cli-deb.sh:ro" \
+            -e DEBIAN_FRONTEND=noninteractive ubuntu:24.04 \
+            bash /verify-cli-deb.sh /packages/ciallogcat-cli-v1.0-linux-x86_64.deb /packages/ciallogcat-v1.0-linux-x86_64.deb
+      - uses: actions/upload-artifact@v6
+        with:
+          name: supplemental-cli-deb
+          path: |
+            source/target/cli-release-dist/ciallogcat-cli-v1.0-linux-x86_64.deb
+            source/target/cli-release-dist/ciallogcat-cli-v1.0-linux-x86_64.deb.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  upload:
+    name: Append only missing v1.0 CLI Debian assets
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          name: supplemental-cli-deb
+          path: dist
+      - name: Verify existing public release and upload missing assets
+        working-directory: dist
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          test "$(gh api "repos/$GH_REPO/commits/$RELEASE_TAG" --jq .sha)" = "$RELEASE_COMMIT"
+          gh release view "$RELEASE_TAG" --json tagName,isDraft,assets > release.json
+          test "$(jq -r .tagName release.json)" = "$RELEASE_TAG"
+          test "$(jq -r .isDraft release.json)" = false
+          sha256sum --check ciallogcat-cli-v1.0-linux-x86_64.deb.sha256
+          assets=(ciallogcat-cli-v1.0-linux-x86_64.deb ciallogcat-cli-v1.0-linux-x86_64.deb.sha256)
+          mkdir existing
+          # Preflight all existing names before adding anything. Never replace
+          # an asset; mismatched partial prior uploads require human review.
+          for asset in "${assets[@]}"; do
+            if jq -e --arg name "$asset" '.assets[] | select(.name == $name)' release.json >/dev/null; then
+              gh release download "$RELEASE_TAG" --pattern "$asset" --dir existing
+              cmp "$asset" "existing/$asset"
+            fi
+          done
+          for asset in "${assets[@]}"; do
+            if [[ ! -e "existing/$asset" ]]; then
+              gh release upload "$RELEASE_TAG" "$asset"
+            fi
+          done
+          # Verify the public pair after upload; no release edits or tag moves.
+          mkdir published
+          for asset in "${assets[@]}"; do
+            gh release download "$RELEASE_TAG" --pattern "$asset" --dir published
+          done
+          (cd published && sha256sum --check ciallogcat-cli-v1.0-linux-x86_64.deb.sha256)

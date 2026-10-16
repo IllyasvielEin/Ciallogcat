@@ -4,6 +4,8 @@ import hashlib
 import importlib.util
 import json
 import os
+import shutil
+import subprocess
 from pathlib import Path
 import tarfile
 import tempfile
@@ -75,6 +77,80 @@ class PackageCliTests(unittest.TestCase):
         Path("target/release/ciallogcat-cli").unlink()
         with patch.dict(os.environ, RELEASE_TAG="v1.0", RELEASE_PLATFORM="linux-x86_64"), self.assertRaises(FileNotFoundError):
             PACKAGER.package()
+
+
+    def test_debian_version_preserves_build_metadata(self):
+        for version, expected in (
+            ("1.0.0", "1.0.0"),
+            ("1.0.0-rc.1+build-foo", "1.0.0~rc.1+build-foo"),
+            ("1.0.0+build-foo", "1.0.0+build-foo"),
+        ):
+            with self.subTest(version=version):
+                self.assertEqual(PACKAGER.debian_version(version), expected)
+
+    def test_deb_rejects_non_elf_and_windows(self):
+        with patch.dict(os.environ, RELEASE_TAG="v1.0", RELEASE_PLATFORM="linux-x86_64"), self.assertRaises(ValueError):
+            PACKAGER.package_deb()
+        with patch.dict(os.environ, RELEASE_TAG="v1.0", RELEASE_PLATFORM="windows-x86_64"), self.assertRaises(ValueError):
+            PACKAGER.package_deb()
+
+    def elf_fixture(self):
+        # Metadata fixture, not a runnable executable; real dependency resolution
+        # and runtime/install checks run in Ubuntu CI without mocks.
+        header = bytearray(20)
+        header[:6] = b"\x7fELF\x02\x01"
+        header[18:20] = (62).to_bytes(2, "little")
+        Path("target/release/ciallogcat-cli").write_bytes(header)
+
+    def test_deb_requires_verified_versioned_libc_dependency(self):
+        self.elf_fixture()
+        for dependencies in ("", "shlibs:Depends=\n", "shlibs:Depends=libc6, libgcc-s1\n"):
+            with self.subTest(dependencies=dependencies), patch.dict(
+                os.environ, RELEASE_TAG="v1.0", RELEASE_PLATFORM="linux-x86_64"
+            ), patch.object(PACKAGER, "release_metadata", return_value=("v1.0", "linux-x86_64", "1.0.0")), patch.object(
+                PACKAGER.subprocess, "check_output", return_value=dependencies
+            ), self.assertRaises(ValueError):
+                PACKAGER.package_deb()
+
+    def test_deb_dependency_resolution_failure_is_not_ignored(self):
+        self.elf_fixture()
+        with patch.object(PACKAGER, "release_metadata", return_value=("v1.0", "linux-x86_64", "1.0.0")), patch.object(
+            PACKAGER.subprocess, "check_output", side_effect=subprocess.CalledProcessError(1, "dpkg-shlibdeps")
+        ), self.assertRaises(subprocess.CalledProcessError):
+            PACKAGER.package_deb()
+
+    @unittest.skipUnless(shutil.which("dpkg-deb"), "Debian archive tool required")
+    def test_deb_metadata_allowlist_ownership_and_checksum(self):
+        self.elf_fixture()
+        # Bypass the setUp Cargo mock to inspect actual archive-tool output.
+        real_output = subprocess.run
+        def dependency_fixture(command, *, cwd, text):
+            self.assertEqual(command[0], "dpkg-shlibdeps")
+            self.assertIn("-O", command)
+            self.assertIn("Package: ciallogcat-cli", (Path(cwd) / "debian/control").read_text())
+            return "shlibs:Depends=libc6 (>= 2.39), libgcc-s1 (>= 4.2)\n"
+        with patch.object(PACKAGER, "release_metadata", return_value=("v1.0", "linux-x86_64", "1.0.0")), patch.object(
+            PACKAGER.subprocess, "check_output", side_effect=dependency_fixture
+        ) as resolve:
+            archive = PACKAGER.package_deb()
+            self.assertEqual(resolve.call_args.args[0][0], "dpkg-shlibdeps")
+        def inspect(*args):
+            return real_output(["dpkg-deb", *args, str(archive)], check=True, capture_output=True, text=True).stdout
+        control = inspect("--field")
+        for field in ("Package: ciallogcat-cli", "Version: 1.0.0", "Architecture: amd64", "Recommends: adb",
+                      "Depends: libc6 (>= 2.39), libgcc-s1 (>= 4.2)"):
+            self.assertIn(field, control)
+        listing = inspect("--contents")
+        files = [line for line in listing.splitlines() if not line.startswith("d")]
+        self.assertEqual({line.split()[-1] for line in files}, {
+            "./usr/bin/ciallogcat-cli", "./usr/share/doc/ciallogcat-cli/copyright",
+            "./usr/share/doc/ciallogcat-cli/README.md",
+        })
+        self.assertTrue(all("root/root" in line for line in files))
+        self.assertIn("-rwxr-xr-x", next(line for line in files if line.endswith("/ciallogcat-cli")))
+        self.assertEqual(archive.name, "ciallogcat-cli-v1.0-linux-x86_64.deb")
+        self.assertEqual(archive.with_name(archive.name + ".sha256").read_text(),
+                         f"{hashlib.sha256(archive.read_bytes()).hexdigest()}  {archive.name}\n")
 
 
 if __name__ == "__main__":

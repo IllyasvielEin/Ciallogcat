@@ -7,20 +7,29 @@ eframe, or egui. ADB is installed separately.
 
 ## Install and build
 
-The release workflow packages CLI archives for **Linux x86_64** and
-**Windows x86_64** only:
+The release workflow packages the headless CLI for **Linux x86_64** and
+**Windows x86_64**:
 
 - `ciallogcat-cli-v<VERSION>-linux-x86_64.tar.gz`
 - `ciallogcat-cli-v<VERSION>-windows-x86_64.zip`
+- `ciallogcat-cli-v<VERSION>-linux-x86_64.deb` (Ubuntu 24.04, amd64)
 
-Each contains a versioned directory with `ciallogcat-cli` (or
+Each portable archive contains a versioned directory with `ciallogcat-cli` (or
 `ciallogcat-cli.exe`), `LICENSE`, and this guide as `README.md`. Verify the
 accompanying `.sha256` file before extracting. The version follows the release
 tag; for example, a `v1.0` tag build uses `ciallogcat-cli-v1.0-…`.
-Adding CLI packaging does not change assets already published under old tags.
 The GUI ZIP/tar.gz/DEB names are unchanged. There is no standalone core-library
-release artifact or CLI DEB. Linux builds use Ubuntu 24.04; older systems are
-not guaranteed compatible.
+release artifact. Linux builds use Ubuntu 24.04; older systems are not guaranteed
+compatible.
+
+Install the CLI DEB with `sudo apt install ./ciallogcat-cli-v<VERSION>-linux-x86_64.deb`.
+It installs `/usr/bin/ciallogcat-cli` and its own license/guide under
+`/usr/share/doc/ciallogcat-cli`, with no desktop launcher, icon, or GUI binary.
+Runtime dependencies are determined from the headless binary by `dpkg-shlibdeps`.
+ADB is recommended, matching the GUI package; use `--no-install-recommends` if
+Android SDK Platform-Tools already supplies it. ADB is still needed for capture.
+The GUI and CLI DEBs can coexist. Remove just the CLI with
+`sudo apt remove ciallogcat-cli`; session directories remain where you created them.
 
 Build just the CLI, without GUI dependencies:
 
@@ -145,15 +154,26 @@ fields rather than match diagnostic prose.
 
 ## Validation and packaging
 
-The existing release workflow still runs only on version-tag pushes. It has
+The normal release workflow runs only on version-tag pushes. It has
 separate GUI and headless CLI Linux/Windows jobs. The CLI job does not install
 GUI development packages and runs headless tests, Clippy, the explicit CLI
 release build, `--help`/`--version` smoke checks, and packaging contract tests.
 Linux fake-ADB integration tests exercise capture/session process lifecycles.
 Windows runs portable CLI help/version/argument tests and packaging tests;
 Windows fake-ADB lifecycle and real-device behavior have not been verified.
-Release publication waits for both GUI and CLI jobs. It uploads CLI archives and
-checksums alongside existing GUI assets; it never uploads Cargo `.rlib` files.
+Release publication waits for both GUI and CLI jobs. It uploads CLI archives, the Linux CLI DEB, and
+checksums alongside GUI assets; it never uploads Cargo `.rlib` files.
+DEB dependency discovery fails closed on unresolved libraries or an unverified
+libc minimum. A clean Ubuntu 24.04 container checks installation, runtime linkage,
+help/version, and removal without installing the package on the build host.
+
+A separate, manually dispatched `Supplement v1.0 CLI Debian package` workflow
+can append only the missing v1.0 CLI DEB and checksum to the existing public
+release. It builds the headless binary from the pinned original v1.0 commit,
+verifies that current Cargo/source inputs are unchanged, uses the new packaging
+helper, and checks coexistence with the published GUI DEB. It never moves the
+v1.0 tag, replaces published assets, or republishes the release. Existing asset
+bytes must match before a partial upload can proceed.
 
 ```sh
 cargo test --locked --no-default-features
@@ -162,6 +182,7 @@ python -m unittest discover -s .github/scripts -p test_package_cli.py
 ```
 
 The packaging tests check Linux and Windows names and allowlists, executable
-permissions in the Linux archive, checksums, invalid tags/platforms, and missing
-CLI binaries. Creating a tag or running the release workflow is a separate,
+permissions in the Linux archive, DEB metadata/file allowlists/root ownership,
+checksums, invalid tags/platforms, missing CLI binaries, and dependency-discovery
+failures. Mock dependency fixtures do not replace actual CI dependency discovery. Creating a tag or running the release workflow is a separate,
 explicit publication action.

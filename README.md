@@ -47,13 +47,15 @@ adb devices
 Check [GitHub Releases](https://github.com/IllyasvielEin/Ciallogcat/releases) for published downloads. This source tree defines the following packages; older releases may not include the CLI. `<TAG>` below is the release tag, such as `v1.0`, rather than a literal part of the filename.
 
 - **Desktop GUI:** `ciallogcat-<TAG>-windows-x86_64.zip`, `ciallogcat-<TAG>-linux-x86_64.tar.gz`, or `ciallogcat-<TAG>-linux-x86_64.deb`
-- **Headless CLI:** `ciallogcat-cli-<TAG>-windows-x86_64.zip` or `ciallogcat-cli-<TAG>-linux-x86_64.tar.gz`
+- **Headless CLI:** `ciallogcat-cli-<TAG>-windows-x86_64.zip` or `ciallogcat-cli-<TAG>-linux-x86_64.tar.gz`; Ubuntu 24.04 DEB: `ciallogcat-cli-<TAG>-linux-x86_64.deb`
 
-Each archive/package has a `.sha256` checksum. GUI and CLI downloads are separate; there is no CLI DEB or standalone core-library download.
+Each archive/package has a `.sha256` checksum. GUI and CLI downloads are separate; the CLI DEB is independent of the GUI DEB, and there is no standalone core-library download.
 
 Extract a portable archive and run `ciallogcat` / `ciallogcat.exe` for the desktop app, or `ciallogcat-cli` / `ciallogcat-cli.exe` for the CLI. From the extracted directory, launch the GUI with `./ciallogcat` on Linux or `.\ciallogcat.exe` in Windows PowerShell. For CLI help, use `./ciallogcat-cli --help` or `.\ciallogcat-cli.exe --help`, respectively. Add that directory to `PATH` to use the bare command names below.
 
 On Ubuntu 24.04, install the downloaded GUI DEB with `sudo apt install ./<downloaded-filename>.deb`, then launch **Ciallogcat** from the application menu or run `ciallogcat`. ADB is a recommended package dependency; if you provide it through the Android SDK, use `--no-install-recommends`. Uninstall with `sudo apt remove ciallogcat`; user settings are retained.
+
+Install the headless CLI DEB with `sudo apt install ./ciallogcat-cli-<TAG>-linux-x86_64.deb`, then run `ciallogcat-cli --help`. It can coexist with the GUI DEB; remove it with `sudo apt remove ciallogcat-cli`. ADB is recommended and can also be supplied by Android SDK Platform-Tools.
 
 Linux packages are built on Ubuntu 24.04 x86_64; older distributions are not guaranteed compatible. **The GUI** needs an X11 or Wayland desktop, compatible graphics drivers, and runtime libraries. **The CLI** needs no display server, GPU, or GUI libraries.
 
@@ -174,7 +176,7 @@ cargo build --locked --release
 cargo build --locked --release --no-default-features --bin ciallogcat-cli
 ```
 
-Mock ADB tests require Python 3 on Linux, not an Android device. See the [test guide](docs/adb-testing.md) and [CLI validation guide](docs/cli.md#validation-and-packaging). The release workflow runs only on version-tag pushes; branch pushes and pull requests do not trigger it. See the [release guide](docs/release.md) before publishing.
+Mock ADB tests require Python 3 on Linux, not an Android device. See the [test guide](docs/adb-testing.md) and [CLI validation guide](docs/cli.md#validation-and-packaging). The normal release workflow runs only on version-tag pushes; branch pushes and pull requests do not trigger it. A separate manual workflow can append only the CLI DEB/checksum to the immutable v1.0 release after clean-container validation. See the [release guide](docs/release.md) before publishing.
 
 ## License
 
