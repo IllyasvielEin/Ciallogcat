@@ -78,6 +78,8 @@ pub(super) struct Row {
     pub entry: LogEntry,
     pub kind: &'static str,
     pub metadata: Option<document::RecordMetadata>,
+    /// Legacy receive time is not a native capture identity.
+    pub legacy_received_unix_ms: Option<u64>,
 }
 
 pub(super) fn invalid(message: impl Into<String>) -> super::super::Error {
@@ -494,6 +496,7 @@ impl Source {
                 entry,
                 kind,
                 metadata: Some(meta),
+                legacy_received_unix_ms: None,
             })
         } else {
             let mut reader = LegacyReader::new(
@@ -518,6 +521,7 @@ impl Source {
                 seq: row.seq,
                 kind: "entry",
                 metadata: None,
+                legacy_received_unix_ms: row.observed_unix_ms,
                 entry: LogEntry::new(row.time, row.pid, row.tid, row.tag, level, row.message),
             })
         }

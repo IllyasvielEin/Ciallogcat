@@ -1,7 +1,7 @@
 # ciallogcat-cli
 
 `ciallogcat-cli` is a headless frontend for Ciallogcat's shared Rust parser,
-ADB capture, and literal message-filter code. It is a separate executable
+ADB capture, and message/filter code. It is a separate executable
 from the desktop `ciallogcat` application. It does not require a display server, graphics drivers,
 eframe, or egui. ADB is installed separately.
 
@@ -49,6 +49,67 @@ Install Android SDK Platform-Tools, enable USB debugging, and authorize your
 computer on the device. Use `devices` to find a serial before capturing. An
 unauthorized or offline device cannot produce a usable capture.
 
+## Recommended query workflow
+
+Use `query-v2` for both legacy v1 and native v2/v3 files or sessions. The legacy
+`query` command remains compatible with sequence-based v1 callers; it now also
+reports `complete` and `stop_reason`. Prefer offset cursors to repeated prefix scans.
+
+```sh
+# One bounded JSON preview page for agents; continue next_cursor while has_more.
+ciallogcat-cli query-v2 --session-dir ./capture-session --query timeout --ignore-case
+# A finite snapshot, scanned to the end automatically; no truncated previews.
+ciallogcat-cli query-v2 --file capture.jsonl --all --format text --regex --query 'timeout|failed' --tag Network --pid 1234 --min-level W
+# Full decoded JSONL on stdout, completion metadata on stderr.
+ciallogcat-cli query-v2 --session-dir ./capture-session --all --format jsonl > matches.jsonl 2> summary.json
+# Host receipt time, not yearless device display time (new captures).
+ciallogcat-cli query-v2 --session-dir ./capture-session --all --since 5m --until 30s
+```
+
+`--all` fixes a snapshot and internally follows signed offset cursors until
+`complete=true`, including empty matching pages. It does not wait for future data.
+The default format with `--all` is `jsonl`; explicit `--format json` and tail mode
+are rejected. Without `--all`, text/JSONL returns one page and writes its cursor
+and completeness metadata to stderr. `--limit` and scan/response budgets remain
+**per-page**, not a total result limit; streamed full records are not bounded by
+the preview response budget. Memory is bounded by a page and a single record/view,
+not by capture size or total matching rows. `complete` means the query boundary
+was scanned, not that the device capture has no gaps or has stopped.
+
+Text is a normalized readable view (multiline messages remain multiline).
+JSONL contains full decoded JSON including extensions; compact v3 decoded output
+is a **derived view, not a native archive**. Neither format is raw device output.
+A late validation, time-data, or write error may leave partial stdout; check the
+exit status and the final JSON summary on stderr before treating an export as
+complete. For pipelines needing transactional files, write a temporary file and
+rename only after successful completion. Existing source files are never changed.
+
+Filters combine with AND. `--query` remains literal and case-sensitive by default;
+`--regex` enables Rust regex syntax, `--ignore-case` affects message matching only,
+and `--case-sensitive` explicitly selects the default. `--tag`/`--tag-include`
+and `--tag-exclude` use case-sensitive literal substrings as in the GUI.
+`--package` uses the shared GUI process/package predicate when that metadata is
+stored; `--pid` and `--tid` match exact unsigned IDs. `--min-level` accepts
+V/D/I/W/E/F or full names. Metadata filters never match placeholder fields of
+marker/unparsed records. Each text filter is limited to 4096 UTF-8 bytes.
+
+Query `--since` (inclusive) and `--until` (exclusive) accept RFC3339 timestamps
+with explicit timezone (e.g. `2026-10-28T02:00:00Z`) or integer ages such as
+`30s`, `5m`, `2h`, `1d`. Relative bounds anchor once to host UTC and are retained
+in the cursor; keep the original filter options unchanged when continuing.
+`--time-basis received` (default) uses persisted host `observed_unix_ms`;
+`--time-basis device` requires the exact protobuf epoch. An otherwise matching
+record without the requested time returns `time_unavailable`, not an invented
+year/timezone or a silent omission. New default v1 captures add optional `observed_unix_ms`, sampled when the ADB
+adapter observes the record, before queue/backpressure waiting (the same clock
+as native provenance). This is host UTC receipt time, not device event time;
+host clock adjustments remain observable. It does not create a v1 session
+identity. Older v1 records lacking this optional field remain readable but
+return `time_unavailable` for receipt-time filtering; ordinary text logcat
+timestamps are not absolute instants. Explicit null also means unavailable;
+non-integer, negative, or out-of-u64 timestamp values are invalid records. Capture/start `--since` retains
+its separate device-logcat history syntax; it is not this offline query option.
+
 ## Commands
 
 Run `ciallogcat-cli --help` for the argument reference, or `query-v2 --help`,
@@ -81,14 +142,14 @@ comma-separated `main,system,crash,events,radio`, or `all` alone. Names must be
 exact, with no empty tokens or duplicates. There are no package, level, or regex
 capture flags; message filtering is available through query commands.
 `--limit` defaults to 100 (maximum 10000). Query returns an `entries` array,
-`next_after_seq`, `has_more`, `partial`, and `scan_limited`. Pass
+`next_after_seq`, `has_more`, `partial`, `scan_limited`, `complete`, and `stop_reason`. Pass
 `next_after_seq` back as `--after-seq` for the next page, including when matching
 returns no entries. The cursor advances over scanned nonmatches. Per-call scan
 limits are 16 MiB / 100000 candidate records after the cursor, with an
 8 MiB returned-record budget, plus the JSON envelope. `scan_limited` reports a candidate-scan budget being
 reached. These limits do not bound total input read: each query rereads and
 parses the earlier prefix from the start of the file, with no index, so later
-pages can read up to the entire configured capture size (default 64 MiB,
+pages can read up to the entire configured capture size (default 1 GiB,
 maximum 1 GiB). Query cost grows with that prefix. `partial` means a trailing
 incomplete JSONL record was skipped and can be retried after the writer finishes.
 
@@ -101,7 +162,7 @@ bounded responses, scan budgets and reference-based retrieval.
 
 Both duration and output-byte bounds remain active for each capture:
 `--duration-secs` defaults to 600 (maximum 86400), and `--max-bytes` defaults
-to 67108864 (64 MiB; maximum 1073741824). Both must be positive. Optional
+to 1073741824 (1 GiB; also the maximum). This is a disk/output cap, not a RAM allocation, and reaching it stops capture; no rolling overwrite is introduced. Both must be positive. Optional
 `--max-entries` lowers the positive record bound (default and maximum 10000000). A v1 session ends when a bound is reached, ADB
 exits, a stop is requested, or an error occurs. V2 applies bounded reconnects as described below. This is a bounded capture tool,
 not an indefinitely running daemon. Foreground Ctrl-C requests graceful

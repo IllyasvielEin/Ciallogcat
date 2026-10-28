@@ -1,7 +1,8 @@
 //! Bounded reading and writing of the existing CLI v1 JSONL exchange format.
 //!
 //! V1 does not preserve process attribution, source identity, record kind or
-//! capture completeness. Reading it must not invent those fields. The native
+//! capture completeness. New captures may include a host observation timestamp;
+//! older records omit it. Reading must not invent missing fields. The native
 //! versioned document format will be a separate adapter, not a silent v1 change.
 use std::collections::BTreeMap;
 use std::fmt;
@@ -21,6 +22,9 @@ pub struct LegacyRecord {
     #[serde(rename = "type")]
     kind: String,
     pub seq: u64,
+    /// Optional host receive time; absent in older v1 records. Never device time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_unix_ms: Option<u64>,
     pub time: String,
     pub pid: u32,
     pub tid: u32,
@@ -34,13 +38,17 @@ pub struct LegacyRecord {
 }
 
 impl LegacyRecord {
-    /// The legacy writer intentionally keeps its original fields and type.
+    /// Keep the legacy fields/type and preserve an existing host observation.
+    /// Never assign an import/export time when the observation is absent.
     /// Marker/unparsed provenance cannot be recovered from a v1 artifact.
     pub fn from_entry(entry: &LogEntry, seq: u64) -> Self {
         Self {
             schema_version: 1,
             kind: "entry".into(),
             seq,
+            observed_unix_ms: entry
+                .provenance
+                .and_then(|identity| identity.observed_unix_ms),
             time: entry.time.to_string(),
             pid: entry.pid,
             tid: entry.tid,
@@ -320,5 +328,55 @@ mod tests {
         // A BufReader may prefetch one buffer; the decoder never grows with
         // an unterminated/untrusted stream beyond its encoded record limit.
         assert!(input.read <= MAX_RECORD_BYTES + 8192);
+    }
+    #[test]
+    fn optional_observation_is_typed_and_never_invented_on_read_or_export() {
+        let original: serde_json::Value = serde_json::from_slice(&line(1, "legacy")).unwrap();
+        assert!(original.get("observed_unix_ms").is_none());
+        for time in [0, 1_700_000_000_123, u64::MAX] {
+            let mut value = original.clone();
+            value["observed_unix_ms"] = time.into();
+            value["future_extension"] = serde_json::json!({"untouched":true});
+            let bytes = serde_json::to_vec(&value).unwrap();
+            let mut reader = LegacyReader::new(io::Cursor::new(bytes), InputMode::Offline);
+            let r = record(&mut reader).record;
+            assert_eq!(r.observed_unix_ms, Some(time));
+            assert_eq!(serde_json::to_value(r).unwrap(), value);
+        }
+        let mut null = original.clone();
+        null["observed_unix_ms"] = serde_json::Value::Null;
+        let r: LegacyRecord = serde_json::from_value(null).unwrap();
+        assert_eq!(r.observed_unix_ms, None);
+        assert_eq!(serde_json::to_value(r).unwrap(), original);
+        for invalid in [
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+            serde_json::json!("123"),
+            serde_json::json!(true),
+            serde_json::json!({}),
+            serde_json::from_str("18446744073709551616").unwrap(),
+        ] {
+            let mut value = original.clone();
+            value["observed_unix_ms"] = invalid;
+            let mut reader = LegacyReader::new(
+                io::Cursor::new(serde_json::to_vec(&value).unwrap()),
+                InputMode::Offline,
+            );
+            assert_eq!(
+                reader.read_record().unwrap_err().kind,
+                RecordErrorKind::InvalidData
+            );
+        }
+        let mut e = LogEntry::new("", 1, 1, "Tag", Level::Info, "message");
+        e.provenance = Some(crate::session::RecordIdentity {
+            session_id: crate::session::SessionId::new(),
+            seq: 1,
+            segment: 1,
+            attempt: 1,
+            observed_unix_ms: Some(123),
+        });
+        assert_eq!(LegacyRecord::from_entry(&e, 1).observed_unix_ms, Some(123));
+        e.provenance.as_mut().unwrap().observed_unix_ms = None;
+        assert_eq!(LegacyRecord::from_entry(&e, 1).observed_unix_ms, None);
     }
 }

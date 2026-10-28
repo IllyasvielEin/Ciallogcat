@@ -1893,7 +1893,12 @@ fn native_proto_stored_and_decoded_views_preserve_full_fields_extensions_and_utf
             record_ref,
             "--max-response-bytes",
             "8192",
+            // Token size depends on platform file identity and absolute path.
+            // Test full decoded retrieval, not whether two large previews fit.
+            "--preview-bytes",
+            "3",
         ]);
+        assert!(serde_json::to_vec(&context).unwrap().len() < 8192);
         assert_eq!(context["source_schema_version"], doc.header.schema_version);
         assert_eq!(records(&context), [1, 2]);
         let marker = s.ok(&[
