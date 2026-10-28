@@ -172,21 +172,25 @@ pub(super) fn run(command: &str, mut flags: BTreeMap<String, String>) -> Result<
 
 struct StreamOutput<'a> {
     writer: &'a mut dyn Write,
-    text: bool,
+    text: Option<super::text_output::TextOptions>,
     records: u64,
 }
 impl StreamOutput<'_> {
-    fn record(&mut self, source: &Source, row: &Row, bytes: &[u8]) -> Result<()> {
-        if self.text {
-            // A readable derived view, not raw device bytes. Never expose the
-            // internal PID/level placeholders of markers or unparsed lines.
-            match row.entry.kind {
-                ciallogcat::model::LogEntryKind::Log => {
-                    writeln!(self.writer, "{}", row.entry.copy_text()).map_err(io_error)?;
-                }
-                _ => writeln!(self.writer, "[{}] {}", row.kind, row.entry.message)
-                    .map_err(io_error)?,
-            }
+    fn record(
+        &mut self,
+        source: &Source,
+        row: &Row,
+        bytes: &[u8],
+        device_time: bool,
+    ) -> Result<()> {
+        if let Some(text) = &self.text {
+            text.write_record(
+                self.writer,
+                &row.entry,
+                row.kind,
+                row.legacy_received_unix_ms,
+                device_time,
+            )?;
         } else {
             let projected;
             let bytes = if let (Some(header), Some(metadata)) = (&source.header, &row.metadata) {
@@ -227,10 +231,15 @@ fn stream_query(
             "--all requires snapshot mode; tail is a single non-waiting page",
         ));
     }
+    let text = if format == "text" {
+        Some(super::text_output::TextOptions::parse(&mut flags)?)
+    } else {
+        None
+    };
     let mut stdout = io::stdout().lock();
     let mut output = StreamOutput {
         writer: &mut stdout,
-        text: format == "text",
+        text,
         records: 0,
     };
     let mut pages = 0u64;
@@ -585,7 +594,7 @@ fn query(
             }
             response_used += size;
             if let Some(output) = output.as_deref_mut() {
-                output.record(&source, &row, &bytes)?;
+                output.record(&source, &row, &bytes, predicate.device_time())?;
             }
             entries.push(value);
         }

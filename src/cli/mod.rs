@@ -3,6 +3,8 @@
 mod capture_v2;
 mod query_filter;
 mod query_v2;
+mod session_management;
+mod text_output;
 mod writer;
 
 use std::collections::BTreeMap;
@@ -44,14 +46,17 @@ Commands:
   query-v2 (--file FILE | --session-dir DIR) [OPTIONS]
   get-v2 (--file FILE | --session-dir DIR) --ref TOKEN [OPTIONS]
   context-v2 (--file FILE | --session-dir DIR) --ref TOKEN [OPTIONS]
-  stop --session-dir DIR [--wait-secs 10]
+  stop --session-dir DIR [--wait-secs 10] [--force]
 
 Use query-v2 --help, get-v2 --help or context-v2 --help for focused help.
 Options use --name VALUE; --dump, --all, --regex, --ignore-case,
---case-sensitive and --help/-h take no value. Help is plain text on stdout.
+--case-sensitive, --force and --help/-h take no value. Help is plain text on stdout.
 Command results are JSON; capture writes JSONL records (default stdout).
 Errors are JSON on stderr. New output files/session directories must not exist.
-Stop uses a private marker, never a persisted PID. Local sessions can contain
+Stop requests cooperative exit even for stale sessions, never signals a persisted PID.
+After the wait, --force administratively closes an unacknowledged session with a
+frozen published query boundary; it does NOT kill or confirm worker/ADB exit.
+Local sessions can contain
 sensitive device logs. No device logs are cleared.
 
 ";
@@ -136,6 +141,10 @@ const QUERY_V2_HELP: &str = "query-v2 (--file FILE | --session-dir DIR) [OPTIONS
   --format json|jsonl|text  Default json: existing bounded preview page.
                         jsonl/text stream FULL decoded records, not previews;
                         continuation/summary JSON goes only to stderr.
+  --time-format readable|epoch|rfc3339  Text only; default readable.
+                        Uses --time-basis (received by default) for display too.
+                        Missing absolute time is explicitly labeled, never guessed.
+  --timezone local|utc  Text only; default local. Epoch ignores this setting.
   --all                 Automatically scan every page of a fixed snapshot.
                         Defaults to jsonl; requires jsonl/text, not tail mode.
                         Without --all, even text/jsonl returns only one page.
@@ -295,6 +304,10 @@ struct Status {
     stream_interruptions: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_stream_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    worker_exit_confirmed: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    management_closed_unix_ms: Option<u64>,
 }
 impl Status {
     fn new(session: &Path) -> Self {
@@ -324,10 +337,12 @@ impl Status {
             capture_completeness: None,
             stream_interruptions: None,
             last_stream_error: None,
+            worker_exit_confirmed: None,
+            management_closed_unix_ms: None,
         }
     }
     fn terminal(&self) -> bool {
-        self.state == "completed" || self.state == "failed"
+        matches!(self.state.as_str(), "completed" | "failed" | "abandoned")
     }
 
     fn update_progress(&mut self, visible: &Mutex<writer::Progress>) {
@@ -414,11 +429,9 @@ fn read_limited(path: &Path, max: u64) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 fn load_status(dir: &Path) -> Result<Status> {
-    let path = dir.join("status.json");
-    regular(&path)?;
-    let bytes = read_limited(&path, 131072)?;
     let mut status: Status =
-        serde_json::from_slice(&bytes).map_err(|e| error("invalid_session", e.to_string(), 3))?;
+        serde_json::from_value(session_management::read_effective_status(dir)?)
+            .map_err(|e| error("invalid_session", e.to_string(), 3))?;
     if status.schema_version != SCHEMA {
         return Err(error("invalid_session", "unsupported session schema", 3));
     }
@@ -447,7 +460,14 @@ fn parse_args() -> Result<(String, BTreeMap<String, String>)> {
     while let Some(flag) = args.next() {
         if matches!(
             flag.as_str(),
-            "--help" | "-h" | "--dump" | "--all" | "--regex" | "--ignore-case" | "--case-sensitive"
+            "--help"
+                | "-h"
+                | "--dump"
+                | "--all"
+                | "--regex"
+                | "--ignore-case"
+                | "--case-sensitive"
+                | "--force"
         ) {
             let name = if flag == "-h" { "--help" } else { &flag };
             if flags.insert(name.into(), String::new()).is_some() {
@@ -807,21 +827,15 @@ fn execute() -> Result<()> {
                 }
                 _ => {
                     let wait = number(&mut flags, "--wait-secs", 10, 1, 30)?;
+                    let force = flags.remove("--force").is_some();
                     no_flags(&flags)?;
                     let status = load_status(&dir)?;
                     if status.terminal() {
                         return emit(&status);
                     }
-                    if status.stale {
-                        return Err(error(
-                            "stale_session",
-                            "worker heartbeat is stale; no PID was signalled",
-                            3,
-                        ));
-                    }
                     match new_file(&dir.join("stop")) {
                         Ok(_) => (),
-                        Err(_) if dir.join("stop").is_file() => (),
+                        Err(_) if dir.join("stop").is_file() => regular(&dir.join("stop"))?,
                         Err(e) => return Err(e),
                     }
                     let deadline = Instant::now() + Duration::from_secs(wait);
@@ -831,6 +845,9 @@ fn execute() -> Result<()> {
                             return emit(&status);
                         }
                         if Instant::now() >= deadline {
+                            if force {
+                                return emit(&session_management::close_administratively(&dir)?);
+                            }
                             return Err(error(
                                 "timeout",
                                 "stop requested but worker has not acknowledged completion",
@@ -1232,7 +1249,8 @@ fn capture(config: Config, dir: Option<&Path>, writer: Box<dyn Write + Send>) ->
     }
 }
 fn query(dir: &Path, after: u64, limit: u64, needle: &str) -> Result<()> {
-    let _ = load_status(dir)?;
+    let status = load_status(dir)?;
+    let frozen = status.management_closed_unix_ms.is_some();
     let path = dir.join("logs.jsonl");
     regular(&path)?;
     let mut file = File::open(path).map_err(io_error)?;
@@ -1244,7 +1262,16 @@ fn query(dir: &Path, after: u64, limit: u64, needle: &str) -> Result<()> {
         ));
     }
     let matcher = ciallogcat::filter::compile_query(needle, false, true).map_err(usage)?;
-    let mut reader = LegacyReader::new(BufReader::new(&mut file), InputMode::Active);
+    let size = file.metadata().map_err(io_error)?.len();
+    if frozen && status.bytes > size {
+        return Err(error(
+            "invalid_session",
+            "file is shorter than frozen boundary",
+            3,
+        ));
+    }
+    let upper = if frozen { status.bytes } else { u64::MAX };
+    let mut reader = LegacyReader::new(BufReader::new((&mut file).take(upper)), InputMode::Active);
     let mut entries = Vec::new();
     let mut next = after;
     let mut partial = false;
@@ -1253,6 +1280,8 @@ fn query(dir: &Path, after: u64, limit: u64, needle: &str) -> Result<()> {
     let mut scanned_bytes = 0u64;
     let mut scanned_records = 0u64;
     let mut scan_limited = false;
+    let mut last_seen = 0;
+    let mut read_end = 0;
     loop {
         let outcome = match reader.read_record() {
             Ok(outcome) => outcome,
@@ -1293,8 +1322,17 @@ fn query(dir: &Path, after: u64, limit: u64, needle: &str) -> Result<()> {
             }
         };
         let size = located.encoded_bytes;
+        read_end = located.offset + size;
         let value = located.record;
         let seq = value.seq;
+        if frozen && seq > status.entries {
+            return Err(error(
+                "invalid_session",
+                "record exceeds frozen sequence boundary",
+                3,
+            ));
+        }
+        last_seen = seq;
         if seq <= after {
             continue;
         }
@@ -1317,6 +1355,29 @@ fn query(dir: &Path, after: u64, limit: u64, needle: &str) -> Result<()> {
             total += size;
             entries.push(value);
         }
+    }
+    if frozen && !more && (partial || last_seen != status.entries) {
+        return Err(error(
+            "invalid_session",
+            "frozen byte and sequence boundaries disagree",
+            3,
+        ));
+    }
+    // An administrative close racing this request can make its old upper bound
+    // stale; never return a successful page beyond the now-frozen prefix.
+    if let Some(closed) = session_management::closure_status(dir)?
+        && (closed["bytes"]
+            .as_u64()
+            .is_some_and(|bytes| read_end > bytes)
+            || closed["entries"]
+                .as_u64()
+                .is_some_and(|seq| last_seen > seq))
+    {
+        return Err(error(
+            "stale_session",
+            "session was administratively closed while querying",
+            3,
+        ));
     }
     emit(
         &json!({"schema_version":SCHEMA,"type":"query","entries":entries,"next_after_seq":next,"partial":partial,"complete":!more && !partial,"stop_reason":if partial {"incomplete_tail"} else if scan_limited {"scan_budget"} else if more {"result_budget"} else {"end_of_file"},"has_more":more,"scan_limited":scan_limited,"scanned_records":scanned_records}),

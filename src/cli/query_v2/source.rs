@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::fs::{self, File, Metadata};
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::PathBuf;
@@ -8,7 +9,7 @@ use ciallogcat::record_io::{InputMode, LegacyReader, MAX_RECORD_BYTES, ReadOutco
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use super::super::{Result, error, io_error, now, read_limited, regular};
+use super::super::{Result, error, io_error, now, regular};
 use super::tokens::hash;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -71,6 +72,9 @@ pub(super) struct Source {
     pub status: Value,
     pub active: bool,
     first: Option<Vec<u8>>,
+    // A closure can race a get/context read. Remember decoded sequence bounds
+    // for the final consistency check without adding filesystem I/O per row.
+    highest_seen_seq: Cell<u64>,
 }
 
 pub(super) struct Row {
@@ -140,9 +144,7 @@ impl Source {
                 path.to_str()
                     .ok_or_else(|| invalid("source path must be Unicode"))?,
             )?;
-            let bytes = read_limited(&directory.join("status.json"), 131072)?;
-            let status: Value =
-                ciallogcat::json_input::from_slice(&bytes).map_err(|e| invalid(e.to_string()))?;
+            let status = super::super::session_management::read_effective_query_status(&directory)?;
             if status["schema_version"] != 1 || status["type"] != "status" {
                 return Err(invalid("unsupported session status envelope"));
             }
@@ -196,13 +198,14 @@ impl Source {
                     | "completed"
                     | "failed"
                     | "unknown"
+                    | "abandoned"
             ) {
                 return Err(invalid("unsupported session state"));
             }
             let updated = value["updated_unix_ms"]
                 .as_u64()
                 .ok_or_else(|| invalid("session lacks observation time"))?;
-            let terminal = matches!(state, "completed" | "failed");
+            let terminal = matches!(state, "completed" | "failed" | "abandoned");
             let stale = !terminal && now().saturating_sub(updated) > 5000;
             let excerpt = |key: &str| value[key].as_str().map(|s| super::preview(s, 96));
             let diagnostic_truncated = [
@@ -218,6 +221,8 @@ impl Source {
                 upper,
                 json!({"state": if stale {"unknown"} else {state}, "updated_unix_ms":updated,
                 "stale":stale,"terminal":terminal,"observed_unix_ms":now(),
+                "worker_exit_confirmed":value["worker_exit_confirmed"].as_bool(),
+                "management_closed_unix_ms":value["management_closed_unix_ms"].as_u64(),
                 "omitted_by_limit":value["omitted_by_limit"].as_bool(),
                 "discarded_entries":value["discarded_entries"].as_u64(),
                 "capture_completeness":excerpt("capture_completeness"),
@@ -271,6 +276,7 @@ impl Source {
             status,
             active,
             first: None,
+            highest_seen_seq: Cell::new(0),
         };
         // Headers share the codec's encoded line limit with records and footers,
         // including source extensions. These counted reads are source validation,
@@ -483,7 +489,7 @@ impl Source {
         if self.active && !bytes.ends_with(b"\n") {
             return Err(invalid("published boundary contains an incomplete record"));
         }
-        if let Some(header) = &self.header {
+        let row = if let Some(header) = &self.header {
             let (entry, meta) = document::decode_record(bytes, header, previous)
                 .map_err(|e| invalid(e.to_string()))?;
             let kind = match entry.kind {
@@ -491,13 +497,13 @@ impl Source {
                 ciallogcat::model::LogEntryKind::Marker => "event",
                 ciallogcat::model::LogEntryKind::Unparsed => "unparsed",
             };
-            Ok(Row {
+            Row {
                 seq: meta.seq,
                 entry,
                 kind,
                 metadata: Some(meta),
                 legacy_received_unix_ms: None,
-            })
+            }
         } else {
             let mut reader = LegacyReader::new(
                 io::Cursor::new(bytes),
@@ -517,14 +523,22 @@ impl Source {
                 return Err(invalid("record sequence is not strictly increasing"));
             }
             let level = row.level().ok_or_else(|| invalid("invalid level"))?;
-            Ok(Row {
+            Row {
                 seq: row.seq,
                 kind: "entry",
                 metadata: None,
                 legacy_received_unix_ms: row.observed_unix_ms,
                 entry: LogEntry::new(row.time, row.pid, row.tid, row.tag, level, row.message),
-            })
+            }
+        };
+        self.highest_seen_seq
+            .set(self.highest_seen_seq.get().max(row.seq));
+        if self.status["state"] == "abandoned" && self.upper.seq.is_some_and(|seq| row.seq > seq) {
+            return Err(invalid(
+                "record exceeds administratively closed sequence boundary",
+            ));
         }
+        Ok(row)
     }
 
     pub fn anchor(&mut self, end: u64) -> Result<Anchor> {
@@ -545,6 +559,30 @@ impl Source {
     }
 
     pub fn check_current(&self, upper: Boundary) -> Result<()> {
+        if self.binding.session
+            && let Some(closed) = super::super::session_management::closure_status(
+                self.path
+                    .parent()
+                    .ok_or_else(|| invalid("session path lacks parent"))?,
+            )?
+        {
+            let (offset, seq) = if self.binding.schema == 1 {
+                (closed["bytes"].as_u64(), closed["entries"].as_u64())
+            } else {
+                (
+                    closed["visible_end"]["offset"].as_u64(),
+                    closed["visible_end"]["seq"].as_u64(),
+                )
+            };
+            if offset.is_none_or(|value| upper.offset > value)
+                || upper.seq.zip(seq).is_some_and(|(a, b)| a > b)
+                || seq.is_none_or(|value| self.highest_seen_seq.get() > value)
+            {
+                return Err(stale(
+                    "session was administratively closed before this boundary",
+                ));
+            }
+        }
         regular(&self.path)?;
         let file = File::open(&self.path).map_err(io_error)?;
         let metadata = file.metadata().map_err(io_error)?;

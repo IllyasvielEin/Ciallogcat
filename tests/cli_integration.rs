@@ -1957,8 +1957,15 @@ mod linux {
         let current = status(&s);
         assert_eq!(current["state"], "unknown");
         assert_eq!(current["stale"], true);
-        s.run(&["stop", "--session-dir", s.session().to_str().unwrap()])
-            .error(3);
+        s.run(&[
+            "stop",
+            "--session-dir",
+            s.session().to_str().unwrap(),
+            "--wait-secs",
+            "1",
+        ])
+        .error(6);
+        assert!(s.session().join("stop").is_file());
         assert!(
             unrelated.0.try_wait().unwrap().is_none(),
             "stop signalled an unrelated persisted PID"

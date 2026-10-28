@@ -77,6 +77,31 @@ not by capture size or total matching rows. `complete` means the query boundary
 was scanned, not that the device capture has no gaps or has stopped.
 
 Text is a normalized readable view (multiline messages remain multiline).
+By default its timestamp is readable local time, for example
+`2026-10-28 11:43:20.123+08:00 [received]`. `--time-basis` selects the same
+clock for display and filtering: `received` (default) or exact protobuf `device`.
+The explicit source label prevents host receipt from being mistaken for device
+event time. Text-only `--time-format readable|epoch|rfc3339` and
+`--timezone local|utc` control presentation; they may change between cursor pages
+without changing the filter. Epoch ignores timezone and uses integer seconds
+plus the available fraction (three digits for host milliseconds, nine for proto
+nanoseconds), never floating-point conversion. RFC3339 uses `T` and an explicit
+offset or `Z`; readable uses a space. The local zone is resolved once per command,
+including across `--all` pages, and observes the offset/DST at each instant.
+
+If an old record has no selected absolute clock, text prints an explicit
+`received-time-unavailable` / `device-time-unavailable` label with quoted original
+device text; it does not guess a year or timezone. Time **filtering** still fails
+explicitly when otherwise matching records lack that clock. Out-of-calendar-range
+epochs retain their exact numeric value with `calendar-unavailable`. Failed local
+zone discovery explicitly falls back to UTC; historical second-resolution offsets
+that RFC3339 cannot represent are likewise shown in UTC with a note, not rounded.
+`--time-format` and `--timezone` are rejected outside `--format text`; JSON/JSONL,
+the frozen protobuf projection, archives and desktop clipboard output are unchanged.
+
+The text writer adds a record-ending LF only if the message does not already
+end in LF. Existing LF/CRLF, internal newlines, trailing spaces and intentional
+multiple trailing newlines are preserved; it does not trim message evidence.
 JSONL contains full decoded JSON including extensions; compact v3 decoded output
 is a **derived view, not a native archive**. Neither format is raw device output.
 A late validation, time-data, or write error may leave partial stdout; check the
@@ -214,7 +239,46 @@ Check `status` and query the output. Silence is not proof of a healthy device.
 owns and reaps its ADB child rather than killing an arbitrary process by PID.
 `stop --wait-secs N` waits for acknowledgement (default 10 seconds, range 1–30).
 A stale heartbeat becomes `state: "unknown"` with `stale: true`; it is not proof
-that a process is alive or dead, and stop does not signal a stored PID.
+that a process is alive or dead, and stop does not signal a stored PID. Even a
+stale session receives the cooperative stop marker and gets the normal wait;
+without acknowledgement the command exits 6 (`timeout`), not a claim of death.
+
+For an orphaned session after an upgrade/crash:
+
+```sh
+ciallogcat-cli stop --session-dir ./old-session --force --wait-secs 1
+```
+
+`--force` first requests cooperative shutdown and waits. If no terminal status is
+acknowledged, it creates `management-closure.json` atomically and reports
+`state: "abandoned"`, `reason: "administratively_closed"`,
+`worker_exit_confirmed: false`, and `management_closed_unix_ms`. This is a terminal
+**management view**, not a kill operation or proof that the worker/ADB has exited.
+A genuine completed/failed status is returned unchanged; repeated or concurrent
+force calls reuse the first closure. No persisted PID is ever signalled.
+
+The sidecar freezes the last observed published bytes/entries (native
+`visible_end`) and preserves the original status snapshot. It never overwrites
+`status.json`, `status.next`, `worker.lock` or logs, repairs a partial log, fabricates
+a footer, or restarts a writer in the same directory. A stale lock file or abandoned
+`status.next` is not proof of death and is left intact. Publication uses a fully
+written unique temporary file and atomic first-writer-wins hard linking; unsupported
+filesystems/permissions fail closed without a non-atomic overwrite fallback.
+
+`status` and session-based query/get/context commands in v1.2.1+ honor the immutable
+closure even if an old worker later publishes a newer status or appends records.
+The legacy `query` also caps reads to the frozen prefix. Existing references/cursors
+within that boundary remain usable; ones whose snapshot exceeds it are rejected
+rather than silently expanded/truncated. A query racing closure may fail and should
+be reopened against the frozen session. Streaming may already have emitted a
+partial prefix, including bytes beyond a concurrently frozen boundary, before
+the final consistency check reports an error; discard that failed output. Only
+a successful query and its completion summary establish the stated boundary. `complete` means this query boundary was
+scanned, not complete capture or confirmed process exit. Native sessions remain
+queryable without a footer; the `--file` offline validation contract is unchanged.
+Older CLI binaries and direct/raw file readers may not honor the sidecar. Keep
+using `--session-dir` for the frozen administrative view; the underlying file is
+untouched and may still grow if an old worker is alive.
 
 ## Read-only device diagnostics
 
@@ -362,7 +426,8 @@ JSONL record is written and flushed from user-space buffers. A partial write or
 failed flush does not advance that confirmed prefix. This is visibility to
 other processes, not a per-record disk-sync guarantee. Existing v1 `query`
 still scans the file and reports an incomplete tail; it does not yet implement
-fixed-snapshot pagination using the status boundary.
+fixed-snapshot pagination using the status boundary, except that administratively
+closed sessions are strictly capped at their immutable published prefix.
 Normal completion reasons include `max_entries`, `max_bytes`, `duration_limit`,
 `stopped`, and `adb_exit`; a failed capture reports its error instead.
 `omitted_by_limit: true` means a configured output/entry limit was reached and
