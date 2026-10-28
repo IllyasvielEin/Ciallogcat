@@ -43,7 +43,7 @@
 - [ ] 完成 X27–X29 修复后，运行 [贡献指南](CONTRIBUTING.md) 的 GUI/headless 测试、双配置 Clippy、格式检查、Python fixture/Agent/benchmark/打包测试和 protobuf 再生成检查。
 - [ ] 重建 GUI 与 headless CLI release，记录源码状态、工具链和二进制 hash；针对受影响交互做 mock 原生复验。旧 372/236 测试数及旧 release 不代表最终工作树通过。
 - [ ] 需要性能结论时用同一新构建复测三组合，保留 wall/CPU/RSS、完整性与原 payload 核对；不将存档缩小等同吞吐提升。
-- [ ] 整理提交并推送，确认新远端 CI（包括 Windows）实际完成，再按 [发布指南](docs/release.md) 决定版本/发布。本轮已保存本地功能提交；推送、远端 CI 和发布仍待执行。
+- [ ] 整理提交并推送，确认新远端 CI（包括 Windows）实际完成，再按 [发布指南](docs/release.md) 决定版本/发布。本轮已保存本地功能提交；用户随后要求发布 1.1.0，版本、发布说明及本机 GUI/headless release 构建已准备，推送因缺少 GitHub 凭据受阻，远端 CI 和发布尚待完成。
 
 ## 3. 平台与真机（条件具备后）
 

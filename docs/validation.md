@@ -17,6 +17,17 @@
 
 本轮未执行 release 重建、原生窗口交互、Windows 运行或 Android 真机验收，也未推送或运行远端 CI。全量现有测试通过不代表 X27–X29 已修复，它们仍是明确待办。以下旧构建哈希和历史体验证据不代表本轮生成的新工件。
 
+## 2026-10-28 v1.1.0 发布准备
+
+用户随后要求推送并发布 1.1.0。已核对最新公开 Release 为 v1.0，版本提交将 Cargo.toml/Cargo.lock 更新为 1.1.0，工作流从版本专属文档读取发布说明并保留已知问题。
+
+- `cargo check`、锁文件版本核对、格式检查和发布脚本 Bash 语法检查通过；产品代码相对上述全量验证仅变化包版本号。
+- `cargo build --locked --release` 和独立 headless CLI release 构建通过；CLI `--help` 成功，`--version` 返回 1.1.0。
+- 本机 GUI SHA-256：`907cc33a7482c5a7e2464d26c039fc428eea57468997e2e6329ffd73401ddab0`。
+- 本机 headless CLI SHA-256：`e2819846a7a57b79dc2aa3e8bba54085191c90178fe91193a2b0b85df9a5b319`。
+
+本机构建不作为 GitHub 发行附件；附件由标签触发的 Linux/Windows CI 生成并校验。写入本记录时尚未成功推送（本机缺少 GitHub 凭据），远端发布结果需另行核对。原生窗口和真机验收仍待完成。
+
 ## 已执行的基线
 
 Q01–Q09 与 X01–X22 的原定实现及 mock 验收完成。审查前冻结构建：
