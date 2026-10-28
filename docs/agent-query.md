@@ -73,6 +73,20 @@ snapshot 到达上界后，要查看后续追加需省略 cursor 创建新快照
 
 上下文不沿用原 query 的消息过滤；前后两侧共用响应、扫描预算，目标记录也计入。先取 before，再取 after，反向查找换行的读取也计入扫描字节。`--max-scan-records 1` 因此只允许目标记录。上下文没有续页 cursor；需继续取证时使用返回的 record_ref。
 
+## 管理性关闭与 text 展示
+
+`stop --force` 在合作停止等待后仍未确认 worker 终态时，可创建独立不可变的管理关闭记录。
+状态 `abandoned` / `worker_exit_confirmed=false` 表示管理上结束，并不证明 worker 或 ADB 已退出。
+`--session-dir` 查询固定在关闭时已发布的前缀；旧 worker 后续更新 status 或追加日志不会扩大边界。
+边界内已有 token 仍可使用，超出关闭边界的旧 snapshot/ref 明确拒绝。原生 session 不要求补造 footer；
+`--file` 仍按原有离线文件规则处理。详情与兼容限制见 [CLI 指南](cli.md)。
+
+`--format text` 默认展示 readable/local，时间来源与 `--time-basis` 一致并显式标明。
+`--time-format epoch|rfc3339`、`--timezone utc` 可显式选择；纯展示参数不进入 cursor 过滤指纹。
+缺少绝对时间时仅展示明确未知与原始设备文本，不猜年份/时区；时间筛选仍按原有严格缺失规则报错。
+只在 message 没有末尾 LF 时追加一个，不移除内部换行、已有 CRLF 或有意的多个末尾换行。
+JSON/JSONL、归档字节和固定 protobuf 投影不受这些 text 选项影响。
+
 ## Cursor 和 reference 的有效性
 
 token 使用本机持久 HMAC-SHA256 密钥认证。密钥在 GUI 配置目录的 `query-v2.key`，支持 `CIALLOGCAT_CONFIG_DIR`；Unix 新建权限为 0600，完整写入后才发布。并发首次调用共享同一个获胜的密钥。不要将私钥加入日志或版本控制。删除密钥会使已有 token 失效；token 不是可跨主机传递的证据文件，跨工具交接应使用 native JSONL 与其 session_id/seq。

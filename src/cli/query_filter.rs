@@ -119,6 +119,10 @@ impl QueryFilter {
         })
     }
 
+    pub(super) fn device_time(&self) -> bool {
+        self.device_time
+    }
+
     pub(super) fn has_time_filter(&self) -> bool {
         self.since.is_some() || self.until.is_some()
     }
