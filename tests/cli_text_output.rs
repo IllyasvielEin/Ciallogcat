@@ -146,6 +146,9 @@ fn varint(mut value: u64, out: &mut Vec<u8>) {
     out.push(value as u8);
 }
 fn proto(message: &str, seconds: u64, nanos: u64) -> LogEntry {
+    proto_named(message, seconds, nanos, None)
+}
+fn proto_named(message: &str, seconds: u64, nanos: u64, process: Option<&str>) -> LogEntry {
     let mut bytes = Vec::new();
     for (field, value) in [(8, seconds), (16, nanos), (24, 4), (40, 42), (48, 43)] {
         bytes.push(field);
@@ -155,6 +158,11 @@ fn proto(message: &str, seconds: u64, nanos: u64) -> LogEntry {
         bytes.push(field);
         varint(value.len() as u64, &mut bytes);
         bytes.extend_from_slice(value.as_bytes());
+    }
+    if let Some(process) = process {
+        bytes.push(74); // process_name, protobuf field 9, length-delimited
+        varint(process.len() as u64, &mut bytes);
+        bytes.extend_from_slice(process.as_bytes());
     }
     ciallogcat::protobuf::DecodedEntry::decode_payload(bytes)
         .unwrap()
@@ -166,10 +174,10 @@ fn default_readable_and_explicit_formats_use_received_milliseconds() {
     let s = Sandbox::new();
     let file = s.legacy(&[legacy(1, "payload", Some(1_767_225_600_123))]);
     for (format, prefix) in [
-        (None, "2026-01-01 00:00:00.123+00:00 [received]"),
-        (Some("readable"), "2026-01-01 00:00:00.123+00:00 [received]"),
-        (Some("rfc3339"), "2026-01-01T00:00:00.123Z [received]"),
-        (Some("epoch"), "1767225600.123 [received]"),
+        (None, "2026-01-01 00:00:00.123+00:00"),
+        (Some("readable"), "2026-01-01 00:00:00.123+00:00"),
+        (Some("rfc3339"), "2026-01-01T00:00:00.123Z"),
+        (Some("epoch"), "1767225600.123"),
     ] {
         let mut flags = vec!["--timezone", "utc"];
         if let Some(format) = format {
@@ -178,6 +186,8 @@ fn default_readable_and_explicit_formats_use_received_milliseconds() {
         let output = s.text(&file, &flags);
         assert!(output.stdout.starts_with(prefix), "{}", output.stdout);
         assert!(output.stdout.ends_with("Tag: payload\n"));
+        assert!(!output.stdout.contains("[received]"));
+        assert_eq!(output.summary()["time_window"]["basis"], "received");
     }
 }
 
@@ -191,7 +201,7 @@ fn received_and_device_display_follow_the_same_basis_as_time_filters_in_v2_v3() 
                 "received",
                 "1970-01-01T00:01:39Z",
                 "1970-01-01T00:01:40Z",
-                "99.321 [received]",
+                "99.321",
             ),
             (
                 "device",
@@ -215,6 +225,7 @@ fn received_and_device_display_follow_the_same_basis_as_time_filters_in_v2_v3() 
             );
             assert!(text.stdout.starts_with(prefix), "{}", text.stdout);
             assert_eq!(text.summary()["records_returned"], 1);
+            assert_eq!(text.summary()["time_window"]["basis"], basis);
         }
         let device = s.text(
             &file,
@@ -323,11 +334,7 @@ fn missing_legacy_time_and_calendar_overflow_are_explicit_without_false_epoch() 
                 .starts_with("18446744073709551615.000000001 [device]")
         );
         let received = s.text(&huge, &["--time-format", "epoch"]);
-        assert!(
-            received
-                .stdout
-                .starts_with("18446744073709551.615 [received]")
-        );
+        assert!(received.stdout.starts_with("18446744073709551.615"));
         for calendar in ["readable", "rfc3339"] {
             let fallback = s.text(
                 &huge,
@@ -364,29 +371,26 @@ fn local_default_observes_dst_and_utc_override_and_epoch_ignore_local_zone() {
     assert!(local.success, "{}", local.stderr);
     let lines: Vec<_> = local.stdout.lines().collect();
     assert!(
-        lines[0].starts_with("2026-03-08 01:59:59.999-05:00 [received]"),
+        lines[0].starts_with("2026-03-08 01:59:59.999-05:00"),
         "{}",
         local.stdout
     );
     assert!(
-        lines[1].starts_with("2026-03-08 03:00:00.000-04:00 [received]"),
+        lines[1].starts_with("2026-03-08 03:00:00.000-04:00"),
         "{}",
         local.stdout
     );
     let mut utc = base.to_vec();
     utc.extend(["--timezone", "utc"]);
     let utc = s.run(&utc, Some("America/New_York"));
-    assert!(
-        utc.stdout
-            .starts_with("2026-03-08 06:59:59.999+00:00 [received]")
-    );
+    assert!(utc.stdout.starts_with("2026-03-08 06:59:59.999+00:00"));
     let mut epoch = base.to_vec();
     epoch.extend(["--time-format", "epoch"]);
     let local_epoch = s.run(&epoch, Some("America/New_York"));
     epoch.extend(["--timezone", "utc"]);
     let utc_epoch = s.run(&epoch, Some("America/New_York"));
     assert_eq!(local_epoch.stdout, utc_epoch.stdout);
-    assert!(local_epoch.stdout.starts_with("1772953199.999 [received]"));
+    assert!(local_epoch.stdout.starts_with("1772953199.999"));
 }
 
 #[test]
@@ -425,17 +429,15 @@ fn display_options_do_not_change_cursor_filters_or_archived_jsonl() {
             summary["next_cursor"].as_str().unwrap(),
             "--time-format",
             "rfc3339",
+            "--process-width",
+            "0",
             "--timezone",
             "utc",
         ],
         None,
     );
     assert_eq!(second.summary()["complete"], true);
-    assert!(
-        second
-            .stdout
-            .starts_with("1970-01-01T00:00:02.000Z [received]")
-    );
+    assert!(second.stdout.starts_with("1970-01-01T00:00:02.000Z"));
     let jsonl = s.run(
         &["query-v2", "--file", &file, "--all", "--format", "jsonl"],
         None,
@@ -460,6 +462,9 @@ fn invalid_and_non_text_presentation_options_fail_without_stdout() {
         vec!["--format", "text", "--timezone", "America/New_York"],
         vec!["--format", "jsonl", "--time-format", "epoch"],
         vec!["--format", "json", "--timezone", "utc"],
+        vec!["--format", "jsonl", "--process-width", "32"],
+        vec!["--format", "text", "--process-width", "-1"],
+        vec!["--format", "text", "--process-width", "4097"],
     ] {
         let mut args = vec!["query-v2", "--file", &file];
         args.extend(options);
@@ -468,5 +473,81 @@ fn invalid_and_non_text_presentation_options_fail_without_stdout() {
         assert!(output.stdout.is_empty());
         let error: Value = serde_json::from_str(&output.stderr).unwrap();
         assert_eq!(error["error"]["code"], "invalid_arguments");
+    }
+}
+
+#[test]
+fn chromium_process_fixture_is_compact_in_redirected_text_but_lossless_in_jsonl() {
+    // Synthetic Chromium-style sandbox name, not a claim of real-device capture.
+    let name = "com.example.browser:org.chromium.content.app.SandboxedProcessService0:renderer42";
+    for format in [NativeFormat::V2, NativeFormat::CompactV3] {
+        let s = Sandbox::new();
+        let entry = proto_named("entire message must remain visible\n", 1, 0, Some(name));
+        let file = s.native(format, vec![(entry, Some(1000))]);
+        let before = fs::read(&file).unwrap();
+        let compact = s.text(&file, &["--time-format", "epoch"]);
+        assert!(!compact.stdout.contains(name));
+        assert!(compact.stdout.contains('…'));
+        assert!(compact.stdout.contains("renderer42"));
+        assert!(compact.stdout.contains("   42    43 I "));
+        assert!(
+            compact
+                .stdout
+                .ends_with("Tag: entire message must remain visible\n")
+        );
+        assert_eq!(compact.summary()["text_presentation"]["process_width"], 32);
+        assert_eq!(
+            compact.summary()["text_presentation"]["process_names_truncated"],
+            1
+        );
+        let full = s.text(&file, &["--process-width", "0"]);
+        assert!(full.stdout.contains(name));
+        assert_eq!(full.summary()["text_presentation"]["process_width"], 0);
+        assert_eq!(
+            full.summary()["text_presentation"]["process_names_truncated"],
+            0
+        );
+        let jsonl = s.run(
+            &["query-v2", "--file", &file, "--all", "--format", "jsonl"],
+            None,
+        );
+        assert_eq!(jsonl.summary()["records_returned"], 1);
+        assert!(jsonl.summary().get("text_presentation").is_none());
+        let row: Value = serde_json::from_str(&jsonl.stdout).unwrap();
+        assert_eq!(row["process"]["name"], name);
+        assert_eq!(row["message"], "entire message must remain visible\n");
+        assert_eq!(fs::read(&file).unwrap(), before);
+    }
+}
+
+#[test]
+fn process_width_is_display_columns_and_preserves_unicode_graphemes() {
+    use unicode_segmentation::UnicodeSegmentation;
+    use unicode_width::UnicodeWidthStr;
+    let s = Sandbox::new();
+    let name = "界界e\u{301}👩‍💻进程renderer末尾e\u{301}👩‍💻";
+    let entry = proto_named("payload", 1, 0, Some(name));
+    let file = s.native(NativeFormat::CompactV3, vec![(entry, Some(1000))]);
+    for width in [1usize, 2, 7, 12, 20] {
+        let output = s.text(&file, &["--process-width", &width.to_string()]);
+        let field = output
+            .stdout
+            .split_once(" I ")
+            .unwrap()
+            .1
+            .split_once(" Tag: ")
+            .unwrap()
+            .0;
+        assert!(UnicodeWidthStr::width(field) <= width, "{width}: {field:?}");
+        assert!(field.contains('…'));
+        let (prefix, suffix) = field.trim_end().split_once('…').unwrap();
+        assert!(name.starts_with(prefix) && name.ends_with(suffix));
+        let boundaries: Vec<_> = name
+            .grapheme_indices(true)
+            .map(|(i, _)| i)
+            .chain([name.len()])
+            .collect();
+        assert!(boundaries.contains(&prefix.len()));
+        assert!(boundaries.contains(&(name.len() - suffix.len())));
     }
 }

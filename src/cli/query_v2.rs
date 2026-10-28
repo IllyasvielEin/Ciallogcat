@@ -265,6 +265,15 @@ fn stream_query(
             fields.remove("records");
             fields.insert("type".into(), "query_summary".into());
             fields.insert("format".into(), format.into());
+            if let Some(text) = &output.text {
+                fields.insert(
+                    "text_presentation".into(),
+                    json!({
+                        "process_width": text.process_width(),
+                        "process_names_truncated": text.process_names_truncated(),
+                    }),
+                );
+            }
             fields.insert("derived".into(), true.into());
             fields.insert("records_returned".into(), output.records.into());
             fields.insert("pages".into(), pages.into());
@@ -499,6 +508,7 @@ fn query(
     let reserve = encoded_len(&query_response(
         &source,
         &worst,
+        &predicate,
         signer,
         Vec::new(),
         u64::MAX,
@@ -619,6 +629,7 @@ fn query(
     query_response(
         &source,
         &cursor,
+        &predicate,
         signer,
         entries,
         start,
@@ -633,6 +644,7 @@ fn query(
 fn query_response(
     source: &Source,
     cursor: &Cursor,
+    predicate: &super::query_filter::QueryFilter,
     signer: &Signer,
     entries: Vec<Value>,
     start: u64,
@@ -654,6 +666,7 @@ fn query_response(
             "footer_seen":cursor.finalized},
         "records":entries,"next_cursor":signer.seal("c2",cursor)?,"has_more":cursor.offset<cursor.upper.offset,
         "complete":cursor.offset==cursor.upper.offset,"time_anchor_unix_ms":cursor.time_anchor_ms,
+        "time_window":predicate.time_window(cursor.time_anchor_ms),
         "scan":{"start_offset":start,"next_offset":cursor.offset,"last_seq":cursor.last_seq,
             "bytes":scanned_bytes,"records":scanned_records,"file_bytes_read":bytes_read,"stop_reason":stop_reason},
         "integrity":"append_only_identity_and_boundary_anchors"}),

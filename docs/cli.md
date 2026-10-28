@@ -78,10 +78,11 @@ was scanned, not that the device capture has no gaps or has stopped.
 
 Text is a normalized readable view (multiline messages remain multiline).
 By default its timestamp is readable local time, for example
-`2026-10-28 11:43:20.123+08:00 [received]`. `--time-basis` selects the same
+`2026-10-28 11:43:20.123+08:00`. `--time-basis` selects the same
 clock for display and filtering: `received` (default) or exact protobuf `device`.
-The explicit source label prevents host receipt from being mistaken for device
-event time. Text-only `--time-format readable|epoch|rfc3339` and
+The summary always identifies the clock; normal default `received` timestamps omit
+a repetitive per-row label, while non-default `device` timestamps retain `[device]`.
+Exceptional missing-time/calendar/timezone labels remain explicit, including their clock. Text-only `--time-format readable|epoch|rfc3339` and
 `--timezone local|utc` control presentation; they may change between cursor pages
 without changing the filter. Epoch ignores timezone and uses integer seconds
 plus the available fraction (three digits for host milliseconds, nine for proto
@@ -96,8 +97,18 @@ explicitly when otherwise matching records lack that clock. Out-of-calendar-rang
 epochs retain their exact numeric value with `calendar-unavailable`. Failed local
 zone discovery explicitly falls back to UTC; historical second-resolution offsets
 that RFC3339 cannot represent are likewise shown in UTC with a note, not rounded.
-`--time-format` and `--timezone` are rejected outside `--format text`; JSON/JSONL,
+`--time-format`, `--timezone` and `--process-width` are rejected outside `--format text`; JSON/JSONL,
 the frozen protobuf projection, archives and desktop clipboard output are unchanged.
+
+Text process names default to a maximum of **32 display columns**, with a visible
+middle ellipsis retaining the beginning and end (useful for Chromium renderer
+sandbox suffixes). `--process-width N` chooses 1–4096 columns; `0` retains the full
+name. Grapheme clusters are not split; wide characters count by display width.
+This is deterministic for terminal and redirected output, not a terminal-size guess.
+It is only a presentation abbreviation, not a unique process identifier: PID/TID
+remain present, and JSONL/get retain full names. Messages are never shortened.
+The stderr summary's `text_presentation` reports `process_width` and the number of
+successfully written rows with shortened names (`process_names_truncated`).
 
 The text writer adds a record-ending LF only if the message does not already
 end in LF. Existing LF/CRLF, internal newlines, trailing spaces and intentional
@@ -122,6 +133,17 @@ Query `--since` (inclusive) and `--until` (exclusive) accept RFC3339 timestamps
 with explicit timezone (e.g. `2026-10-28T02:00:00Z`) or integer ages such as
 `30s`, `5m`, `2h`, `1d`. Relative bounds anchor once to host UTC and are retained
 in the cursor; keep the original filter options unchanged when continuing.
+Every successful query page and streaming summary includes `time_window`, even
+when zero records match. It reports `basis`, `anchor_unix_ms` (null without a time
+filter), `since_inclusive`, and `until_exclusive`. A bound contains exact signed
+`unix_ns` as a decimal **string** and UTC `rfc3339` (null outside supported calendar
+range or RFC3339 years 0000–9999). A null bound means no filter bound: absent `--until` is not silently replaced
+with the anchor or snapshot end. These are resolved query parameters, **not** an
+assertion about available data coverage or the reason for no matches. Relative
+bounds remain anchored across cursor pages and `--all`; inspect them before
+concluding that a zero-result time window means no older records exist.
+The snapshot byte/sequence fence remains independent of the time window.
+
 `--time-basis received` (default) uses persisted host `observed_unix_ms`;
 `--time-basis device` requires the exact protobuf epoch. An otherwise matching
 record without the requested time returns `time_unavailable`, not an invented

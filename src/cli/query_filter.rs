@@ -127,6 +127,32 @@ impl QueryFilter {
         self.since.is_some() || self.until.is_some()
     }
 
+    /// Describe the already-resolved predicate, not the timestamps present in
+    /// the data. In particular an absent until remains unbounded even though
+    /// the source has an independent finite snapshot boundary.
+    pub(super) fn time_window(&self, anchor_ms: Option<u64>) -> serde_json::Value {
+        fn bound(ns: i128) -> serde_json::Value {
+            // Decimal strings retain precision in consumers using IEEE doubles.
+            // Very large valid relative durations can exceed calendar range.
+            // Check explicitly: some Jiff versions' nanosecond constructor
+            // only checks i64 conversion, not the supported calendar bounds.
+            let rfc3339 = (jiff::Timestamp::MIN.as_nanosecond()
+                ..=jiff::Timestamp::MAX.as_nanosecond())
+                .contains(&ns)
+                .then(|| jiff::Timestamp::from_nanosecond(ns).ok())
+                .flatten()
+                .filter(|t| (0..=9999).contains(&t.to_zoned(jiff::tz::TimeZone::UTC).year()))
+                .map(|t| t.to_string());
+            json!({"unix_ns": ns.to_string(), "rfc3339": rfc3339})
+        }
+        json!({
+            "basis": if self.device_time { "device" } else { "received" },
+            "anchor_unix_ms": anchor_ms,
+            "since_inclusive": self.since.map(bound),
+            "until_exclusive": self.until.map(bound),
+        })
+    }
+
     pub(super) fn fingerprint(&self) -> String {
         // Keep pre-upgrade literal-only cursors valid. Extended filters use a
         // versioned canonical encoding so every effective predicate is bound.
@@ -622,5 +648,48 @@ mod tests {
             "time_unavailable"
         );
         assert!(e.provenance.is_none());
+    }
+    #[test]
+    fn resolved_window_is_exact_and_not_data_coverage() {
+        let f = parse(&[
+            ("--since", "1969-12-31T23:59:59.999999999Z"),
+            ("--until", "1970-01-01T00:00:00.000000001Z"),
+        ])
+        .unwrap();
+        let w = f.time_window(Some(123));
+        assert_eq!(w["since_inclusive"]["unix_ns"], "-1");
+        assert_eq!(w["until_exclusive"]["unix_ns"], "1");
+        assert_eq!(
+            w["since_inclusive"]["rfc3339"],
+            "1969-12-31T23:59:59.999999999Z"
+        );
+        assert_eq!(w["basis"], "received");
+        let unbounded = parse(&[]).unwrap().time_window(None);
+        assert!(unbounded["since_inclusive"].is_null());
+        assert!(unbounded["until_exclusive"].is_null());
+        assert!(unbounded["anchor_unix_ms"].is_null());
+        let huge = parse(&[("--since", "999999999999999999999999s")])
+            .unwrap()
+            .time_window(Some(0));
+        assert!(huge["since_inclusive"]["rfc3339"].is_null());
+        let last_day = parse(&[("--until", "9999-12-31T23:59:59.999999999Z")])
+            .unwrap()
+            .time_window(Some(0));
+        assert_eq!(
+            last_day["until_exclusive"]["unix_ns"],
+            "253402300799999999999"
+        );
+        assert!(last_day["until_exclusive"]["rfc3339"].is_null());
+        let expanded_year = parse(&[("--since", "94608000000s")])
+            .unwrap()
+            .time_window(Some(0));
+        assert!(expanded_year["since_inclusive"]["rfc3339"].is_null());
+        assert!(expanded_year["since_inclusive"]["unix_ns"].is_string());
+        assert!(
+            huge["since_inclusive"]["unix_ns"]
+                .as_str()
+                .unwrap()
+                .starts_with('-')
+        );
     }
 }
