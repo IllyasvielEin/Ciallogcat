@@ -3,6 +3,7 @@ mod source;
 mod tokens;
 
 use std::collections::BTreeMap;
+use std::io::{self, Write};
 use std::path::PathBuf;
 
 use ciallogcat::document;
@@ -27,6 +28,8 @@ struct Cursor {
     binding: Binding,
     mode: Mode,
     filter: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    time_anchor_ms: Option<u64>,
     upper: Boundary,
     upper_anchor: Anchor,
     offset: u64,
@@ -108,8 +111,27 @@ pub(super) fn run(command: &str, mut flags: BTreeMap<String, String>) -> Result<
     };
     let options = Options::parse(&mut flags)?;
     let signer = Signer::load()?;
+    if command == "query-v2" {
+        let all = flags.remove("--all").is_some();
+        let format = flags.remove("--format");
+        let format = format
+            .as_deref()
+            .unwrap_or(if all { "jsonl" } else { "json" });
+        match format {
+            "json" if !all => {}
+            "json" => {
+                return Err(usage(
+                    "--all requires --format jsonl or text (default jsonl)",
+                ));
+            }
+            "text" | "jsonl" => {
+                return stream_query(path, session, &signer, &options, flags, all, format);
+            }
+            _ => return Err(usage("--format must be json, jsonl or text")),
+        }
+    }
     let response = match command {
-        "query-v2" => query(path, session, &signer, &options, flags)?,
+        "query-v2" => query(path, session, &signer, &options, flags, None)?,
         "get-v2" | "context-v2" => {
             let reference: RecordRef = signer.open("r2", &required(&mut flags, "--ref")?)?;
             if reference.version != 2 {
@@ -148,6 +170,114 @@ pub(super) fn run(command: &str, mut flags: BTreeMap<String, String>) -> Result<
     emit(&response)
 }
 
+struct StreamOutput<'a> {
+    writer: &'a mut dyn Write,
+    text: bool,
+    records: u64,
+}
+impl StreamOutput<'_> {
+    fn record(&mut self, source: &Source, row: &Row, bytes: &[u8]) -> Result<()> {
+        if self.text {
+            // A readable derived view, not raw device bytes. Never expose the
+            // internal PID/level placeholders of markers or unparsed lines.
+            match row.entry.kind {
+                ciallogcat::model::LogEntryKind::Log => {
+                    writeln!(self.writer, "{}", row.entry.copy_text()).map_err(io_error)?;
+                }
+                _ => writeln!(self.writer, "[{}] {}", row.kind, row.entry.message)
+                    .map_err(io_error)?,
+            }
+        } else {
+            let projected;
+            let bytes = if let (Some(header), Some(metadata)) = (&source.header, &row.metadata) {
+                projected = document::encode_record_projection(
+                    header,
+                    &row.entry,
+                    metadata,
+                    MAX_DECODED_BYTES as usize,
+                )
+                .map_err(|e| invalid(e.to_string()))?;
+                &projected
+            } else {
+                bytes
+            };
+            // Re-encode legacy JSON too: guarantee exactly one physical line,
+            // preserving unknown fields, full text and large JSON numbers.
+            let value: Value = serde_json::from_slice(bytes).map_err(|e| invalid(e.to_string()))?;
+            serde_json::to_writer(&mut self.writer, &value).map_err(io_error)?;
+            self.writer.write_all(b"\n").map_err(io_error)?;
+        }
+        self.records += 1;
+        Ok(())
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stream_query(
+    path: PathBuf,
+    session: bool,
+    signer: &Signer,
+    options: &Options,
+    mut flags: BTreeMap<String, String>,
+    all: bool,
+    format: &str,
+) -> Result<()> {
+    if all && flags.get("--mode").is_some_and(|mode| mode != "snapshot") {
+        return Err(usage(
+            "--all requires snapshot mode; tail is a single non-waiting page",
+        ));
+    }
+    let mut stdout = io::stdout().lock();
+    let mut output = StreamOutput {
+        writer: &mut stdout,
+        text: format == "text",
+        records: 0,
+    };
+    let mut pages = 0u64;
+    let mut scanned = 0u64;
+    let mut scanned_bytes = 0u64;
+    let mut file_bytes = 0u64;
+    loop {
+        let mut response = query(
+            path.clone(),
+            session,
+            signer,
+            options,
+            flags.clone(),
+            Some(&mut output),
+        )?;
+        pages += 1;
+        scanned += response["scan"]["records"].as_u64().unwrap_or(0);
+        scanned_bytes += response["scan"]["bytes"].as_u64().unwrap_or(0);
+        file_bytes += response["scan"]["file_bytes_read"].as_u64().unwrap_or(0);
+        if !all || response["complete"] == true {
+            output.writer.flush().map_err(io_error)?;
+            let fields = response.as_object_mut().unwrap();
+            fields.remove("records");
+            fields.insert("type".into(), "query_summary".into());
+            fields.insert("format".into(), format.into());
+            fields.insert("derived".into(), true.into());
+            fields.insert("records_returned".into(), output.records.into());
+            fields.insert("pages".into(), pages.into());
+            fields.insert("total_scanned_records".into(), scanned.into());
+            fields.insert("total_scanned_bytes".into(), scanned_bytes.into());
+            fields.insert("total_file_bytes_read".into(), file_bytes.into());
+            let mut stderr = io::stderr().lock();
+            serde_json::to_writer(&mut stderr, &response).map_err(io_error)?;
+            stderr.write_all(b"\n").map_err(io_error)?;
+            return Ok(());
+        }
+        let next = response["next_cursor"]
+            .as_str()
+            .ok_or_else(|| invalid("missing continuation cursor"))?;
+        if response["scan"]["start_offset"] == response["scan"]["next_offset"] {
+            return Err(invalid("query made no progress before snapshot boundary"));
+        }
+        flags.remove("--start-at");
+        flags.insert("--cursor".into(), next.into());
+    }
+}
+
 fn encoded_len(value: &impl Serialize) -> Result<usize> {
     Ok(serde_json::to_vec(value).map_err(io_error)?.len() + 1)
 }
@@ -182,6 +312,7 @@ fn summary(
     let mut value = json!({
         "record_ref":signer.seal("r2", &reference)?, "seq":row.seq,"kind":row.kind,
         "identity":row.entry.provenance,
+        "observed_unix_ms":row.legacy_received_unix_ms.or_else(|| row.entry.provenance.and_then(|p| p.observed_unix_ms)),
         "identity_scope":if row.entry.provenance.is_some() {"capture_session"} else {"artifact_local"},
         "message_preview":message,"message_bytes":row.entry.message.len(),
         "preview_truncated":message.len() != row.entry.message.len(),
@@ -242,6 +373,7 @@ fn query(
     signer: &Signer,
     options: &Options,
     mut flags: BTreeMap<String, String>,
+    mut output: Option<&mut StreamOutput<'_>>,
 ) -> Result<Value> {
     let mode = match flags.remove("--mode").as_deref().unwrap_or("snapshot") {
         "snapshot" => Mode::Snapshot,
@@ -249,11 +381,6 @@ fn query(
         "tail" => return Err(usage("tail mode requires --session-dir")),
         _ => return Err(usage("--mode must be snapshot or tail")),
     };
-    let needle = flags.remove("--query").unwrap_or_default();
-    if needle.len() > 4096 {
-        return Err(usage("--query exceeds 4096 UTF-8 bytes"));
-    }
-    let filter = hash(needle.as_bytes());
     let start_at = flags.remove("--start-at");
     let token = flags.remove("--cursor");
     let from_end = match start_at.as_deref().unwrap_or("beginning") {
@@ -266,6 +393,12 @@ fn query(
         return Err(usage("--start-at cannot be combined with --cursor"));
     }
     let previous: Option<Cursor> = token.map(|token| signer.open("c2", &token)).transpose()?;
+    let anchor = previous
+        .as_ref()
+        .and_then(|c| c.time_anchor_ms)
+        .unwrap_or_else(super::now);
+    let predicate = super::query_filter::QueryFilter::parse(&mut flags, anchor)?;
+    let filter = predicate.fingerprint();
     let limit = number(&mut flags, "--limit", 100, 1, 1000)?;
     no_flags(&flags)?;
     if let Some(cursor) = &previous
@@ -324,6 +457,7 @@ fn query(
             binding: source.binding.clone(),
             mode,
             filter,
+            time_anchor_ms: predicate.has_time_filter().then_some(anchor),
             upper: source.upper,
             upper_anchor: source.anchor(source.upper.offset)?,
             offset,
@@ -428,7 +562,7 @@ fn query(
             return Err(invalid("record exceeds published sequence boundary"));
         }
         scanned_records += 1;
-        if row.entry.message.contains(&needle) {
+        if predicate.matches(&row.entry, row.legacy_received_unix_ms)? {
             let value = summary(
                 signer,
                 &source,
@@ -450,6 +584,9 @@ fn query(
                 break;
             }
             response_used += size;
+            if let Some(output) = output.as_deref_mut() {
+                output.record(&source, &row, &bytes)?;
+            }
             entries.push(value);
         }
         cursor.offset += bytes.len() as u64;
@@ -507,6 +644,7 @@ fn query_response(
             "skipped_records":cursor.tail_start.as_ref().map_or(0, |s| s.published_count),
             "footer_seen":cursor.finalized},
         "records":entries,"next_cursor":signer.seal("c2",cursor)?,"has_more":cursor.offset<cursor.upper.offset,
+        "complete":cursor.offset==cursor.upper.offset,"time_anchor_unix_ms":cursor.time_anchor_ms,
         "scan":{"start_offset":start,"next_offset":cursor.offset,"last_seq":cursor.last_seq,
             "bytes":scanned_bytes,"records":scanned_records,"file_bytes_read":bytes_read,"stop_reason":stop_reason},
         "integrity":"append_only_identity_and_boundary_anchors"}),

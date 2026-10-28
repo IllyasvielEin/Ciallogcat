@@ -1,6 +1,7 @@
 //! Standalone CLI orchestration. Session files are local capabilities; PIDs are
 //! descriptive only. The worker alone owns and stops its ADB child.
 mod capture_v2;
+mod query_filter;
 mod query_v2;
 mod writer;
 
@@ -33,7 +34,7 @@ const HELP: &str = "ciallogcat-cli: bounded local Android log capture (Linux/Win
 Commands:
   devices [--adb PATH]
   diagnose --serial SERIAL [--adb PATH] [--buffers LIST] [--timeout-ms 10000]
-  capture --serial SERIAL [--adb PATH] [--output FILE|-] [--duration-secs 600] [--max-bytes 67108864] [--max-entries N]
+  capture --serial SERIAL [--adb PATH] [--output FILE|-] [--duration-secs 600] [--max-bytes 1073741824] [--max-entries N]
   start --serial SERIAL --session-dir DIR [--adb PATH] [same capture bounds]
   capture/start options: [--record-format v1|v2|v3] [--transport text|proto]
   v3 requires explicit --transport proto; defaults remain v1 and text.
@@ -46,7 +47,8 @@ Commands:
   stop --session-dir DIR [--wait-secs 10]
 
 Use query-v2 --help, get-v2 --help or context-v2 --help for focused help.
-Options use --name VALUE; --dump and --help/-h take no value. Help is plain text on stdout.
+Options use --name VALUE; --dump, --all, --regex, --ignore-case,
+--case-sensitive and --help/-h take no value. Help is plain text on stdout.
 Command results are JSON; capture writes JSONL records (default stdout).
 Errors are JSON on stderr. New output files/session directories must not exist.
 Stop uses a private marker, never a persisted PID. Local sessions can contain
@@ -66,7 +68,7 @@ const CAPTURE_SCOPE_HELP: &str = "Device history (capture and start, all record 
   --buffers LIST  Comma-separated main,system,crash,events,radio or all alone.
                   Default main,system,crash (same as GUI); no duplicates.
 Host bounds remain active for history and follow: --duration-secs (600; 1..86400),
---max-entries (10000000; 1..10000000), --max-bytes (67108864; 1..1073741824,
+--max-entries (10000000; 1..10000000), --max-bytes (1073741824; 1..1073741824,
 v2/v3 minimum 8192). --tail is device history selection, not a host record limit.
 
 ";
@@ -115,19 +117,45 @@ const QUERY_V2_HELP: &str = "query-v2 (--file FILE | --session-dir DIR) [OPTIONS
   --mode snapshot|tail  Default snapshot. Snapshot fixes the first page's upper
                         bound; tail refreshes it per call and requires --session-dir.
   --query TEXT          Default empty (all); case-sensitive literal message match,
-                        at most 4096 UTF-8 bytes, not a regex or Tag filter.
+                        at most 4096 UTF-8 bytes. Same message predicate as GUI.
+  --regex               Interpret --query as a Rust regular expression.
+  --ignore-case         Case-insensitive message matching; default case-sensitive.
+  --case-sensitive      Explicit default; conflicts with --ignore-case.
+  --tag TEXT            Case-sensitive literal Tag substring (--tag-include alias).
+  --tag-exclude TEXT    Exclude a case-sensitive literal Tag substring.
+  --package TEXT        Shared GUI package/process matching (when stored).
+  --pid N --tid N       Exact unsigned process/thread IDs, combined with AND.
+  --min-level LEVEL     V/D/I/W/E/F or full name; default V.
+  --since TIME          Inclusive UTC instant; --until TIME is exclusive.
+                        RFC3339 with timezone, or integer age: 30s, 5m, 2h, 1d.
+                        Relative bounds anchor once and remain fixed in cursor.
+  --time-basis received|device  Default received: host observed_unix_ms.
+                        Device requires exact protobuf epoch. Missing requested
+                        time on otherwise matching records is time_unavailable;
+                        old/yearless text times are never assigned a guessed year.
+  --format json|jsonl|text  Default json: existing bounded preview page.
+                        jsonl/text stream FULL decoded records, not previews;
+                        continuation/summary JSON goes only to stderr.
+  --all                 Automatically scan every page of a fixed snapshot.
+                        Defaults to jsonl; requires jsonl/text, not tail mode.
+                        Without --all, even text/jsonl returns only one page.
   --limit N             Default 100; range 1..=1000 returned records per page.
   --cursor TOKEN        Continue with next_cursor; cannot combine with --start-at.
   --start-at beginning|end  Default beginning. End requires native v2/v3 session
                            + --mode tail, without --cursor. Returns an empty page
                            at the published boundary; the prefix is not scanned.
-Both modes default to the first record. Keep source, --mode and --query unchanged
+Both modes default to the first record. Keep source, --mode and all filters unchanged
 when resuming; --limit and budgets may change. Response/scan budgets
 can stop a page before --limit. Follow next_cursor while has_more, even if records
 is empty. scan.stop_reason reports upper_bound/record_limit/scan_budget/response_budget.
+complete means this snapshot/current tail boundary was scanned, NOT capture completeness.
 Tail does not wait: when has_more=false, reuse next_cursor later for new data.
 An exhausted snapshot stays fixed; omit --cursor to see new data in a new snapshot.
-records contain previews and record_ref; use get-v2 for full original record JSON.
+JSON pages contain previews and record_ref; use get-v2 for full original record JSON.
+Streaming keeps bounded pages/records in memory, never the entire result. Page budgets
+control work per chunk, not total streaming stdout bytes; --limit is per page.
+Text is normalized and JSONL is decoded/derived, not a lossless native archive.
+A late error can leave partial stdout; require exit 0 and complete stderr summary.
 
 ";
 const GET_V2_HELP: &str = "get-v2 (--file FILE | --session-dir DIR) --ref TOKEN [OPTIONS]
@@ -417,7 +445,10 @@ fn parse_args() -> Result<(String, BTreeMap<String, String>)> {
     let command = args.next().unwrap_or_else(|| "help".into());
     let mut flags = BTreeMap::new();
     while let Some(flag) = args.next() {
-        if matches!(flag.as_str(), "--help" | "-h" | "--dump") {
+        if matches!(
+            flag.as_str(),
+            "--help" | "-h" | "--dump" | "--all" | "--regex" | "--ignore-case" | "--case-sensitive"
+        ) {
             let name = if flag == "-h" { "--help" } else { &flag };
             if flags.insert(name.into(), String::new()).is_some() {
                 return Err(usage(format!("duplicate option: {name}")));
@@ -510,7 +541,7 @@ fn config(flags: &mut BTreeMap<String, String>) -> Result<Config> {
         max_bytes: number(
             flags,
             "--max-bytes",
-            67108864,
+            1073741824,
             if matches!(record_schema_version, 2 | 3) {
                 8192
             } else {
@@ -956,9 +987,13 @@ fn capture(config: Config, dir: Option<&Path>, writer: Box<dyn Write + Send>) ->
                 }
                 LogcatEvent::Entry(entry) => {
                     received_entries += 1;
-                    let mut bytes =
-                        serde_json::to_vec(&record(entry.into_inner(), accepted_entries + 1))
-                            .map_err(io_error)?;
+                    // Preserve the host observation sampled by the ADB reader,
+                    // before queue/backpressure waiting, without inventing a
+                    // native session identity for the legacy v1 format.
+                    let observed_unix_ms = entry.received_unix_ms();
+                    let mut record = record(entry.into_inner(), accepted_entries + 1);
+                    record.observed_unix_ms = observed_unix_ms;
+                    let mut bytes = serde_json::to_vec(&record).map_err(io_error)?;
                     bytes.push(b'\n');
                     let size = bytes.len() as u64;
                     if accepted_bytes + size > config.max_bytes {
@@ -1284,6 +1319,6 @@ fn query(dir: &Path, after: u64, limit: u64, needle: &str) -> Result<()> {
         }
     }
     emit(
-        &json!({"schema_version":SCHEMA,"type":"query","entries":entries,"next_after_seq":next,"partial":partial,"has_more":more,"scan_limited":scan_limited,"scanned_records":scanned_records}),
+        &json!({"schema_version":SCHEMA,"type":"query","entries":entries,"next_after_seq":next,"partial":partial,"complete":!more && !partial,"stop_reason":if partial {"incomplete_tail"} else if scan_limited {"scan_budget"} else if more {"result_budget"} else {"end_of_file"},"has_more":more,"scan_limited":scan_limited,"scanned_records":scanned_records}),
     )
 }

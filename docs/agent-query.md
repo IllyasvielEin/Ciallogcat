@@ -12,7 +12,7 @@ ciallogcat-cli query-v2 --file ./export.jsonl
 ciallogcat-cli query-v2 --session-dir ./capture --mode tail --start-at end --query 'timeout'
 ```
 
-每个命令必须提供 `--file PATH` 或 `--session-dir DIR`，且只能选择一个。查询字面量只匹配 message，区分大小写，不解释正则。最多 4096 UTF-8 字节。CLI 参数采用 `--name value` 形式。
+每个命令必须提供 `--file PATH` 或 `--session-dir DIR`，且只能选择一个。默认查询字面量只匹配 message，区分大小写；`--regex`、`--ignore-case` 显式改变语义。单个文本过滤条件最多 4096 UTF-8 字节。新增 Tag/package/level/PID/TID、时间范围及完整流式输出见 [CLI 查询指南](cli.md#recommended-query-workflow)。CLI 值参数采用 `--name value` 形式，`--all`、`--regex`、`--ignore-case`、`--case-sensitive` 为无值开关。
 
 `ciallogcat-cli --help` 和三个子命令各自的 `--help` / `-h` 均提供参数默认值、闭区间范围、预算适用性和续页说明。帮助输出为 stdout 纯文本，无需来源参数，不打开文件或创建查询密钥。
 
@@ -48,7 +48,8 @@ snapshot 到达上界后，要查看后续追加需省略 cursor 创建新快照
 
 响应的主要字段：
 
-- `records`：有界预览、`record_ref`、seq、kind 和已知的稳定身份。v1 的身份范围为 `artifact_local`，不补造 capture session、process 来源或文本损失信息。原生 event/unparsed 不添加虚构的 PID、等级、Tag。
+- `records`：有界预览、`record_ref`、seq、kind 和已知的稳定身份。v1 的身份范围为 `artifact_local`，不补造 capture session、process 来源或文本损失信息；新 v1 采集另存可选 `observed_unix_ms`，使用 adapter 在队列背压等待前采样的主机接收时间，不是设备事件时间。旧 v1 缺失该字段时不会补造时间。原生 event/unparsed 不添加虚构的 PID、等级、Tag。
+- `complete`：当前 snapshot/tail 水位已扫完；不代表采集结束或设备日志无缺失。`--all` 固定快照并自动续页（包括空匹配页），完整 text/JSONL 输出到 stdout，最终摘要到 stderr；内存不累计全量匹配。
 - `next_cursor`、`has_more`：是否还有本次上界内的字节。空 records 也可能 has_more=true，例如本页扫描的记录都不匹配。每次都用返回的新 cursor 继续。
 - `snapshot`：本次固定的可见边界；离线 v1 没有预先可信的最后 seq，seq 为 null。
 - `source_status`：本次读取的状态观察，含其更新时间与 stale 标志、readiness 与错误/诊断各最多 96 UTF-8 字节的预览及截断标志；它不等于 snapshot 创建时的采集状态。native 来源提供已经校验的 artifact_id/session_id。v2/v3 会话还提供 capture_completeness、stream_interruptions 和最后流错误预览；离线 native 文件提供 footer 的采集观察及 known_gap_count，不能把它视为当前设备健康状态。需要完整诊断时使用 `status`。

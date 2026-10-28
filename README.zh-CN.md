@@ -128,7 +128,7 @@ ciallogcat-cli stop --session-dir ./capture-session
 ```
 
 - 控制命令返回 JSON，日志记录采用**规范化 JSONL**，并非原始 Logcat 字节。`capture --output -` 将日志写入 stdout，采集摘要写入 stderr。
-- 时长与输出大小限制始终同时生效，默认分别为 **600 秒**与 **64 MiB**。使用 `--duration-secs` 和 `--max-bytes` 调整。达到限制、ADB 退出、收到停止请求或发生错误时会结束，不会无限驻留。
+- 时长与输出大小限制始终同时生效，默认分别为 **600 秒**与 **1 GiB**。使用 `--duration-secs` 和 `--max-bytes` 调整。达到限制、ADB 退出、收到停止请求或发生错误时会结束，不会无限驻留。
 - `start` 返回 `adb_process_started` 仅表示 worker 与 ADB 进程已启动，**不代表设备已就绪或一定会产生日志**。请检查 `status` 并查询输出。
 - `query --query` 对消息进行区分大小写的字面子串匹配。翻页时将返回的 `next_after_seq` 传给 `--after-seq`。CLI 尚未提供全部桌面筛选功能。
 - 输出文件与会话目录必须是新路径。设备日志可能含敏感信息，请存放在私人目录，并在分享前检查内容。

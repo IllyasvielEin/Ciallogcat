@@ -554,6 +554,10 @@ fn history_background_snapshot_persists_scope_and_rejects_forged_worker_config()
     assert_eq!(status["entries"], 2);
     let config: Value =
         serde_json::from_slice(&fs::read(dir.join("config.json")).unwrap()).unwrap();
+    // Default storage cap increased, but finite duration/entry bounds remain.
+    assert_eq!(config["max_bytes"], 1_073_741_824u64);
+    assert_eq!(config["duration_secs"], 600);
+    assert_eq!(config["max_entries"], 10_000_000);
     assert_eq!(config["scope"]["mode"], "dump");
     assert_eq!(config["buffers"], serde_json::json!(["radio"]));
     for replacement in [
@@ -1418,6 +1422,13 @@ mod linux {
     #[test]
     fn capture_stdout_jsonl_and_explicit_device_are_exact() {
         let s = Sandbox::new("multi_device");
+        let unix_ms = || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64
+        };
+        let before = unix_ms();
         let out = s.run(&[
             "capture",
             "--serial",
@@ -1427,8 +1438,15 @@ mod linux {
             "--max-entries",
             "2",
         ]);
+        let after = unix_ms();
         let rows = entries(&out.success().stdout);
         assert_eq!(rows.len(), 2);
+        for row in &rows {
+            let observed = row["observed_unix_ms"].as_u64().unwrap();
+            assert!((before..=after).contains(&observed));
+            assert!(row.get("provenance").is_none());
+            assert!(row.get("session_id").is_none());
+        }
         let summary = out.summary();
         assert_eq!(summary["entries"], rows.len());
         assert_eq!(summary["bytes"], out.stdout.len());

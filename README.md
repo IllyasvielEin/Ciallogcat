@@ -128,7 +128,7 @@ ciallogcat-cli stop --session-dir ./capture-session
 ```
 
 - Control responses are JSON. Captured records are **normalized JSONL**, not raw Logcat bytes. `capture --output -` streams records to stdout and sends its summary to stderr.
-- Both time and output-size bounds remain active: defaults are **600 seconds** and **64 MiB**. Use `--duration-secs` and `--max-bytes` to change them. Sessions end on a limit, ADB exit, a stop request, or an error; this is not an indefinite daemon.
+- Both time and output-size bounds remain active: defaults are **600 seconds** and **1 GiB**. Use `--duration-secs` and `--max-bytes` to change them. Sessions end on a limit, ADB exit, a stop request, or an error; this is not an indefinite daemon.
 - `start` reporting `adb_process_started` means the worker and ADB process started. It does **not** prove device readiness or that logs will arrive. Inspect `status` and query the output.
 - `query --query` matches a case-sensitive literal substring of the message. For another page, pass its `next_after_seq` as `--after-seq`. The CLI does not expose all desktop filters.
 - Output files and session directories must be new. Keep captures private and review them before sharing; device logs can contain sensitive information.
