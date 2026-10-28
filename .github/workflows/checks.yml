@@ -1,0 +1,160 @@
+name: Checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  linux-headless:
+    name: Linux headless
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: checks-headless
+          cache-on-failure: true
+      - name: Formatting
+        run: cargo fmt --all --check
+      - name: Install CLI packaging tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y dpkg-dev
+      - name: Fake ADB protocol tests
+        run: python -B tests/fixtures/test_fake_adb.py
+      - name: Agent evidence workflow tests
+        run: python -B -m unittest discover -s examples -p 'test_*.py'
+      - name: Transport benchmark protocol tests
+        run: python -B -m unittest discover -s tools -p 'test_transport_benchmark.py'
+      - name: Verify checked-in protobuf bindings
+        run: |
+          cargo fmt --manifest-path tools/proto-codegen/Cargo.toml --check
+          cargo run --locked --manifest-path tools/proto-codegen/Cargo.toml -- --check
+      - name: CLI packaging tests
+        run: python -B -m unittest discover -s .github/scripts -p test_package_cli.py
+      - name: Headless tests
+        run: cargo test --locked --no-default-features --all-targets
+      - name: Headless Clippy
+        run: cargo clippy --locked --no-default-features --all-targets -- -D warnings
+      - name: Upload test diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: checks-${{ github.job }}-${{ runner.os }}-diagnostics
+          path: |
+            target/adb-integration/
+            target/cli-integration/
+            target/config-integration/
+            target/query-v2-integration/
+            target/native-adb-integration/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  linux-gui:
+    name: Linux GUI
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Install Linux GUI dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libudev-dev libx11-dev libxi-dev libxrandr-dev libxcursor-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libegl1-mesa-dev xvfb xauth libgl1-mesa-dri mesa-vulkan-drivers
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: checks-gui
+          cache-on-failure: true
+      - name: GUI behavior tests
+        run: cargo test --locked --bin ciallogcat
+      - name: Build native GUI smoke executable
+        run: cargo build --locked --bin ciallogcat
+      - name: Native X11 window startup smoke test
+        run: xvfb-run -a env WINIT_UNIX_BACKEND=x11 LIBGL_ALWAYS_SOFTWARE=1 python3 -B tools/native-gui-smoke.py
+      - name: Default-feature Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Upload test diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: checks-${{ github.job }}-${{ runner.os }}-diagnostics
+          path: |
+            target/adb-integration/
+            target/cli-integration/
+            target/config-integration/
+            target/query-v2-integration/
+            target/native-adb-integration/
+            target/native-gui-smoke/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  windows:
+    name: Windows
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: checks-windows
+          cache-on-failure: true
+      - name: Default-feature and native ADB lifecycle tests
+        run: cargo test --locked --all-targets
+      - name: Default-feature Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Headless CLI build
+        run: cargo build --locked --no-default-features --bin ciallogcat-cli
+      - name: Headless CLI smoke test
+        shell: pwsh
+        run: |
+          & ./target/debug/ciallogcat-cli.exe --help
+          if ($LASTEXITCODE -ne 0) { throw 'CLI help smoke test failed' }
+          & ./target/debug/ciallogcat-cli.exe --version
+          if ($LASTEXITCODE -ne 0) { throw 'CLI version smoke test failed' }
+      - name: Upload test diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: checks-${{ github.job }}-${{ runner.os }}-diagnostics
+          path: |
+            target/adb-integration/
+            target/cli-integration/
+            target/config-integration/
+            target/query-v2-integration/
+            target/native-adb-integration/
+          if-no-files-found: ignore
+          retention-days: 7

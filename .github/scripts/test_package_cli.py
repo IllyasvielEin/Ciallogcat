@@ -27,6 +27,10 @@ class PackageCliTests(unittest.TestCase):
         self.addCleanup(os.chdir, previous)
         Path("target/release").mkdir(parents=True)
         Path("docs").mkdir()
+        Path("proto").mkdir()
+        Path("proto/LICENSE-APACHE-2.0").write_text("Apache fixture")
+        Path("proto/README.md").write_text("AOSP notice fixture")
+        Path("docs/agent-query.md").write_text("Agent query guide")
         for name in ("ciallogcat-cli", "ciallogcat-cli.exe", "ciallogcat", "libciallogcat.rlib"):
             path = Path("target/release") / name
             path.write_bytes(b"fixture executable or library")
@@ -50,7 +54,7 @@ class PackageCliTests(unittest.TestCase):
                     archive = PACKAGER.package()
                     root = f"ciallogcat-cli-{tag}-{platform}"
                     self.assertEqual(archive.name, root + suffix)
-                    expected = {f"{root}/{name}" for name in (executable, "LICENSE", "README.md")}
+                    expected = {f"{root}/{name}" for name in (executable, "LICENSE", "README.md", "LICENSE-AOSP.txt", "PROTOBUF-NOTICE.md", "agent-query.md")}
                     if suffix == ".zip":
                         with zipfile.ZipFile(archive) as bundle:
                             self.assertEqual(set(bundle.namelist()), expected)
@@ -145,6 +149,9 @@ class PackageCliTests(unittest.TestCase):
         self.assertEqual({line.split()[-1] for line in files}, {
             "./usr/bin/ciallogcat-cli", "./usr/share/doc/ciallogcat-cli/copyright",
             "./usr/share/doc/ciallogcat-cli/README.md",
+            "./usr/share/doc/ciallogcat-cli/LICENSE-AOSP.txt",
+            "./usr/share/doc/ciallogcat-cli/PROTOBUF-NOTICE.md",
+            "./usr/share/doc/ciallogcat-cli/agent-query.md",
         })
         self.assertTrue(all("root/root" in line for line in files))
         self.assertIn("-rwxr-xr-x", next(line for line in files if line.endswith("/ciallogcat-cli")))

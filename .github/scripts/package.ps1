@@ -17,8 +17,9 @@ Copy-Item -LiteralPath "target/release/$executable" -Destination $stage
 Copy-Item -LiteralPath 'README.md', 'README.zh-CN.md', 'LICENSE' -Destination $stage
 # Bundle the usage and maintenance guides with the executable.
 Copy-Item -LiteralPath 'CONTRIBUTING.md' -Destination $stage
+Copy-Item -LiteralPath 'proto' -Destination $stage -Recurse
 Copy-Item -LiteralPath 'docs' -Destination $stage -Recurse
-Copy-Item -LiteralPath 'assets/fonts/README.md', 'assets/fonts/LICENSE-OFL.txt' -Destination "$stage/assets/fonts"
+Copy-Item -LiteralPath 'assets/fonts/README.md', 'assets/fonts/LICENSE-OFL.txt', 'assets/fonts/LICENSE-NOTO-OFL.txt' -Destination "$stage/assets/fonts"
 @(
     "Tag: $env:RELEASE_TAG"
     "Platform: $env:RELEASE_PLATFORM"

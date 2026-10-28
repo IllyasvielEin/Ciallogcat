@@ -198,17 +198,19 @@ fn snapshot_acceptance_and_selection_rebase_over_repeated_prefix_eviction() {
 }
 
 #[test]
-fn process_resolution_restarts_active_spec_without_committing_a_draft() {
+fn process_sample_does_not_rewrite_history_or_commit_filter_draft() {
     let (_, mut app) = app(0);
     app.package = "com.old".to_owned();
     app.schedule_filter();
     app.append_entry(LogEntry::new("", 3, 3, "Tag", Level::Info, "old"));
     app.query = "draft".to_owned();
     app.queue_filter();
+    let generation = app.filter_generation;
     app.update_processes(HashMap::from([(3, "com.old".to_owned())]));
     assert_eq!(app.active_filter.query, "");
     assert!(app.filter_dirty_since.is_some());
-    assert_eq!(app.entries[0].process_name(), "com.old");
+    assert!(app.entries[0].process.is_none());
+    assert_eq!(app.filter_generation, generation);
 }
 
 #[test]

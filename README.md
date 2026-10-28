@@ -4,7 +4,7 @@ An Android Logcat viewer and headless capture tool, built with Rust.
 
 English | [简体中文](README.zh-CN.md)
 
-Use the desktop app to browse live logs, or the CLI to capture and query them from scripts and local agents. Both use the same Rust core and an external ADB installation. Linux is the primary desktop target; release packaging supports Linux and Windows x86_64.
+Use the desktop app to browse live logs or offline files, or the CLI to capture and query logs from scripts and local agents. Both use the same Rust core; live capture requires external ADB. Linux is the primary desktop target; release packaging supports Linux and Windows x86_64.
 
 - Live logs with timestamps, levels, PID/TID, process names, tags, and full messages
 - Desktop filters for package, minimum level, and keywords, including regex and case-sensitive matching
@@ -12,6 +12,7 @@ Use the desktop app to browse live logs, or the CLI to capture and query them fr
 - Multi-row copying, keyboard navigation, and live follow that pauses while you browse
 - Light/dark themes, bundled Chinese/English fonts, and a configurable log memory budget
 - A separate, display-free CLI with JSONL capture and finite local background sessions
+- CLI v1 / native v2 file opening, retained snapshots and filtered exports with source metadata and stable record references
 
 ## Table of Contents
 
@@ -30,7 +31,7 @@ Use the desktop app to browse live logs, or the CLI to capture and query them fr
 
 Ciallogcat focuses on Android app debugging. The desktop app, `ciallogcat`, reads live Logcat through ADB and filters locally. The separate `ciallogcat-cli` executable writes normalized JSONL for scripts and agents without opening a window.
 
-The desktop app does not currently import offline files, export logs to a file, or show devices side by side. Use the CLI for file capture; its output cannot yet be opened in the GUI. The desktop interface currently mixes English and Chinese labels.
+Open JSONL through **File** or drag and drop, without ADB. File views are read-only; saving and filtered export use native v2. The app does not show devices side by side, and currently mixes English and Chinese labels. See the [file workflow](docs/file-workflow.md).
 
 ## Install
 
@@ -65,7 +66,7 @@ Install current [Rust stable](https://rustup.rs/) with Cargo, and Git. Windows b
 
 ```sh
 sudo apt-get update
-sudo apt-get install -y build-essential pkg-config libudev-dev libx11-dev libxi-dev libxrandr-dev libxcursor-dev libxkbcommon-dev libwayland-dev libegl1-mesa-dev
+sudo apt-get install -y build-essential pkg-config libudev-dev libx11-dev libxi-dev libxrandr-dev libxcursor-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libegl1-mesa-dev
 ```
 
 Clone the repository, then choose a frontend:
@@ -91,12 +92,15 @@ To build the GUI without launching it, use `cargo build --locked --release --bin
 3. Click a row for its full message. **Shift+click** selects a range, **Ctrl+click** toggles rows, and **Ctrl+C** copies. **Ctrl+F** or **/** focuses search.
 4. Browsing or selecting pauses live follow without stopping capture. Use **Ctrl+End** or **回到最新** to follow new logs again.
 5. Use **View** for themes, row height, details, and the log memory budget. Budget edits take effect only after **Apply budget**.
+6. **File → 打开日志** / **Ctrl+O** opens JSONL. **另存保留日志** / **Ctrl+Shift+S** saves retained rows, and **导出当前筛选结果** exports a filtered snapshot. File operations currently use path input or drag and drop; save to a new destination.
 
 A few useful details:
 
 - **暂停** (Pause) stops capture but keeps logs; **开启** (Start) resumes without backfilling the paused interval. **关闭** (Close) also deselects the device. Same-device reconnects preserve retained logs; switching devices asks before clearing them.
+- Device-discovery errors retain the last successful device list and your selection. An offline or missing-device snapshot does not stop a stream that is still running; Pause remains available.
+- An exited stream retries at 1, 2 and 4 seconds, up to three times; Pause or Close cancels retries. Restart waits for the old child and both output pipes to finish. A stop acknowledgement taking over five seconds blocks a new start and reports an error.
 - Buffers default to `main + system + crash`. Changes take effect after **应用** (Apply). Starts and restarts use `-T 1`, so they do not backfill history and may leave gaps.
-- Package filtering includes subprocesses such as `com.example.app:sync`. Unknown or short-lived processes can be hidden by that filter; clear the package restriction to inspect their logs.
+- Package filtering includes subprocesses such as `com.example.app:sync`. GUI process names are recent `ps` hints, not verified identities; failed or expired samples are discarded, and later samples never fill unknown historical rows. Unknown or short-lived processes can be hidden by that filter; clear the package restriction to inspect their logs. Structural Logcat banners remain subject to level and message filters, but bypass the package condition and do not count as unknown processes.
 - Invalid regex shows an error until corrected. **Clear** removes local records after confirmation, never the device's Logcat buffers.
 
 ### Memory retention
@@ -140,13 +144,25 @@ Desktop settings, saved filters, and keyword history are stored locally:
 
 Set `CIALLOGCAT_CONFIG_DIR` to change the desktop configuration directory. Both frontends support `CIALLOGCAT_ADB` for the ADB executable; the CLI also accepts `--adb PATH`. Otherwise, ADB discovery checks SDK environment variables, `PATH`, and common SDK locations. CLI sessions use the directory specified by `--session-dir`.
 
+New Agent integrations can use `capture/start --record-format v2` with `query-v2/get-v2/context-v2`, preserving identities in files the GUI can open. Experimental `--transport proto` is explicit; see the [CLI guide](docs/cli.md).
+
 ## Documentation
 
 Detailed guides are in English or Chinese:
 
+- [Documentation index and migration (Chinese)](docs/README.md)
 - [Desktop behavior and diagnostics](docs/ui-review.md)
 - [CLI commands and sessions](docs/cli.md)
 - [Shared Rust core](docs/headless-core.md)
+- [Agent v2 queries, full records and context](docs/agent-query.md)
+- [Development direction and implementation progress (Chinese)](docs/development-plan.md)
+- [Open tasks and Agent handoff (Chinese)](TODO.md)
+- [Validation status and limits (Chinese)](docs/validation.md)
+- [Text/protobuf/compact performance comparison (Chinese)](docs/transport-performance-2026-10-24.md)
+- [Read-only device diagnostics](docs/device-diagnostics.md)
+- [Bounded evidence around external tests](docs/agent-test-workflow.md)
+- [Logcat protobuf research and compatibility (Chinese)](docs/logcat-protobuf.md)
+- [Logcat options and software practices (Chinese)](docs/logcat-options-and-ecosystem.md)
 - [ADB subprocess tests and mocks](docs/adb-testing.md)
 - [Release workflow and packaging](docs/release.md)
 - [Contribution guide](CONTRIBUTING.md)
@@ -154,7 +170,7 @@ Detailed guides are in English or Chinese:
 
 ## Platform status
 
-Release jobs target **Linux and Windows x86_64**. Linux fake-ADB tests exercise capture and session lifecycles; Windows CLI coverage includes help, version, argument, and packaging checks, but its capture/session lifecycles have not been validated. These tests do not establish real-device reliability or long-running stability.
+Release jobs target **Linux and Windows x86_64**. Linux fake-ADB tests exercise capture and session lifecycles; a shared native Rust fixture is included in Windows CI as well. Local validation includes Linux execution and Windows cross-compilation; hosted Windows execution and device behavior still require confirmation. These tests do not establish real-device reliability or long-running stability.
 
 Desktop checks have exercised ordinary interaction on Linux X11 and nested Wayland with mock logs. Known limits include Chinese IME candidate placement on the tested X11/XIM path, incomplete Wayland IME verification, and a nested Weston resize check blocked by a compositor crash. Windows window dragging may stutter. See the [verification notes](docs/ui-review.md#验证范围).
 
@@ -176,7 +192,7 @@ cargo build --locked --release
 cargo build --locked --release --no-default-features --bin ciallogcat-cli
 ```
 
-Mock ADB tests require Python 3 on Linux, not an Android device. See the [test guide](docs/adb-testing.md) and [CLI validation guide](docs/cli.md#validation-and-packaging). The normal release workflow runs only on version-tag pushes; branch pushes and pull requests do not trigger it. A separate manual workflow can append only the CLI DEB/checksum to the immutable v1.0 release after clean-container validation. See the [release guide](docs/release.md) before publishing.
+Mock ADB tests require Python 3 on Linux, not an Android device. See the [test guide](docs/adb-testing.md) and [CLI validation guide](docs/cli.md#validation-and-packaging). The **Checks** workflow runs on pull requests, pushes to `main`, and manual dispatch; a native Rust fake-ADB fixture is included for Windows capture/session lifecycles, while local cross-compilation does not establish Windows runtime results. The normal release workflow remains version-tag-only. A separate manual workflow can append only the CLI DEB/checksum to the immutable v1.0 release after clean-container validation. See the [release guide](docs/release.md) before publishing.
 
 ## License
 

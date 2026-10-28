@@ -12,6 +12,9 @@ use crate::model::{Level, LogEntry};
 #[derive(Clone, PartialEq)]
 pub struct FilterSpec {
     pub package: String,
+    /// Case-sensitive literal Tag substrings; independent of the message regex.
+    pub tag_include: String,
+    pub tag_exclude: String,
     pub min_level: Level,
     pub query: String,
     pub regex: bool,
@@ -292,6 +295,8 @@ pub fn compile_query(
 
 pub fn entry_matches(entry: &LogEntry, spec: &FilterSpec, matcher: Option<&Regex>) -> bool {
     entry.matches_package(spec.package.trim())
+        && (spec.tag_include.is_empty() || entry.tag.contains(&spec.tag_include))
+        && (spec.tag_exclude.is_empty() || !entry.tag.contains(&spec.tag_exclude))
         && entry.level >= spec.min_level
         && matcher.is_none_or(|matcher| matcher.is_match(&entry.message))
 }
@@ -310,6 +315,8 @@ mod tests {
     fn plain_text_is_not_treated_as_regex() {
         let spec = FilterSpec {
             package: String::new(),
+            tag_include: String::new(),
+            tag_exclude: String::new(),
             min_level: Level::Verbose,
             query: ".*".to_owned(),
             regex: false,
@@ -321,9 +328,41 @@ mod tests {
     }
 
     #[test]
+    fn tag_literals_are_case_sensitive_and_exclusion_wins_independently_of_message_regex() {
+        let mut spec = FilterSpec {
+            package: String::new(),
+            tag_include: "Net.*".into(),
+            tag_exclude: "Noise".into(),
+            min_level: Level::Verbose,
+            query: "request|response".into(),
+            regex: true,
+            case_sensitive: false,
+        };
+        let matcher = compile_matcher(&spec).unwrap();
+        for (tag, expected) in [
+            ("Net.*Client", true),
+            ("Net.*Noise", false),
+            ("net.*Client", false),
+            ("Network", false),
+        ] {
+            let row = LogEntry::new("", 1, 1, tag, Level::Info, "REQUEST");
+            assert_eq!(
+                entry_matches(&row, &spec, matcher.as_ref()),
+                expected,
+                "{tag}"
+            );
+        }
+        spec.tag_include.clear();
+        spec.tag_exclude.clear();
+        assert!(entry_matches(&entry("REQUEST"), &spec, matcher.as_ref()));
+    }
+
+    #[test]
     fn package_and_regex_are_combined() {
         let spec = FilterSpec {
             package: "com.example.app".to_owned(),
+            tag_include: String::new(),
+            tag_exclude: String::new(),
             min_level: Level::Debug,
             query: "timeout|failed".to_owned(),
             regex: true,
@@ -356,6 +395,8 @@ mod tests {
                 entries: Arc::new(entries),
                 spec: FilterSpec {
                     package: String::new(),
+                    tag_include: String::new(),
+                    tag_exclude: String::new(),
                     min_level: Level::Verbose,
                     query: String::new(),
                     regex: false,
@@ -385,6 +426,8 @@ mod tests {
                 entries,
                 spec: FilterSpec {
                     package: String::new(),
+                    tag_include: String::new(),
+                    tag_exclude: String::new(),
                     min_level: Level::Verbose,
                     query: "missing|needle".to_owned(),
                     regex: true,

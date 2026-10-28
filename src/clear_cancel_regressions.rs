@@ -27,7 +27,7 @@ fn clear_cancel_escape_and_backdrop_preserve_both_original_follow_states() {
                 h.frame(vec![]);
                 assert!(h.app.pending_device.is_some());
             } else {
-                h.click_rendered_label("Clear");
+                h.click_rendered_label("清空视图");
                 assert!(h.app.pending_clear);
             }
             assert_eq!(h.app.follow_logs, following);
@@ -73,7 +73,7 @@ fn clear_cancel_escape_and_backdrop_preserve_both_original_follow_states() {
 fn clear_confirmation_still_clears_without_changing_capture_or_follow_choice() {
     for following in [true, false] {
         let mut h = setup(following);
-        h.click_rendered_label("Clear");
+        h.click_rendered_label("清空视图");
         let pos = h
             .labels
             .iter()

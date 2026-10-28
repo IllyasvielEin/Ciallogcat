@@ -10,7 +10,16 @@ Accepted argv, and only these forms:
     -s SERIAL shell pm list packages -3
     -s SERIAL shell ps -A -o PID,NAME
     -s SERIAL shell ps -A
-    -s SERIAL logcat -v threadtime -T 1 (-b BUFFER)+
+    -s SERIAL features
+    -s SERIAL shell -T -n "exec logcat --help"
+    -s SERIAL shell -T -n "exec logcat (-b BUFFER)+ (-g|-S|-p)"
+    -s SERIAL shell -T -n "getprop (ro.build.version.sdk|ro.build.version.release|ro.build.fingerprint)"
+    -s SERIAL logcat -v threadtime SCOPE (-b BUFFER)+
+    -s SERIAL shell -T -n "exec logcat --proto -v threadtime SCOPE (-b BUFFER)+ '*:V'"
+
+SCOPE is -T N/TIME, -t N/TIME or -d. Calendar TIME is a single quoted shell word.
+The history scenario has three stored records at 10-23 12:00:01/02/03.000;
+following emits a fourth record then idles. Dump selects history and exits.
 
 SERIAL must be an available device in the selected scenario. BUFFER is one of
 main, system, crash, events, radio, all. Unrecognized argv/scenarios return 2;
@@ -44,6 +53,11 @@ Output contract (bytes, unless otherwise noted):
   then b"fake adb: logcat failed\\n" on stderr, status 17.
 * eof_open: emits one "before stdout closes" message, closes fd 1, records
   event="stdout_closed", and remains alive until killed or watchdog expiry.
+* once_then_idle: emits one "before idle" message, records event="idle", and
+  keeps both output pipes open without further writes until killed/watchdog.
+* stderr_tail: emits one "before stderr tail" message, closes stdout, then
+  writes 128 diagnostics tail-000..tail-127 after 50 ms and exits 17. Both
+  event="stdout_closed" and event="stderr_complete" are traced.
 * continuous: messages continuous-000000, continuous-000001, ... every 20 ms
   until killed or watchdog expiry, with each write delivered immediately.
 * burst: exactly 128 marker lines, each 256 KiB including prefix/newline. Lines
@@ -52,6 +66,34 @@ Output contract (bytes, unless otherwise noted):
   threadtime-regex cost; stream_edges covers an oversized threadtime line.
   event="burst_complete", lines=128, bytes=33554432 is traced only after all
   bytes have been written; then the process exits 0.
+* proto_normal: one independently encoded protobuf frame (8-byte LE length),
+  priority FATAL=8, trailing-NUL tag, embedded-NUL/invalid-UTF8 message, process.
+  These synthetic bytes test transport fidelity, not device liblog preservation.
+* proto_empty / proto_unknown_only: one empty / unknown-field-only payload.
+* proto_zero_records: successful empty stream, with no schema evidence.
+* proto_unknown_priority: numeric 7 (not protobuf Fatal) plus ordinary fields.
+* proto_malformed / proto_truncated / proto_oversized: invalid wire payload /
+  partial frame payload / 1 MiB + 1 declared length, without allocating payload.
+* proto_unsupported / proto_permission: no stdout, diagnostic stderr, exit 1.
+* proto_no_shell_v2: features lacks the exact shell_v2 token.
+* proto_feature_error: features exits 23; no capability inference is possible.
+* proto_feature_error_large: features exits 23 after 2 MiB of invalid-UTF8 stderr;
+  this must become a bounded status diagnostic rather than unbounded metadata.
+* proto_partial_then_idle: one complete frame, then a declared frame containing
+  only its first payload byte. Both pipes remain open until stop/watchdog.
+* diagnostic_partial: sizes succeed; statistics permission denied with retained
+  stdout; prune unsupported; release has an unknown failure. Other items work.
+* diagnostic_permission / diagnostic_unsupported: help returns the named failure.
+* diagnostic_missing_device: fixed diagnostic queries fail with standard ADB
+  device-not-found errors, echoing the exact serial (including embedded quotes).
+* diagnostic_error_statements: distinguish error statements from quoted option
+  arguments, incidental output, and unfamiliar/localized failures; all exit 1.
+* diagnostic_truncated_statements: explanatory prefixes must not become error
+  causes when capped; also emits complete reasons before a discarded suffix.
+* diagnostic_silent / diagnostic_stderr_forever: help stays alive, either silent
+  or continuously writing stderr. Watchdog is independent of production bounds.
+* diagnostic_large: help writes distinct 224 KiB stdout/stderr with control and
+  invalid UTF-8 bytes, then exits 0. diagnostic_help_stderr writes help to stderr.
 
 All other commands in specialized scenarios use normal output. Every process
 starts a daemon watchdog thread calling os._exit(124), even when its main thread
@@ -64,6 +106,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shlex
 import sys
 import threading
 import time
@@ -73,6 +117,7 @@ WATCHDOG_EXIT = 124
 SCENARIOS = frozenset(
     {
         "normal",
+        "history",
         "no_devices",
         "device_states",
         "multi_device",
@@ -83,8 +128,20 @@ SCENARIOS = frozenset(
         "stream_edges",
         "stderr_exit",
         "eof_open",
+        "once_then_idle",
+        "stderr_tail",
         "continuous",
         "burst",
+        "proto_normal", "proto_empty", "proto_unknown_only", "proto_zero_records",
+        "proto_unknown_priority", "proto_malformed", "proto_truncated", "proto_oversized",
+        "proto_unsupported", "proto_permission", "proto_no_shell_v2", "proto_feature_error",
+        "proto_partial_then_idle",
+        "proto_feature_error_large",
+        "diagnostic_partial", "diagnostic_permission", "diagnostic_unsupported",
+        "diagnostic_silent", "diagnostic_stderr_forever", "diagnostic_large",
+        "diagnostic_help_stderr", "diagnostic_slow",
+        "diagnostic_missing_device", "diagnostic_error_statements",
+        "diagnostic_truncated_statements",
     }
 )
 BUFFERS = frozenset({"main", "system", "crash", "events", "radio", "all"})
@@ -163,25 +220,56 @@ def devices_output(scenario: str) -> bytes:
     return "".join(rows).encode("ascii")
 
 
+def scope_and_buffers(args: list[str]) -> bool:
+    if args[:1] == ["-d"]:
+        remaining = args[1:]
+    elif len(args) >= 2 and args[0] in ("-t", "-T") and re.fullmatch(
+        r"[1-9][0-9]*|[0-9]+\.[0-9]{1,9}|(?:[0-9]{4}-)?[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{1,9}", args[1]
+    ):
+        remaining = args[2:]
+    else:
+        return False
+    return bool(remaining) and len(remaining) % 2 == 0 and all(
+        remaining[i] == "-b" and remaining[i + 1] in BUFFERS
+        for i in range(0, len(remaining), 2)
+    )
+
+
 def parse_command(args: list[str]) -> tuple[str, str | None]:
     if args == ["devices", "-l"]:
         return "devices", None
     if len(args) < 3 or args[0] != "-s" or not args[1] or args[1].startswith("-"):
         raise ValueError("unsupported argv")
     serial, rest = args[1], args[2:]
+    if rest == ["features"]:
+        return "features", serial
     if rest == ["shell", "pm", "list", "packages", "-3"]:
         return "packages", serial
     if rest == ["shell", "ps", "-A", "-o", "PID,NAME"]:
         return "ps_preferred", serial
     if rest == ["shell", "ps", "-A"]:
         return "ps_fallback", serial
-    if rest[:5] == ["logcat", "-v", "threadtime", "-T", "1"]:
-        buffer_args = rest[5:]
-        if buffer_args and len(buffer_args) % 2 == 0 and all(
-            buffer_args[index] == "-b" and buffer_args[index + 1] in BUFFERS
-            for index in range(0, len(buffer_args), 2)
-        ):
-            return "logcat", serial
+    if len(rest) == 4 and rest[:3] == ["shell", "-T", "-n"]:
+        # Parse quoting without executing a shell; reject all extra words.
+        remote = shlex.split(rest[3])
+        if remote == ["exec", "logcat", "--help"]:
+            return "diagnostic_help", serial
+        properties = {"ro.build.version.sdk": "sdk", "ro.build.version.release": "release",
+                      "ro.build.fingerprint": "fingerprint"}
+        if len(remote) == 2 and remote[0] == "getprop" and remote[1] in properties:
+            return "diagnostic_" + properties[remote[1]], serial
+        if remote[:2] == ["exec", "logcat"] and remote[-1:] in (["-g"], ["-S"], ["-p"]):
+            selected = remote[2:-1]
+            if selected and len(selected) % 2 == 0 and all(
+                selected[i] == "-b" and selected[i + 1] in BUFFERS
+                for i in range(0, len(selected), 2)
+            ):
+                return {"-g": "diagnostic_sizes", "-S": "diagnostic_statistics",
+                        "-p": "diagnostic_prune"}[remote[-1]], serial
+        if remote[:5] == ["exec", "logcat", "--proto", "-v", "threadtime"] and remote[-1:] == ["*:V"] and scope_and_buffers(remote[5:-1]):
+            return "proto", serial
+    if rest[:3] == ["logcat", "-v", "threadtime"] and scope_and_buffers(rest[3:]):
+        return "logcat", serial
     raise ValueError("unsupported argv")
 
 
@@ -195,7 +283,133 @@ def wait_forever() -> None:
         time.sleep(3600)
 
 
+def proto_payload(priority: int = 8) -> bytes:
+    # Hand-encoded official fields, intentionally independent of Rust/prost.
+    return (b"\x08\x01\x10\x02\x18" + bytes([priority])
+            + b"\x20\x2a\x28\x04\x30\x05\x3a\x04Tag\x00"
+            + b"\x42\x04m\x00\xff\n\x4a\x03app")
+
+
+def proto_frame(payload: bytes) -> bytes:
+    return len(payload).to_bytes(8, "little") + payload
+
+
+def diagnostic(command: str, args: list[str], scenario: str) -> int:
+    if scenario == "diagnostic_truncated_statements":
+        stdout, stderr = {
+            "diagnostic_help": (b"", b"Permission denied is an example from the help, not the error cause.\nUnrecognized failure.\n"),
+            "diagnostic_sizes": (b"not supported is an example, not the failure reason.\n", b""),
+            "diagnostic_statistics": (b"", b"Permission denied\n" + b"x" * 80),
+            "diagnostic_prune": (b"unknown option '-p'\n" + b"x" * 80, b""),
+            "diagnostic_sdk": (b"Permission denied", b""),
+            "diagnostic_release": (b"", b"not supported\n" + b"x" * 80),
+            "diagnostic_fingerprint": (b"", b"unknown optional format\n"),
+        }[command]
+        write_all(1, stdout)
+        write_all(2, stderr)
+        return 1
+    if scenario == "diagnostic_error_statements":
+        stdout, stderr = {
+            "diagnostic_help": (b"Usage example: 'permission denied' / 'unknown option'\n",
+                                b"logcat: unexpected failure\n"),
+            "diagnostic_sizes": (b"", b"logcat: unrecognized option '--permission denied'\n"),
+            "diagnostic_statistics": (b"logcat: Permission denied\n", b""),
+            "diagnostic_prune": (b"logcat: unknown option '-p'\n", b""),
+            "diagnostic_sdk": (b"", "诊断失败：permission denied\n".encode()),
+            "diagnostic_release": (b"", b"logcat: unknown optional format\n"),
+            "diagnostic_fingerprint": (b"", b"logcat: failed to inspect 'permission denied': unexpected failure\n"),
+        }[command]
+        write_all(1, stdout)
+        write_all(2, stderr)
+        return 1
+    if scenario == "diagnostic_slow":
+        time.sleep(0.15)
+    if command == "diagnostic_help":
+        if scenario == "diagnostic_silent":
+            trace(args, scenario, "diagnostic_idle")
+            wait_forever()
+        if scenario == "diagnostic_stderr_forever":
+            trace(args, scenario, "diagnostic_flood")
+            while True:
+                write_all(2, b"continuous diagnostic stderr\n" * 256)
+        if scenario == "diagnostic_large":
+            write_all(1, b"OUT\x00\"\\\n" * 32768)
+            write_all(2, b"ERR\xff\r\t\n" * 32768)
+            return 0
+        if scenario == "diagnostic_permission":
+            write_all(2, b"logcat: Permission denied\n")
+            return 1
+        if scenario == "diagnostic_unsupported":
+            write_all(2, b"logcat: unrecognized option '--help'\n")
+            return 1
+    if scenario == "diagnostic_partial":
+        if command == "diagnostic_statistics":
+            write_all(1, b"partial statistics header\n")
+            write_all(2, b"logcat: failed to read statistics: Permission denied\n")
+            return 13
+        if command == "diagnostic_prune":
+            write_all(2, b"logcat: invalid option -- 'p'\n")
+            return 2
+        if command == "diagnostic_release":
+            write_all(2, b"adb: transport disconnected\n")
+            return 17
+    output = {
+        # Deliberately omit nsec and proto, while reporting a recent SDK. Help
+        # absence and API-level observations cannot establish OEM support.
+        "diagnostic_help": b"Usage: logcat [options]\n -g buffer sizes\n -S statistics\n -p prune list\n -v threadtime,epoch\n",
+        "diagnostic_sizes": b"main: ring buffer is 256 KiB (64 KiB consumed), max entry is 5120 B\n",
+        "diagnostic_statistics": b"size/num main system crash\nTotal 1234/42 98/2 0/0\n",
+        "diagnostic_prune": b"~! ~1000/!\n",
+        "diagnostic_sdk": b"35\n",
+        "diagnostic_release": b"15\n",
+        "diagnostic_fingerprint": b"mock/vendor/device:15/BUILD/123:user/release-keys\n",
+    }[command]
+    write_all(2 if scenario == "diagnostic_help_stderr" and command == "diagnostic_help" else 1, output)
+    return 0
+
+
+def proto_logcat(args: list[str], scenario: str) -> int:
+    if scenario == "proto_partial_then_idle":
+        write_all(1, proto_frame(proto_payload()) + (5).to_bytes(8, "little") + b"\x08")
+        trace(args, scenario, "proto_partial")
+        wait_forever()
+    if scenario in ("proto_unsupported", "proto_permission"):
+        diagnostic = (b"logcat: unrecognized option '--proto'\n"
+                      if scenario == "proto_unsupported" else b"logcat: Permission denied\n")
+        write_all(2, diagnostic)
+        return 1
+    if scenario == "proto_zero_records":
+        return 0
+    if scenario == "proto_oversized":
+        data = (1024 * 1024 + 1).to_bytes(8, "little")
+    elif scenario == "proto_truncated":
+        data = proto_frame(proto_payload())[:-1]
+    else:
+        payload = {"proto_empty": b"", "proto_unknown_only": b"\x98\x06\x01",
+                   "proto_malformed": b"\x00",
+                   "proto_unknown_priority": proto_payload(7)}.get(scenario, proto_payload())
+        data = proto_frame(payload)
+    write_all(1, data)
+    return 0
+
+
 def logcat(args: list[str], scenario: str) -> int:
+    if scenario == "history":
+        flag = args[5]
+        records = [(f"10-23 12:00:0{i}.000", f"history-{i}") for i in range(1, 4)]
+        if flag != "-d":
+            value = args[6]
+            if value.isdigit():
+                records = records[-int(value):]
+            else:
+                records = [(t, msg) for t, msg in records if t >= value]
+        for timestamp, message in records:
+            write_all(1, f"{timestamp} 1234 1235 I History: {message}\n".encode())
+        if flag == "-T":
+            write_all(1, line(b"live-after-history"))
+            wait_forever()
+        write_all(2, b"snapshot drained\n")
+        return 0
     if scenario == "stderr_exit":
         write_all(2, b"x" * (2 * 1024 * 1024) + b"\n")
         write_all(2, b"\xff" * 4096 + b"\n")
@@ -214,6 +428,18 @@ def logcat(args: list[str], scenario: str) -> int:
         os.close(1)
         trace(args, scenario, "stdout_closed")
         wait_forever()
+    if scenario == "once_then_idle":
+        write_all(1, line(b"before idle"))
+        trace(args, scenario, "idle")
+        wait_forever()
+    if scenario == "stderr_tail":
+        write_all(1, line(b"before stderr tail"))
+        os.close(1)
+        trace(args, scenario, "stdout_closed")
+        time.sleep(0.05)
+        write_all(2, b"".join(f"tail-{index:03d}\n".encode() for index in range(128)))
+        trace(args, scenario, "stderr_complete")
+        return 17
     if scenario == "continuous":
         number = 0
         while True:
@@ -254,6 +480,12 @@ def main() -> int:
     except ValueError:
         write_all(2, ("fake adb: unsupported argv: " + json.dumps(args) + "\n").encode())
         return 2
+    if scenario == "diagnostic_missing_device" and (
+        command == "features" or command.startswith("diagnostic_")
+    ):
+        prefix = "adb: error: failed to get feature set: " if command == "features" else "error: "
+        write_all(2, f"{prefix}device '{serial}' not found\n".encode())
+        return 1
     if serial is not None:
         states = {item[0]: item[1] for item in device_rows(scenario)}
         if serial not in states:
@@ -264,6 +496,10 @@ def main() -> int:
             return 1
     if command == "logcat":
         return logcat(args, scenario)
+    if command == "proto":
+        return proto_logcat(args, scenario)
+    if command.startswith("diagnostic_"):
+        return diagnostic(command, args, scenario)
     if scenario == "query_error":
         write_all(2, b"fake adb: query failed\n")
         return 23
@@ -271,6 +507,15 @@ def main() -> int:
         wait_forever()
     if command == "devices":
         output = devices_output(scenario)
+    elif command == "features":
+        if scenario == "proto_feature_error_large":
+            write_all(2, b"fake adb: features query failed " + b"\xff" * (2 * 1024 * 1024))
+            return 23
+        if scenario == "proto_feature_error":
+            write_all(2, b"fake adb: features query failed\n")
+            return 23
+        output = (b"cmd,not_shell_v2,shell_v2_extra\n" if scenario == "proto_no_shell_v2"
+                  else b"cmd,shell_v2,stat_v2\n")
     elif command == "packages":
         output = PACKAGES
     elif command == "ps_preferred":

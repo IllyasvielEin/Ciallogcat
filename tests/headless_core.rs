@@ -8,12 +8,14 @@ use ciallogcat::filter::{
     FilterReceiver, FilterRequest, FilterSpec, compile_matcher, entry_matches, spawn_filter_worker,
 };
 use ciallogcat::log_store::LogStore;
-use ciallogcat::model::{Level, LogEntry};
+use ciallogcat::model::{Level, LogEntry, LogEntryKind};
 
 const WAIT: Duration = Duration::from_secs(5);
 
 fn spec(package: &str, level: Level, query: &str, regex: bool, case: bool) -> FilterSpec {
     FilterSpec {
+        tag_include: String::new(),
+        tag_exclude: String::new(),
         package: package.into(),
         min_level: level,
         query: query.into(),
@@ -34,7 +36,7 @@ fn request(generation: u64, entries: Arc<LogStore>, spec: FilterSpec) -> FilterR
 
 #[test]
 fn public_parser_preserves_threadtime_and_fallback_contract() {
-    for (line, time, pid, tid, level, tag, message) in [
+    for (line, time, pid, tid, level, tag, message, kind) in [
         (
             "10-16 09:00:01.1 123 456 I 标签: café 雪 🚀",
             "10-16 09:00:01.1",
@@ -43,6 +45,7 @@ fn public_parser_preserves_threadtime_and_fallback_contract() {
             Level::Info,
             "标签",
             "café 雪 🚀",
+            LogEntryKind::Log,
         ),
         (
             "2026-10-16 09:00:01.123456 7 8 A Fatal: ",
@@ -52,6 +55,7 @@ fn public_parser_preserves_threadtime_and_fallback_contract() {
             Level::Fatal,
             "Fatal",
             "",
+            LogEntryKind::Log,
         ),
         (
             "--------- beginning of main",
@@ -61,6 +65,7 @@ fn public_parser_preserves_threadtime_and_fallback_contract() {
             Level::Info,
             "logcat",
             "--------- beginning of main",
+            LogEntryKind::Marker,
         ),
         (
             " unexpected text ",
@@ -69,7 +74,8 @@ fn public_parser_preserves_threadtime_and_fallback_contract() {
             0,
             Level::Info,
             "logcat",
-            "unexpected text",
+            " unexpected text ",
+            LogEntryKind::Unparsed,
         ),
     ] {
         let entry = parse_logcat_line(line).unwrap();
@@ -78,15 +84,59 @@ fn public_parser_preserves_threadtime_and_fallback_contract() {
         assert_eq!(entry.tag.as_ref(), tag);
         assert_eq!(entry.message.as_ref(), message);
         assert!(entry.process.is_none());
+        assert_eq!(entry.kind, kind);
     }
+    assert!(parse_logcat_line(" \t").is_none());
+    assert_eq!(
+        parse_logcat_line("10-16 09:00:01.123 0 0 I Kernel: parsed pid zero")
+            .unwrap()
+            .kind,
+        LogEntryKind::Log
+    );
     for line in [
-        " \t",
         "10-16 09:00:01.123 1 2 S Tag: silent",
         "10-16 09:00:01.123 4294967296 2 I Tag: overflowing pid",
         "10-16 09:00:01.123 1 4294967296 I Tag: overflowing tid",
     ] {
-        assert!(parse_logcat_line(line).is_none(), "{line:?}");
+        let entry = parse_logcat_line(line).unwrap();
+        assert_eq!(entry.kind, LogEntryKind::Unparsed, "{line:?}");
+        assert_eq!(entry.message.as_ref(), line);
     }
+}
+
+#[test]
+fn structural_markers_are_not_unknown_logs_and_keep_other_filter_conditions() {
+    let marker = LogEntry::marker("--------- beginning of crash");
+    let unparsed = LogEntry::unparsed("unrecognized device output");
+    let log = LogEntry::new("", 42, 42, "Tag", Level::Info, "unknown process");
+    for (filter, marker_matches) in [
+        (spec("com.example.app", Level::Info, "", false, false), true),
+        (
+            spec("com.example.app", Level::Warn, "", false, false),
+            false,
+        ),
+        (
+            spec("com.example.app", Level::Info, "crash", false, false),
+            true,
+        ),
+        (
+            spec("com.example.app", Level::Info, "missing", false, false),
+            false,
+        ),
+    ] {
+        let matcher = compile_matcher(&filter).unwrap();
+        assert_eq!(
+            entry_matches(&marker, &filter, matcher.as_ref()),
+            marker_matches
+        );
+        assert!(!entry_matches(&unparsed, &filter, matcher.as_ref()));
+        assert!(!entry_matches(&log, &filter, matcher.as_ref()));
+    }
+    let mut store = LogStore::default();
+    store.push(marker);
+    store.push(unparsed);
+    store.push(log);
+    assert_eq!(store.unresolved_count(), 1);
 }
 
 #[test]

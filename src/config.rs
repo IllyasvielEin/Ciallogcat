@@ -15,6 +15,8 @@ const CONFIG_FILE: &str = "config.json";
 #[serde(default)]
 pub struct AppConfig {
     pub package: String,
+    pub tag_include: String,
+    pub tag_exclude: String,
     pub min_level: Level,
     pub query: String,
     pub use_regex: bool,
@@ -26,12 +28,15 @@ pub struct AppConfig {
     pub filter_history: Vec<String>,
     pub memory_limit_mib: usize,
     pub buffers: Vec<LogBuffer>,
+    pub capture_scope: ciallogcat::capture_scope::CaptureScope,
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
             package: String::new(),
+            tag_include: String::new(),
+            tag_exclude: String::new(),
             min_level: Level::Verbose,
             query: String::new(),
             use_regex: false,
@@ -43,6 +48,7 @@ impl Default for AppConfig {
             filter_history: Vec::new(),
             memory_limit_mib: 300,
             buffers: LogBuffer::defaults(),
+            capture_scope: ciallogcat::capture_scope::CaptureScope::default(),
         }
     }
 }
@@ -129,6 +135,8 @@ mod tests {
         config.saved_filters.push(SavedFilter {
             name: "Network".to_owned(),
             package: "com.example.app".to_owned(),
+            tag_include: "Network".to_owned(),
+            tag_exclude: "Noise".to_owned(),
             min_level: Level::Debug,
             query: "timeout|failed".to_owned(),
             regex: true,
@@ -149,6 +157,9 @@ mod tests {
         assert_eq!(config.memory_limit_mib, 300);
         assert!(config.filter_history.is_empty());
         assert_eq!(config.buffers, LogBuffer::defaults());
+        assert!(config.tag_include.is_empty() && config.tag_exclude.is_empty());
+        let old: SavedFilter = serde_json::from_str(r#"{"name":"old","package":"","min_level":"Info","query":"","regex":false,"case_sensitive":false}"#).unwrap();
+        assert!(old.tag_include.is_empty() && old.tag_exclude.is_empty());
     }
 }
 

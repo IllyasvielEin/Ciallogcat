@@ -22,12 +22,20 @@ name = "ciallogcat-cli"
 path = "src/bin/ciallogcat-cli.rs"
 
 [dependencies]
+base64 = "0.22"
 ctrlc = "3.5"
+hmac = "0.12"
 eframe = { version = "0.36.1", optional = true }
 egui_extras = { version = "0.36.1", optional = true }
 regex = "1"
+prost = "=0.14.4"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["arbitrary_precision"] }
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Threading"] }
 
 [profile.release]
 lto = "thin"
@@ -41,7 +49,7 @@ license-file = ["LICENSE", "0"]
 extended-description = "Desktop Android Logcat viewer with filtering, multi-row copying and live capture. Built for Ubuntu 24.04 x86_64; requires a graphical desktop."
 section = "devel"
 priority = "optional"
-depends = "$auto, libx11-6, libxcursor1, libxi6, libxrandr2, libxkbcommon0, libwayland-client0, libegl1, libgl1, libvulkan1"
+depends = "$auto, libx11-6, libxcursor1, libxi6, libxrandr2, libxkbcommon0, libxkbcommon-x11-0, libwayland-client0, libegl1, libgl1, libvulkan1"
 recommends = "adb, mesa-vulkan-drivers"
 assets = [
     ["target/release/ciallogcat", "usr/bin/ciallogcat", "755"],
@@ -50,7 +58,9 @@ assets = [
     ["README.md", "usr/share/doc/ciallogcat/README.md", "644"],
     ["README.zh-CN.md", "usr/share/doc/ciallogcat/README.zh-CN.md", "644"],
     ["CONTRIBUTING.md", "usr/share/doc/ciallogcat/CONTRIBUTING.md", "644"],
+    ["proto/*", "usr/share/doc/ciallogcat/proto/", "644"],
     ["docs/*.md", "usr/share/doc/ciallogcat/guides/", "644"],
     ["assets/fonts/LICENSE-OFL.txt", "usr/share/doc/ciallogcat/fonts/LICENSE-OFL.txt", "644"],
+    ["assets/fonts/LICENSE-NOTO-OFL.txt", "usr/share/doc/ciallogcat/fonts/LICENSE-NOTO-OFL.txt", "644"],
     ["assets/fonts/README.md", "usr/share/doc/ciallogcat/fonts/README.md", "644"],
 ]
