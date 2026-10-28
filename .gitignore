@@ -1,4 +1,5 @@
 /target/
+/tools/proto-codegen/target/
 
 # Local editor and operating-system files
 /.idea/

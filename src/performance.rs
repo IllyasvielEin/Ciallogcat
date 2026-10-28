@@ -16,12 +16,13 @@ fn sample(index: usize, message: &str) -> LogEntry {
 }
 
 fn frame(app: &mut CiallogcatApp, ctx: &egui::Context, width: f32) {
+    frame_at_size(app, ctx, egui::vec2(width, 820.0));
+}
+
+fn frame_at_size(app: &mut CiallogcatApp, ctx: &egui::Context, size: egui::Vec2) {
     let mut output = ctx.run_ui(
         egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(width, 820.0),
-            )),
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
             ..Default::default()
         },
         |ui| {
@@ -46,6 +47,119 @@ fn report(name: &str, mut times: Vec<f64>) {
 }
 
 #[test]
+#[ignore = "manual release selection and clipboard measurement"]
+fn measure_selection_copy() {
+    for count in [200_000, 1_000_000] {
+        let rows: Vec<_> = (0..count).collect();
+        let mut selected = selection::RowSelection::default();
+        let mut all_times = Vec::new();
+        let mut shift_times = Vec::new();
+        let mut snapshot_times = Vec::new();
+        for trial in 0..15 {
+            selected.clear();
+            let started = Instant::now();
+            selected.select_all(&rows);
+            std::hint::black_box(&selected);
+            if trial >= 3 {
+                all_times.push(started.elapsed().as_secs_f64() * 1000.0);
+            }
+            selected.select(&rows, 0, false, false);
+            let started = Instant::now();
+            selected.select(&rows, count - 1, true, false);
+            std::hint::black_box(&selected);
+            if trial >= 3 {
+                shift_times.push(started.elapsed().as_secs_f64() * 1000.0);
+            }
+            let started = Instant::now();
+            let frozen: Vec<_> = selected.indices().collect();
+            if trial >= 3 {
+                snapshot_times.push(started.elapsed().as_secs_f64() * 1000.0);
+            }
+            std::hint::black_box(frozen);
+        }
+        report(&format!("select all {count} rows (UI handler)"), all_times);
+        report(
+            &format!("Shift range {count} rows (UI handler)"),
+            shift_times,
+        );
+        report(
+            &format!("freeze selected {count} indices (UI handler)"),
+            snapshot_times,
+        );
+    }
+    let count = 100_000;
+    let base = LogEntry::new("12:34", 7, 7, "Tag", Level::Info, "");
+    let overhead = base.copy_text_bytes().unwrap();
+    let body = (copy::MAX_COPY_BYTES + 1) / count - overhead - 1;
+    let mut entries = LogStore::default();
+    for index in 0..count {
+        let mut row = base.clone();
+        let extra = if index == count - 1 {
+            (copy::MAX_COPY_BYTES + 1) % count
+        } else {
+            0
+        };
+        row.message = Arc::from("x".repeat(body + extra));
+        entries.push(row);
+    }
+    let mut times = Vec::new();
+    for trial in 0..15 {
+        let started = Instant::now();
+        let result = copy::build_copy(&entries, 0..count, copy::MAX_COPY_BYTES).unwrap();
+        assert_eq!(result.len(), copy::MAX_COPY_BYTES);
+        if trial >= 3 {
+            times.push(started.elapsed().as_secs_f64() * 1000.0);
+        }
+        std::hint::black_box(result);
+    }
+    report("16 MiB full copy / 100k records (UI handler)", times);
+    let ctx = egui::Context::default();
+    let mut app = CiallogcatApp::with_config(&ctx, AppConfig::default(), None);
+    app.entries = Arc::new(entries);
+    app.matches = (0..count).collect();
+    app.filter_progress.as_mut().unwrap().next_absolute = count;
+    app.selection.select_all(&app.matches);
+    let mut request_times = Vec::new();
+    let mut preparation_times = Vec::new();
+    let mut commit_times = Vec::new();
+    for trial in 0..15 {
+        let started = Instant::now();
+        app.copy_logs(&ctx, CopyTarget::Selection);
+        let requested = started.elapsed();
+        while app.copy_ready.is_none() {
+            app.poll_copy();
+            assert!(started.elapsed() < Duration::from_secs(5));
+            std::thread::yield_now();
+        }
+        let prepared = started.elapsed();
+        let mut committed = Duration::ZERO;
+        let output = ctx.run_ui(egui::RawInput::default(), |_ui| {
+            let start = Instant::now();
+            app.commit_prepared_copy(&ctx);
+            committed = start.elapsed();
+        });
+        assert!(output.platform_output.commands.iter().any(|command| matches!(command, egui::OutputCommand::CopyText(text) if text.len() == copy::MAX_COPY_BYTES)));
+        if trial >= 3 {
+            request_times.push(requested.as_secs_f64() * 1000.0);
+            preparation_times.push(prepared.as_secs_f64() * 1000.0);
+            commit_times.push(committed.as_secs_f64() * 1000.0);
+        }
+    }
+    report(
+        "16 MiB background copy request/frozen selection (UI handler)",
+        request_times,
+    );
+    report(
+        "16 MiB background copy ready (wall time, worker)",
+        preparation_times,
+    );
+    report(
+        "16 MiB explicit clipboard command (UI handler, excludes OS clipboard)",
+        commit_times,
+    );
+}
+
+#[test]
 #[ignore = "manual release performance measurement"]
 fn measure_ui() {
     let ctx = egui::Context::default();
@@ -56,17 +170,49 @@ fn measure_ui() {
     }
     app.query = "timeout|failed".to_owned();
     app.use_regex = true;
-    for width in [1280.0, 900.0] {
+    app.schedule_filter();
+    // Merely drawing the table requests a highlight; the worker result must
+    // actually be consumed before this benchmark can claim to measure it.
+    settle_worker(&mut app, &ctx, Some("timeout"));
+    assert_eq!(app.matches.len(), 200_000);
+    assert!(app.highlight_matcher.as_ref().unwrap().is_match("failed"));
+    app.follow_logs = false;
+    app.scroll_to_bottom = false;
+    for (width, height, moving, details) in [
+        (1280.0, 820.0, false, false),
+        (900.0, 560.0, false, false),
+        (1280.0, 820.0, true, false),
+        (900.0, 560.0, true, true),
+    ] {
+        app.selected = details.then_some(0);
+        app.restore_scroll_offset = Some(0.0);
+        app.scroll_to_selected = false;
         let mut times = Vec::new();
         for index in 0..70 {
+            if moving {
+                // Exercise newly visible rows throughout the retained history,
+                // rather than repeatedly laying out one warmed viewport.
+                let row = index * 2711 % (app.matches.len() - 100);
+                app.restore_scroll_offset = Some(row as f32 * app.row_height);
+                app.selected = details.then_some(app.matches[row]);
+            }
             let started = Instant::now();
-            frame(&mut app, &ctx, width);
+            frame_at_size(&mut app, &ctx, egui::vec2(width, height));
             if index >= 10 {
                 times.push(started.elapsed().as_secs_f64() * 1000.0);
             }
         }
-        report(&format!("200k rows UI+tessellation width={width}"), times);
+        if moving {
+            assert!(app.table_scroll_offset > 0.0, "viewport must actually move");
+        }
+        report(
+            &format!(
+                "200k matched/highlighted rows UI+tessellation {width}x{height} moving={moving} details={details}"
+            ),
+            times,
+        );
     }
+    app.selected = None;
     // A held filter snapshot must stay immutable as capture continues.
     app.memory_limit_mib = 64;
     let mut times = Vec::new();
@@ -102,6 +248,7 @@ fn measure_ui() {
     for index in 0..40 {
         app.append_entry(sample(index, &long_message));
     }
+    settle_worker(&mut app, &ctx, Some("timeout"));
     let mut times = Vec::new();
     for _ in 0..5 {
         let started = Instant::now();
@@ -123,7 +270,7 @@ fn measure_ui() {
         app.append_entry(sample(index, message));
     }
     let tx = app.backend_tx.clone();
-    let session_id = app.capture_session_id;
+    let session_id = app.begin_test_capture();
     let producer = std::thread::spawn(move || {
         for index in 180_000..230_000 {
             tx.send(BackendEvent::Logcat {
@@ -135,7 +282,9 @@ fn measure_ui() {
     });
     let mut frame_times = Vec::new();
     let mut receive_times = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(30);
     while app.entries.len() + app.dropped_entries < 230_000 {
+        assert!(Instant::now() < deadline, "event burst did not finish");
         let started = Instant::now();
         app.poll_filter();
         if frame_times.len() % 10 == 0 {
@@ -160,6 +309,7 @@ fn measure_ui() {
 fn backend_drain_yields_and_preserves_queued_logs() {
     let ctx = egui::Context::default();
     let mut app = CiallogcatApp::with_config(&ctx, AppConfig::default(), None);
+    app.begin_test_capture();
     for index in 0..BACKEND_QUEUE_CAPACITY {
         app.backend_tx
             .try_send(BackendEvent::Logcat {

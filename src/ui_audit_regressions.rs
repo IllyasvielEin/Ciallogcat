@@ -59,7 +59,7 @@ fn long_device_names_leave_all_filter_controls_inside_minimum_window() {
             h.app.devices[0].model = Some(model);
             h.frame(vec![]);
             h.frame(vec![]);
-            for label in ["Saved filters", ".*", "Aa", "↻ 刷新"] {
+            for label in ["筛选方案", ".*", "Aa", "↻ 刷新"] {
                 bounded(&h, label);
             }
             for id in ["package_filter", "query_shortcut"] {
@@ -93,15 +93,20 @@ fn simultaneous_diagnostics_preserve_counts_and_complete_copy_with_escape() {
         let adb = "ADB device query failed: END-QUERY".to_owned();
         h.app.capture_state = CaptureState::Error(capture.clone());
         h.app.config_error = Some(settings.clone());
-        h.app.adb_status = adb.clone();
+        h.app.package_query_error = Some(adb.clone());
         h.frame(vec![]);
-        for label in ["采集错误", "设置保存失败", "ADB 查询错误", "1 total · 0/s"] {
+        for label in [
+            "采集错误",
+            "设置保存失败",
+            "包列表查询错误",
+            "1 total · 0/s",
+        ] {
             bounded(&h, label);
         }
         for (label, popup, expected) in [
             ("采集错误", "capture_diagnostic", capture),
             ("设置保存失败", "settings_diagnostic", settings),
-            ("ADB 查询错误", "adb_diagnostic", adb),
+            ("包列表查询错误", "package_diagnostic", adb),
         ] {
             h.click_label(label);
             assert!(egui::Popup::is_id_open(&h.ctx, egui::Id::new(popup)));

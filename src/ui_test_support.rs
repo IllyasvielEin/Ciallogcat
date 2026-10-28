@@ -65,8 +65,18 @@ impl Harness {
                 ..Default::default()
             },
             |ui| {
+                self.app.file_shortcuts(&self.ctx);
                 self.app.shortcuts(&self.ctx);
+                if self.app.files.is_modal()
+                    || self.app.pending_clear
+                    || self.app.pending_device.is_some()
+                    || self.app.show_save_filter
+                {
+                    ui.disable();
+                }
                 self.app.toolbar(ui);
+                self.app.file_notice(ui);
+                self.app.context_notice(ui);
                 self.app.filter_notice(ui);
                 self.app.status_bar(ui);
                 self.app.details(ui);

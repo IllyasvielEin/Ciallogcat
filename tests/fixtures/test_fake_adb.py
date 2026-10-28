@@ -34,6 +34,9 @@ PACKAGES = ["-s", "TEST-USB", "shell", "pm", "list", "packages", "-3"]
 PS = ["-s", "TEST-USB", "shell", "ps", "-A", "-o", "PID,NAME"]
 PS_FALLBACK = ["-s", "TEST-USB", "shell", "ps", "-A"]
 LOGCAT = ["-s", "TEST-USB", "logcat", "-v", "threadtime", "-T", "1", "-b", "main"]
+FEATURES = ["-s", "TEST-USB", "features"]
+PROTO = ["-s", "TEST-USB", "shell", "-T", "-n",
+         "exec logcat --proto -v threadtime -T 1 -b main '*:V'"]
 
 
 class FakeAdbTests(unittest.TestCase):
@@ -160,7 +163,7 @@ class FakeAdbTests(unittest.TestCase):
             ["-s", "TEST-USB", "logcat"], LOGCAT[:-2], LOGCAT[:-1],
             LOGCAT[:-1] + ["unknown"], LOGCAT + ["--unexpected"],
             LOGCAT[:5] + ["brief"] + LOGCAT[6:],
-            LOGCAT[:6] + ["2"] + LOGCAT[7:],
+            LOGCAT[:6] + ["0"] + LOGCAT[7:],
             ["-s", "TEST-USB", "install", "malicious.apk"],
             ["forward", "tcp:1234", "tcp:5678"],
         ]
@@ -174,6 +177,127 @@ class FakeAdbTests(unittest.TestCase):
         result = self.run_fake(DEVICES, "typo-scenario")
         self.assertEqual(result.returncode, 2)
         self.assertEqual(result.stderr, b"fake adb: unknown scenario: typo-scenario\n")
+
+    def test_positive_history_count_is_an_explicit_supported_argument(self) -> None:
+        result = self.run_fake(LOGCAT[:6] + ["2"] + LOGCAT[7:])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(result.stdout)
+
+    def test_read_only_diagnostics_are_explicit_and_mutations_are_rejected(self) -> None:
+        prefix = ["-s", "TEST-USB", "shell", "-T", "-n"]
+        for command, expected in [
+            ("exec logcat --help", b"Usage: logcat"),
+            ("exec logcat -b main -b crash -g", b"main: ring buffer is 256 KiB"),
+            ("exec logcat -b all -S", b"size/num main system crash"),
+            ("exec logcat -b main -p", b"~! ~1000/!\n"),
+            ("getprop ro.build.version.sdk", b"35\n"),
+            ("getprop ro.build.version.release", b"15\n"),
+            ("getprop ro.build.fingerprint", b"mock/vendor/device:"),
+        ]:
+            result = self.run_fake(prefix + [command])
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(result.stdout.startswith(expected))
+            self.assertEqual(result.stderr, b"")
+        for command in ["exec logcat -b main -c", "exec logcat -b all -G 1M",
+                        "exec logcat -b main -P '~!'; reboot", "getprop",
+                        "getprop ro.build.version.sdk; reboot", "setprop ro.debuggable 1",
+                        "exec logcat -b invalid -g", "exec logcat --help; reboot"]:
+            result = self.run_fake(prefix + [command])
+            self.assertEqual(result.returncode, 2, (command, result.stderr))
+
+    def test_diagnostic_outputs_are_literal_and_partial_failures_keep_stdout(self) -> None:
+        prefix = ["-s", "TEST-USB", "shell", "-T", "-n"]
+        result = self.run_fake(prefix + ["exec logcat -b main -S"], "diagnostic_partial")
+        self.assertEqual(result.returncode, 13)
+        self.assertEqual(result.stdout, b"partial statistics header\n")
+        self.assertIn(b"Permission denied", result.stderr)
+        large = self.run_fake(prefix + ["exec logcat --help"], "diagnostic_large")
+        self.assertEqual(large.returncode, 0)
+        self.assertEqual(large.stdout, b"OUT\x00\"\\\n" * 32768)
+        self.assertEqual(large.stderr, b"ERR\xff\r\t\n" * 32768)
+        stderr_help = self.run_fake(prefix + ["exec logcat --help"], "diagnostic_help_stderr")
+        self.assertEqual(stderr_help.stdout, b"")
+        self.assertTrue(stderr_help.stderr.startswith(b"Usage: logcat"))
+
+    def test_diagnostic_missing_device_preserves_quoted_serial_in_host_error(self) -> None:
+        for serial in ["permission denied", "unknown option", "serial': permission denied",
+                       'serial" unknown option "']:
+            for command, prefix in [
+                (["features"], "adb: error: failed to get feature set: "),
+                (["shell", "-T", "-n", "exec logcat --help"], "error: "),
+            ]:
+                with self.subTest(serial=serial, command=command):
+                    result = self.run_fake(["-s", serial] + command, "diagnostic_missing_device")
+                    self.assertEqual(result.returncode, 1)
+                    self.assertEqual(result.stdout, b"")
+                    self.assertEqual(result.stderr, f"{prefix}device '{serial}' not found\n".encode())
+        rejected = self.run_fake(
+            ["-s", "permission denied", "shell", "-T", "-n", "exec logcat -c"],
+            "diagnostic_missing_device",
+        )
+        self.assertEqual(rejected.returncode, 2)
+        self.assertTrue(rejected.stderr.startswith(b"fake adb: unsupported argv:"))
+
+    def test_diagnostic_error_statements_keep_streams_and_literal_option_argument(self) -> None:
+        prefix = ["-s", "TEST-USB", "shell", "-T", "-n"]
+        option = self.run_fake(prefix + ["exec logcat -b main -g"], "diagnostic_error_statements")
+        self.assertEqual(option.returncode, 1)
+        self.assertEqual(option.stdout, b"")
+        self.assertEqual(option.stderr, b"logcat: unrecognized option '--permission denied'\n")
+        permission = self.run_fake(prefix + ["exec logcat -b main -S"], "diagnostic_error_statements")
+        self.assertEqual(permission.returncode, 1)
+        self.assertEqual(permission.stdout, b"logcat: Permission denied\n")
+        self.assertEqual(permission.stderr, b"")
+
+    def test_diagnostic_truncation_fixture_preserves_full_statements(self) -> None:
+        prefix = ["-s", "TEST-USB", "shell", "-T", "-n"]
+        explanatory = self.run_fake(prefix + ["exec logcat --help"], "diagnostic_truncated_statements")
+        self.assertEqual(explanatory.returncode, 1)
+        self.assertEqual(explanatory.stderr[:17], b"Permission denied")
+        self.assertIn(b"is an example", explanatory.stderr)
+        reason = self.run_fake(prefix + ["exec logcat -b main -S"], "diagnostic_truncated_statements")
+        self.assertEqual(reason.returncode, 1)
+        self.assertEqual(reason.stderr, b"Permission denied\n" + b"x" * 80)
+
+    def test_proto_features_and_literal_binary_frames(self) -> None:
+        self.assertEqual(self.run_fake(FEATURES).stdout, b"cmd,shell_v2,stat_v2\n")
+        self.assertNotIn(b"shell_v2", self.run_fake(FEATURES, "proto_no_shell_v2").stdout.split(b","))
+        error = self.run_fake(FEATURES, "proto_feature_error")
+        self.assertEqual((error.returncode, error.stdout), (23, b""))
+        large_error = self.run_fake(FEATURES, "proto_feature_error_large")
+        self.assertEqual((large_error.returncode, large_error.stdout), (23, b""))
+        self.assertTrue(large_error.stderr.startswith(b"fake adb: features query failed "))
+        self.assertGreater(len(large_error.stderr), 2 * 1024 * 1024)
+        expected = {
+            "proto_normal": fixture.proto_frame(fixture.proto_payload()),
+            "proto_unknown_priority": fixture.proto_frame(fixture.proto_payload(7)),
+            "proto_empty": b"\0" * 8,
+            "proto_unknown_only": b"\x03\0\0\0\0\0\0\0\x98\x06\x01",
+            "proto_zero_records": b"",
+            "proto_malformed": b"\x01\0\0\0\0\0\0\0\0",
+            "proto_truncated": fixture.proto_frame(fixture.proto_payload())[:-1],
+            "proto_oversized": (1024 * 1024 + 1).to_bytes(8, "little"),
+        }
+        for scenario, output in expected.items():
+            with self.subTest(scenario=scenario):
+                result = self.run_fake(PROTO, scenario)
+                self.assertEqual((result.returncode, result.stdout, result.stderr), (0, output, b""))
+        for scenario in ("proto_unsupported", "proto_permission"):
+            result = self.run_fake(PROTO, scenario)
+            self.assertEqual((result.returncode, result.stdout), (1, b""))
+            self.assertIn(b"logcat:", result.stderr)
+        for remote in (PROTO[-1] + "; echo injected", PROTO[-1].replace("main", "unknown"),
+                       PROTO[-1].replace("'*:V'", "'*:D'")):
+            self.assertEqual(self.run_fake(PROTO[:-1] + [remote]).returncode, 2)
+
+    def test_proto_partial_frame_remains_open_until_stopped(self) -> None:
+        child = self.spawn(PROTO, "proto_partial_then_idle")
+        self.wait_for_trace(child, "proto_partial")
+        self.assertIsNone(child.poll())
+        child.kill()
+        stdout, stderr = child.communicate(timeout=2)
+        self.assertEqual(stdout, fixture.proto_frame(fixture.proto_payload()) + (5).to_bytes(8, "little") + b"\x08")
+        self.assertEqual(stderr, b"")
 
     def test_preferred_process_failure_and_empty_output_have_working_fallback(self) -> None:
         preferred = self.run_fake(PS, "ps_fallback")
@@ -241,6 +365,41 @@ class FakeAdbTests(unittest.TestCase):
         self.assertIsNone(child.poll())
         child.kill()
         child.wait(timeout=2)
+
+    def test_stderr_tail_is_complete_after_stdout_closes(self) -> None:
+        result = self.run_fake(LOGCAT, "stderr_tail")
+        self.assertEqual(result.returncode, 17)
+        self.assertEqual(result.stdout, fixture.line(b"before stderr tail"))
+        self.assertEqual(result.stderr, b"".join(f"tail-{index:03d}\n".encode() for index in range(128)))
+        self.assertEqual(
+            [record["event"] for record in self.records()],
+            ["invocation", "stdout_closed", "stderr_complete"],
+        )
+
+    def test_one_record_then_idle_keeps_pipes_open_without_more_output(self) -> None:
+        child = self.spawn(LOGCAT, "once_then_idle")
+        self.wait_for_trace(child, "idle")
+        self.assertIsNone(child.poll())
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(child.stdout.readline)
+            try:
+                first = future.result(timeout=1)
+            except concurrent.futures.TimeoutError:
+                child.kill()
+                raise AssertionError("idle fixture did not emit its first line")
+            self.assertEqual(first, fixture.line(b"before idle"))
+            pending = executor.submit(child.stdout.read)
+            try:
+                pending.result(timeout=0.1)
+            except concurrent.futures.TimeoutError:
+                pass
+            else:
+                self.fail("idle fixture closed stdout")
+            finally:
+                child.kill()
+            self.assertEqual(pending.result(timeout=2), b"")
+        child.wait(timeout=2)
+        self.assertEqual(child.stderr.read(), b"")
 
     def test_continuous_stream_flushes_and_can_be_killed(self) -> None:
         child = self.spawn(LOGCAT, "continuous")

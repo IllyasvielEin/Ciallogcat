@@ -4,7 +4,7 @@
 
 [English](README.md) | 简体中文
 
-用桌面应用浏览实时日志，或通过 CLI 在脚本和本地 Agent 中采集、查询日志。两者共用 Rust 核心，均需要外部 ADB。桌面应用优先面向 Linux；发布打包支持 Linux 与 Windows x86_64。
+用桌面应用浏览实时日志或离线文件，或通过 CLI 在脚本和本地 Agent 中采集、查询日志。两者共用 Rust 核心，实时采集需要外部 ADB。桌面应用优先面向 Linux；发布打包支持 Linux 与 Windows x86_64。
 
 - 实时显示时间、级别、PID/TID、进程名、Tag 和完整消息
 - 桌面端按包名、最低级别与关键词筛选，支持正则表达式和区分大小写
@@ -12,6 +12,7 @@
 - 多行复制、键盘导航，以及浏览时暂停的自动跟随
 - 深色/浅色主题、内置中英文字体和可调日志内存预算
 - 独立的无界面 CLI，支持 JSONL 采集与有截止条件的本地后台会话
+- 打开 CLI v1 / 原生 v2 文件，另存保留日志或导出筛选快照，保留来源与稳定记录引用
 
 ## 目录
 
@@ -30,7 +31,7 @@
 
 Ciallogcat 专注于 Android 应用调试。桌面应用 `ciallogcat` 通过 ADB 读取实时 Logcat，并在本地筛选。独立的 `ciallogcat-cli` 为脚本和 Agent 输出规范化 JSONL，无需打开窗口。
 
-桌面应用目前不支持离线文件导入、日志文件导出或多设备并排显示。文件采集请使用 CLI；其输出暂时不能在 GUI 中打开。桌面界面目前混用中文和英文标签。
+桌面应用可通过 **File** 菜单或拖放打开 JSONL 文件，无需 ADB。文件视图只读；另存和筛选导出使用原生 v2 格式。当前不支持多设备并排显示，界面混用中文和英文标签。文件功能见[使用说明](docs/file-workflow.md)。
 
 ## 安装
 
@@ -65,7 +66,7 @@ Linux 发布包在 Ubuntu 24.04 x86_64 上构建，不保证兼容较旧发行�
 
 ```sh
 sudo apt-get update
-sudo apt-get install -y build-essential pkg-config libudev-dev libx11-dev libxi-dev libxrandr-dev libxcursor-dev libxkbcommon-dev libwayland-dev libegl1-mesa-dev
+sudo apt-get install -y build-essential pkg-config libudev-dev libx11-dev libxi-dev libxrandr-dev libxcursor-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libegl1-mesa-dev
 ```
 
 克隆仓库，然后选择需要的前端：
@@ -91,12 +92,15 @@ cargo build --locked --release --no-default-features --bin ciallogcat-cli
 3. 点击日志行查看完整消息。**Shift+点击** 连选，**Ctrl+点击** 增减选中行，**Ctrl+C** 复制。**Ctrl+F** 或 **/** 聚焦搜索。
 4. 浏览或选择日志会暂停自动跟随，但不会停止采集。按 **Ctrl+End** 或点击“**回到最新**”恢复跟随。
 5. 在 **View** 调整主题、行高、详情和日志内存预算。预算草稿仅在点击 **Apply budget** 后生效。
+6. **File → 打开日志**（Ctrl+O）读取已有 JSONL；**另存保留日志**（Ctrl+Shift+S）或**导出当前筛选结果**保存固定快照。当前使用路径输入与拖放，保存目标须为新文件。
 
 一些实用细节：
 
 - “**暂停**”停止采集并保留日志；“**开启**”恢复采集，不回补暂停期间的内容。“**关闭**”还会取消设备选择。同一设备重连会保留日志；切换设备前会确认清空。
+- 设备发现失败时保留上次成功列表与当前选择。快照中的离线或设备缺失不会单独停止仍在运行的日志流，“暂停”仍可使用。
+- 实际日志流退出后按 1、2、4 秒最多重连三次；暂停或关闭会取消重连。重新采集须等待旧进程与输出排空确认，超过 5 秒未确认则报错并阻止新启动。
 - 缓冲区默认 `main + system + crash`，修改后点击“**应用**”生效。启动与重启使用 `-T 1`，不会回补历史，期间可能有缺口。
-- 包名筛选包含 `com.example.app:sync` 等子进程。未识别或短命进程可能被该筛选隐藏，清除包名限制即可检查它们的日志。
+- 包名筛选包含 `com.example.app:sync` 等子进程。GUI 进程名来自近期 `ps` 推定，并非已核实的身份；查询失败或过期后不再使用，也不会用后来的快照回填历史未知行。未识别或短命进程可能被该筛选隐藏，清除包名限制即可检查它们的日志。Logcat 结构分隔行仍受级别与消息条件筛选，但不受包名条件限制，也不计入未知进程数量。
 - 正则无效时显示错误，修正后恢复结果。**Clear** 确认后仅清除本地记录，不清除设备上的 Logcat 缓冲区。
 
 ### 内存保留
@@ -140,13 +144,25 @@ ciallogcat-cli stop --session-dir ./capture-session
 
 使用 `CIALLOGCAT_CONFIG_DIR` 更改桌面配置目录。两个前端均支持用 `CIALLOGCAT_ADB` 指定 ADB 可执行文件，CLI 还支持 `--adb PATH`。否则会从 SDK 环境变量、`PATH` 和常见 SDK 目录查找 ADB。CLI 会话使用 `--session-dir` 指定的目录。
 
+Agent 新集成可使用 `capture/start --record-format v2` 和 `query-v2/get-v2/context-v2`，沿用 GUI 可打开的记录身份。实验性 `--transport proto` 显式选择；详见 [CLI](docs/cli.md)。
+
 ## 文档
 
 详细指南使用英文或中文：
 
+- [文档索引与迁移](docs/README.md)
 - [桌面交互与诊断](docs/ui-review.md)
 - [CLI 命令与会话](docs/cli.md)
 - [共享 Rust 核心](docs/headless-core.md)
+- [Agent v2 查询、全文与上下文](docs/agent-query.md)
+- [开发方向与实施进度](docs/development-plan.md)
+- [后续任务与 Agent 交接](TODO.md)
+- [验证状态与边界](docs/validation.md)
+- [Text/protobuf/compact 性能对比](docs/transport-performance-2026-10-24.md)
+- [只读设备诊断](docs/device-diagnostics.md)
+- [外部测试前后有界证据流程](docs/agent-test-workflow.md)
+- [Logcat protobuf 调研与兼容方案](docs/logcat-protobuf.md)
+- [Logcat 选项、软件实践与功能取舍](docs/logcat-options-and-ecosystem.md)
 - [ADB 子进程测试与 mock](docs/adb-testing.md)
 - [发布工作流与打包](docs/release.md)
 - [贡献指南](CONTRIBUTING.md)
@@ -154,7 +170,7 @@ ciallogcat-cli stop --session-dir ./capture-session
 
 ## 平台状态
 
-发布任务面向 **Linux 和 Windows x86_64**。Linux fake-ADB 测试覆盖采集与会话生命周期；Windows CLI 检查包括帮助、版本、参数和打包，但采集与会话生命周期尚未验证。这些测试不代表真机可靠性或长期稳定性已通过验证。
+发布任务面向 **Linux 和 Windows x86_64**。Linux fake-ADB 测试覆盖采集与会话生命周期；共用原生 Rust fixture 已接入 Windows CI。本地证据包含 Linux 实际运行和 Windows 交叉编译，托管 Windows 执行及真机行为仍需确认。这些测试不代表真机可靠性或长期稳定性已通过验证。
 
 桌面端已在 Linux X11 与嵌套 Wayland 中使用模拟日志检查普通交互。已知限制包括测试中的 X11/XIM 中文候选框定位偏差、尚未完成的 Wayland 输入法验证，以及被合成器崩溃阻塞的嵌套 Weston 窗口缩放检查。Windows 整窗拖动可能卡顿。详见[验证说明](docs/ui-review.md#验证范围)。
 
@@ -176,7 +192,7 @@ cargo build --locked --release
 cargo build --locked --release --no-default-features --bin ciallogcat-cli
 ```
 
-Mock ADB 测试在 Linux 上需要 Python 3，无需 Android 设备。详见[测试指南](docs/adb-testing.md)与 [CLI 验证指南](docs/cli.md#validation-and-packaging)。发布工作流仅在推送版本标签时运行；分支推送与 Pull Request 不触发该工作流。发布前请阅读[发布指南](docs/release.md)。
+Mock ADB 测试在 Linux 上需要 Python 3，无需 Android 设备。详见[测试指南](docs/adb-testing.md)与 [CLI 验证指南](docs/cli.md#validation-and-packaging)。**Checks** 工作流在 Pull Request、推送 `main` 和手动触发时运行；Windows 采集与会话生命周期已配置原生 Rust fake-ADB fixture；本机交叉编译不等于 Windows 运行验证。原发布工作流仍仅在推送版本标签时运行。发布前请阅读[发布指南](docs/release.md)。
 
 ## 许可证
 

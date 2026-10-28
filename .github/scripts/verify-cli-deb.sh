@@ -11,7 +11,7 @@ if dpkg-deb --field "$package" Depends | grep -Ei 'lib(x11|xcb|xkbcommon|xcursor
 mkdir /tmp/cli-payload
 dpkg-deb --extract "$package" /tmp/cli-payload
 find /tmp/cli-payload -type f -printf '/%P\n' | sort > /tmp/cli-files
-printf '%s\n' /usr/bin/ciallogcat-cli /usr/share/doc/ciallogcat-cli/README.md /usr/share/doc/ciallogcat-cli/copyright | sort > /tmp/expected-cli-files
+printf '%s\n' /usr/bin/ciallogcat-cli /usr/share/doc/ciallogcat-cli/README.md /usr/share/doc/ciallogcat-cli/copyright /usr/share/doc/ciallogcat-cli/LICENSE-AOSP.txt /usr/share/doc/ciallogcat-cli/PROTOBUF-NOTICE.md /usr/share/doc/ciallogcat-cli/agent-query.md | sort > /tmp/expected-cli-files
 diff -u /tmp/expected-cli-files /tmp/cli-files
 # The Ubuntu minimal image can exclude docs; retain this package's license.
 printf '%s\n' 'path-include=/usr/share/doc/ciallogcat-cli/' 'path-include=/usr/share/doc/ciallogcat-cli/*' > /etc/dpkg/dpkg.cfg.d/zz-ciallogcat-cli-docs

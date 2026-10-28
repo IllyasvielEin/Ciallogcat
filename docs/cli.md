@@ -15,7 +15,8 @@ The release workflow packages the headless CLI for **Linux x86_64** and
 - `ciallogcat-cli-v<VERSION>-linux-x86_64.deb` (Ubuntu 24.04, amd64)
 
 Each portable archive contains a versioned directory with `ciallogcat-cli` (or
-`ciallogcat-cli.exe`), `LICENSE`, and this guide as `README.md`. Verify the
+`ciallogcat-cli.exe`), `LICENSE`, this guide as `README.md`, the Agent query guide,
+and AOSP protobuf attribution/license files. Verify the
 accompanying `.sha256` file before extracting. The version follows the release
 tag; for example, a `v1.0` tag build uses `ciallogcat-cli-v1.0-…`.
 The GUI ZIP/tar.gz/DEB names are unchanged. There is no standalone core-library
@@ -50,9 +51,13 @@ unauthorized or offline device cannot produce a usable capture.
 
 ## Commands
 
-Run `ciallogcat-cli --help` for the argument reference. Control responses are JSON on stdout; diagnostics go to stderr.
+Run `ciallogcat-cli --help` for the argument reference, or `query-v2 --help`,
+`get-v2 --help` and `context-v2 --help` for focused source, budget and pagination
+instructions, including defaults and inclusive ranges. `-h` is also supported;
+help is plain text on stdout and requires neither ADB nor a source file.
+Control responses are JSON on stdout; diagnostics go to stderr.
 Captured records are JSONL: one JSON object per line. `capture --output -`
-(the default) streams only entry JSONL to stdout for pipelines; its capture
+(the default) streams only record JSONL to stdout for pipelines; its capture
 summary goes to stderr. An output path writes the records to that file.
 
 ```sh
@@ -70,9 +75,11 @@ overwritten. `status`, `query`, and `stop` use the session directory rather than
 a network service. Query records in pages, using their sequence positions to
 avoid repeatedly returning the same records. Optional `--query TEXT` matches a
 case-sensitive literal substring in the message, using the shared filter
-semantics; it does not search tags and is not a regex. Capture uses the fixed
-`main`, `system`, and `crash` buffers. The CLI has no buffer-selection, package,
-level, or regex flags; message filtering is available only through `query`.
+semantics; it does not search tags and is not a regex. Capture defaults to the
+same `main`, `system`, and `crash` buffers as the GUI. `--buffers LIST` selects
+comma-separated `main,system,crash,events,radio`, or `all` alone. Names must be
+exact, with no empty tokens or duplicates. There are no package, level, or regex
+capture flags; message filtering is available through query commands.
 `--limit` defaults to 100 (maximum 10000). Query returns an `entries` array,
 `next_after_seq`, `has_more`, `partial`, and `scan_limited`. Pass
 `next_after_seq` back as `--after-seq` for the next page, including when matching
@@ -85,14 +92,58 @@ pages can read up to the entire configured capture size (default 64 MiB,
 maximum 1 GiB). Query cost grows with that prefix. `partial` means a trailing
 incomplete JSONL record was skipped and can be retried after the writer finishes.
 
+The legacy `query` command reads v1 sessions only. If `logs.jsonl` begins with a
+valid native v2/v3 header, it exits 3 with JSON error code `unsupported_format` and
+directs you to `query-v2 --session-dir DIR` using the same directory. This is a
+command/format mismatch, not evidence of file corruption. Malformed v1 records
+retain `invalid_session` errors. See the [v2 query contract](agent-query.md) for
+bounded responses, scan budgets and reference-based retrieval.
+
 Both duration and output-byte bounds remain active for each capture:
 `--duration-secs` defaults to 600 (maximum 86400), and `--max-bytes` defaults
 to 67108864 (64 MiB; maximum 1073741824). Both must be positive. Optional
-`--max-entries` lowers the positive record bound (default and maximum 10000000). A session ends when a bound is reached, ADB
-exits, a stop is requested, or an error occurs. This is a bounded capture tool,
+`--max-entries` lowers the positive record bound (default and maximum 10000000). A v1 session ends when a bound is reached, ADB
+exits, a stop is requested, or an error occurs. V2 applies bounded reconnects as described below. This is a bounded capture tool,
 not an indefinitely running daemon. Foreground Ctrl-C requests graceful
 shutdown and stops the CLI's owned ADB child. It does not install a service, autostart
 entry, remote endpoint, or HTTP server.
+
+### Device history and finite snapshots
+
+`capture` and `start` accept the same history options for v1/v2/v3 and their supported transports:
+
+- No history options: request the most recent record, then follow (`-T 1`).
+- `--tail N`: request the most recent N records, then follow (`-T N`). N is an
+  ASCII integer in `1..=2147483647`; it is independent of `--max-entries`.
+- `--since TIME`: request records from the specified **device time**, then
+  follow (`-T TIME`). It is mutually exclusive with `--tail`.
+- `--dump`: take a finite snapshot. Without `--tail`/`--since`, request all
+  available history (`-d`); with either selector, use `-t N` or `-t TIME`.
+
+TIME accepts `MM-DD HH:MM:SS.fraction`, `YYYY-MM-DD HH:MM:SS.fraction`, or Unix
+`SECONDS.fraction`, with 1–9 fractional digits. Quote calendar timestamps as a
+single argument. Calendar fields are validated, and no host timezone conversion
+is performed; omitted years are interpreted by the device. Unix seconds must
+include the decimal point: integer `1792742400` would be ambiguous with a count
+and is rejected. Signed numbers, shell expressions and extra arguments are
+rejected. Device logcat support still determines whether a valid request succeeds.
+
+```sh
+ciallogcat-cli capture --serial DEVICE_SERIAL --tail 500 --duration-secs 30
+ciallogcat-cli capture --serial DEVICE_SERIAL --since '10-23 12:30:00.000' --record-format v2 --output since.jsonl
+ciallogcat-cli capture --serial DEVICE_SERIAL --dump --tail 2000 --buffers main,crash --record-format v2 --output snapshot.jsonl
+ciallogcat-cli start --serial DEVICE_SERIAL --session-dir ./history --dump --since 1792742400.0 --record-format v2
+```
+
+Host duration, record and byte budgets apply during both history retrieval and
+following. They can stop a snapshot before device EOF. Clean snapshot EOF after
+the child is reaped and readers drain reports `reason: "snapshot_complete"` and
+does not reconnect; nonzero exits and reader errors retain error/interruption
+handling. This confirms the requested dump ended, not that logd retained every
+original record. Native completeness remains conservative. The v2/v3 header records
+`source.capture_scope` (typed mode/start), `source.logcat_scope_args`, actual
+`source.requested_buffers`, and `source.host_budgets`. A resumed follow attempt
+reissues its selected history request; there is no cross-attempt deduplication.
 
 A successful `start` reports `adb_process_started`: the worker and ADB process
 started. It cannot prove
@@ -104,17 +155,160 @@ owns and reaps its ADB child rather than killing an arbitrary process by PID.
 A stale heartbeat becomes `state: "unknown"` with `stale: true`; it is not proof
 that a process is alive or dead, and stop does not signal a stored PID.
 
+## Read-only device diagnostics
+
+`diagnose --serial DEVICE_SERIAL` returns a bounded JSON report of actual
+logcat help, buffer sizes (`-g`), statistics (`-S`), prune rules (`-p`), ADB
+shell_v2 advertisement, and Android build/API properties. It never clears logs
+or changes device configuration. `--buffers` has the same names/defaults as
+capture. Use `diagnose --help` for focused help.
+
+```sh
+ciallogcat-cli diagnose --serial DEVICE_SERIAL --buffers main,system,crash \
+  --timeout-ms 10000 --probe-timeout-ms 2000 --max-output-bytes 16384
+```
+
+The total deadline defaults to 10 seconds, with at most 2 seconds per probe;
+both options accept 1–60000 milliseconds. `--max-output-bytes` defaults to
+16384 (range 1–65536) **for each stdout and stderr independently, per probe**.
+Each observation retains output, exit/status, truncation and host observation
+times. Failed probes do not discard other results; exit 0 means the report was
+produced, so inspect `complete` and each observation's status. Ctrl-C emits
+partial JSON after child cleanup and exits 130.
+
+Absent help entries do not prove an option is unsupported, and SDK level does
+not establish every OEM capability. Without advertised shell_v2, remote stderr
+and exit status may not remain separate even though host pipes do. Device logd
+capacity is distinct from host capture queues, GUI retention, file budgets and
+these diagnostic output caps. See the [diagnostic API and report contract](device-diagnostics.md)
+for statuses, cancellation, serialized response bounds and mock-only validation.
+
+## Native capture and Agent queries
+
+Use `--record-format v2` on `capture` or `start` to record a native document.
+The default remains v1 for existing scripts. V2 preserves record kinds, stable
+session/sequence references, host observation times and text-loss observations;
+its header and final footer let the GUI open the same evidence file. The v1
+`query` command does not read v2/v3 files: use the [Agent query commands](agent-query.md).
+
+```sh
+ciallogcat-cli start --serial DEVICE_SERIAL --session-dir ./case-001 --record-format v2 --duration-secs 120
+ciallogcat-cli query-v2 --session-dir ./case-001 --mode tail --query timeout
+ciallogcat-cli stop --session-dir ./case-001
+ciallogcat-cli query-v2 --file ./case-001/logs.jsonl --mode snapshot
+```
+
+V2 and V3 share the same capture pipeline, which retries unexpected stream exits at 1, 2 and 4 seconds, at most three times;
+30 seconds of stable running restores the retry allowance. One session UUID and
+increasing sequence survive reconnects. `attempt` and `segment` distinguish
+streams. The owned child must be reaped and both readers drained before a new
+child starts. Stop or the total duration cancels backoff. There is no automatic
+history recovery or deduplication across interruptions; the footer records
+aggregate interruptions and known host discards. A partial protobuf frame
+observed concurrently with an intentional stop is recorded as
+`incomplete_frame_at_stop`; its cause is not attributed to the stop with certainty.
+Other decoding or cleanup failures remain errors. `finalized: true` only confirms
+that this artifact ended consistently, not that capture was complete.
+
+All attempts share the original duration, entry and byte limits. V2/V3's minimum
+`--max-bytes` is 8192; header and footer bytes count toward it, and 4096 bytes are
+reserved for the bounded footer. Metadata does not count as a log entry.
+Each footer diagnostic is limited to 1024 encoded JSON bytes, including JSON
+escaping, with an explicit truncation flag. This preserves space for the
+aggregate capture facts even when diagnostics contain control characters.
+The status adds `record_schema_version: 2|3`, `artifact_id`, `session_id` and
+`visible_end: {seq, offset}`, `capture_completeness`, `stream_interruptions` and
+`last_stream_error`. Completion of the bounded command can coexist with a
+partial source capture; inspect these observations, not only the exit code.
+The position pair advances only after a complete JSONL
+packet is flushed. A footer advances offset while preserving the last sequence.
+Output errors preserve the last confirmed prefix and may leave an unfinalized
+file; active-session queries can still inspect that published prefix. GUI
+complete-file import rejects missing footers. Readiness still only confirms
+that the host ADB process started; the first query may legitimately be empty.
+
+An explicit experimental transport is available with
+`--record-format v2 --transport proto`. It requires target `shell_v2` support and
+uses `adb shell -T -n` with separate stdout/stderr and no PTY. Unsupported devices
+or malformed frames fail without silent text fallback. It preserves bounded
+protobuf payloads and original tag/message bytes as base64, independently of
+normalized display text. AOSP Android 15+ has the schema; vendor and host-channel
+compatibility still needs device validation. See [protobuf findings](logcat-protobuf.md).
+
+Explicit `--record-format v3 --transport proto` records compact native v3: each
+proto payload is stored once and display fields are derived with the frozen
+`aosp_logcat_16r1_host_v1` projection. V3 with text (including an omitted
+`--transport`) is rejected before capture. Defaults remain v1/text; explicit
+v2/text and v2/proto retain their existing storage contracts. V3 shares the v2
+history options, total budgets, retry policy, flush-before-publication watermarks
+and status handling.
+
+```sh
+ciallogcat-cli start --serial DEVICE_SERIAL --session-dir ./compact --record-format v3 --transport proto --duration-secs 120
+ciallogcat-cli query-v2 --session-dir ./compact --mode tail --start-at end
+ciallogcat-cli query-v2 --session-dir ./compact --mode tail --cursor '<next_cursor>'
+ciallogcat-cli get-v2 --session-dir ./compact --ref '<record_ref>' --view decoded
+```
+
+`query-v2`, `get-v2` and `context-v2` retain their API names and response version
+2, and report `source_schema_version: 3` for v3. `--start-at beginning|end`
+defaults to beginning; end requires a native v2/v3 session in tail mode without
+a cursor. It returns an empty page at the published boundary, with the skipped
+prefix explicitly unscanned. Continue with the returned cursor.
+
+`get-v2 --view stored` is the default and returns the original archive JSON line.
+`--view decoded` returns full structured JSON, including complete message,
+metadata and extensions, marked as a derived view rather than archived bytes.
+It is not a v3 archive record for writing back. Join UTF-8 chunks using
+`next_text_offset`, keeping the same view. Stored lines retain the 8 MiB limit;
+decoded views have a separate 64 MiB cap to allow escaped protobuf text to expand.
+Every response still obeys `--max-response-bytes`. See the
+[query contract](agent-query.md) for bounds and validation semantics.
+
+## Integrate with an existing test executor
+
+[examples/agent_capture.py](../examples/agent_capture.py) starts a finite v2
+session (fixed record_schema_version=2; it does not accept or create v3),
+invokes an explicitly supplied command without a shell, stops capture
+in `finally`, and returns a schema-2 workflow report with test outcome, capture
+state, action boundaries and a bounded evidence window separately. It establishes
+the pre-action cursor directly at the published tail; earlier history is not
+claimed as scanned. The executor can be Maestro, an instrumentation runner, or
+another existing device tool. The tool owns device actions; Ciallogcat owns logs.
+
+```sh
+python3 examples/agent_capture.py --serial DEVICE_SERIAL --session-dir ./case-002 --query timeout -- maestro test flow.yaml
+```
+
+The executor's output streams to stderr. JSON on stdout contains at most 20
+record previews and continuation/reference tokens; use `query-v2`, `get-v2` and
+`context-v2` to request more. A test passing does not imply capture succeeded.
+The example reaps the direct executor and, on POSIX, terminates its private process
+group. On Windows, descendants remain the executor's responsibility. Device cleanup
+always belongs to the supplied executor. See the [workflow contract](agent-test-workflow.md)
+for deadlines, failure tail and the difference between host action times and device logs.
+Open `case-002/logs.jsonl` in the GUI after a finalized stop to inspect the same
+session/sequence identities. This example adds no resident service or model API.
+
 ## JSON and exit codes
 
-Control and record JSON use `schema_version: 1` and a `type` discriminator.
+Existing control responses and v1 records use `schema_version: 1` and a `type` discriminator.
+V2 record files and the new query responses explicitly use version 2.
 Entry fields include `seq`, `time`, `pid`, `tid`, `level`, `tag`, and `message`.
 Status includes `state`, `readiness`, `entries`, `bytes`, `reason`, and `stale`.
+The current writer publishes `entries` and `bytes` together after a complete
+JSONL record is written and flushed from user-space buffers. A partial write or
+failed flush does not advance that confirmed prefix. This is visibility to
+other processes, not a per-record disk-sync guarantee. Existing v1 `query`
+still scans the file and reports an incomplete tail; it does not yet implement
+fixed-snapshot pagination using the status boundary.
 Normal completion reasons include `max_entries`, `max_bytes`, `duration_limit`,
 `stopped`, and `adb_exit`; a failed capture reports its error instead.
 `omitted_by_limit: true` means a configured output/entry limit was reached and
 capture may be truncated; it does not prove additional records existed.
-`discarded_entries` counts known parsed records received but not confirmed
-written. It excludes unread device records and cannot establish end-to-end
+`discarded_entries` counts backend records received but not confirmed written,
+including structural and fallback records represented as v1 entries. It
+excludes unread device records and cannot establish end-to-end
 losslessness. Diagnostics retain only the last line; `diagnostic_dropped_count`
 is the number of earlier received diagnostic lines no longer retained.
 
@@ -146,21 +340,44 @@ fields rather than match diagnostic prose.
   processing also consume space.
 - Records are normalized parsed output, not forensic raw capture. Invalid
   UTF-8 is replaced; the shared core's 1 MiB input-line limit and truncation
-  notices apply. Missing process names retain the shared core's behavior.
+  notices apply. Nonempty undecodable lines are retained as fallback records.
+  V1 preserves its existing entry shape, so it cannot distinguish those lines
+  from structural markers or carry the core's process-hint provenance.
   There is no guarantee that every device record is captured during startup,
   process discovery, disconnection, or shutdown.
+
+The shared `record_io` codec reads this v1 format with an 8 MiB encoded-record
+limit and validates required fields and increasing sequences. Sequence gaps
+are permitted, and unknown optional fields are preserved. The query now rejects
+incomplete or wrongly typed required v1 fields that the old permissive reader
+could pass through; records produced by the CLI retain their original shape.
+Invalid complete records report their line/byte position; no
+malformed line is silently skipped. Explicit offline readers accept a valid
+last record without a newline, as allowed by JSON Lines. Active session queries
+keep the existing `partial` behavior for a non-newline-terminated tail. V1 has
+no completeness footer, so a valid file alone does not prove continuous capture.
 - Mock-based tests and release smoke tests do not establish real-device
   reliability, prolonged memory stability, or compatibility with every host.
 
 ## Validation and packaging
+
+The separate `Checks` workflow runs on pull requests, pushes to `main`, and
+manual dispatch. Its Linux headless job runs the no-default-feature tests and
+Clippy, fake-ADB Python self-tests, and CLI packaging contract tests without GUI
+development packages. A Linux GUI job covers desktop behavior and default-feature
+Clippy; Windows runs default-feature tests and Clippy, then builds and smoke-tests
+the headless CLI. Formatting runs once. Jobs have timeouts and retain available
+fixture diagnostics for seven days on failure. These checks do not publish packages.
 
 The normal release workflow runs only on version-tag pushes. It has
 separate GUI and headless CLI Linux/Windows jobs. The CLI job does not install
 GUI development packages and runs headless tests, Clippy, the explicit CLI
 release build, `--help`/`--version` smoke checks, and packaging contract tests.
 Linux fake-ADB integration tests exercise capture/session process lifecycles.
-Windows runs portable CLI help/version/argument tests and packaging tests;
-Windows fake-ADB lifecycle and real-device behavior have not been verified.
+Windows also runs the shared native Rust fake-ADB integration suite, covering
+binary pipes and owned-child lifecycle. The current local evidence includes
+Linux execution and MSVC cross-compilation; actual Windows runner execution
+and real-device behavior remain separate verification.
 Release publication waits for both GUI and CLI jobs. It uploads CLI archives, the Linux CLI DEB, and
 checksums alongside GUI assets; it never uploads Cargo `.rlib` files.
 DEB dependency discovery fails closed on unresolved libraries or an unverified

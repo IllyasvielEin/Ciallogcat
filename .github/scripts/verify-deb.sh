@@ -7,11 +7,15 @@ printf '%s\n' 'path-include=/usr/share/doc/ciallogcat/' 'path-include=/usr/share
 apt-get update
 apt-get install -y --no-install-recommends "$1" desktop-file-utils
 test "$(dpkg-query -W -f='${Status}' ciallogcat)" = "install ok installed"
+# winit loads this library at runtime, so ldd alone cannot catch its absence.
+dpkg-query -W -f='${Depends}\n' ciallogcat | grep -Eq '(^|, )libxkbcommon-x11-0([ ,(]|$)'
+test "$(dpkg-query -W -f='${Status}' libxkbcommon-x11-0)" = "install ok installed"
 dpkg-query -L ciallogcat
 test -x /usr/bin/ciallogcat
 test -s /usr/share/icons/hicolor/scalable/apps/ciallogcat.svg
 test -s /usr/share/doc/ciallogcat/copyright
 test -s /usr/share/doc/ciallogcat/fonts/LICENSE-OFL.txt
+test -s /usr/share/doc/ciallogcat/proto/LICENSE-APACHE-2.0
 desktop-file-validate /usr/share/applications/ciallogcat.desktop
 ldd /usr/bin/ciallogcat > /tmp/ciallogcat-ldd.txt
 cat /tmp/ciallogcat-ldd.txt

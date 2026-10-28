@@ -7,6 +7,7 @@ use std::collections::BTreeSet;
 pub struct RowSelection {
     rows: BTreeSet<usize>,
     anchor: Option<usize>,
+    revision: u64,
 }
 
 impl RowSelection {
@@ -17,6 +18,9 @@ impl RowSelection {
         self.rows.is_empty()
     }
     pub fn clear(&mut self) {
+        if !self.rows.is_empty() || self.anchor.is_some() {
+            self.revision = self.revision.wrapping_add(1);
+        }
         self.rows.clear();
         self.anchor = None;
     }
@@ -26,7 +30,13 @@ impl RowSelection {
     pub fn last(&self) -> Option<usize> {
         self.rows.last().copied()
     }
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
     pub fn rebase(&mut self, removed: usize) {
+        if removed != 0 && (!self.rows.is_empty() || self.anchor.is_some()) {
+            self.revision = self.revision.wrapping_add(1);
+        }
         self.rows = std::mem::take(&mut self.rows)
             .into_iter()
             .filter_map(|index| index.checked_sub(removed))
@@ -42,6 +52,9 @@ impl RowSelection {
             .filter(|index| matches.binary_search(index).is_err())
             .copied()
             .collect();
+        if !excluded.is_empty() {
+            self.revision = self.revision.wrapping_add(1);
+        }
         for index in excluded {
             self.rows.remove(&index);
         }
@@ -50,6 +63,7 @@ impl RowSelection {
             .is_some_and(|index| range.contains(&index) && matches.binary_search(&index).is_err())
         {
             self.anchor = None;
+            self.revision = self.revision.wrapping_add(1);
         }
     }
     #[cfg(test)]
@@ -57,6 +71,7 @@ impl RowSelection {
         self.retain_classified(matches, 0..usize::MAX);
     }
     pub fn select_all(&mut self, matches: &[usize]) {
+        self.revision = self.revision.wrapping_add(1);
         self.rows = matches.iter().copied().collect();
         self.anchor = matches.first().copied();
     }
@@ -75,11 +90,13 @@ impl RowSelection {
             } else {
                 end
             };
-            if !toggle {
-                self.rows.clear();
+            let range = matches[start.min(end)..=start.max(end)].iter().copied();
+            if toggle {
+                self.rows.extend(range);
+            } else {
+                // Sorted bulk construction avoids one tree insertion per row.
+                self.rows = range.collect();
             }
-            self.rows
-                .extend(matches[start.min(end)..=start.max(end)].iter().copied());
             self.anchor.get_or_insert(index);
         } else {
             if !toggle {
@@ -90,6 +107,7 @@ impl RowSelection {
             }
             self.anchor = Some(index);
         }
+        self.revision = self.revision.wrapping_add(1);
         true
     }
     #[cfg(test)]

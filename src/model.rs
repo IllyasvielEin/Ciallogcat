@@ -92,12 +92,95 @@ impl Level {
     }
 }
 
+/// Text Logcat records keep structural banners and undecodable input distinct.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LogEntryKind {
+    Log,
+    Marker,
+    Unparsed,
+}
+
+/// A sampled process name is a hint, not proof of a log's process instance.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessSource {
+    PsSnapshot,
+    DeviceProcessCache,
+}
+
+/// Original Android protobuf values, separate from lossy display fields.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ProtoEvidence {
+    pub time_sec: u64,
+    pub time_nsec: u64,
+    pub uid: u64,
+    pub pid: u64,
+    pub tid: u64,
+    pub priority: i32,
+    #[serde(with = "binary_base64")]
+    pub raw_payload: Vec<u8>,
+    #[serde(with = "binary_base64")]
+    pub tag_bytes: Vec<u8>,
+    #[serde(with = "binary_base64")]
+    pub message_bytes: Vec<u8>,
+    pub process_name: Option<String>,
+}
+
+impl ProtoEvidence {
+    pub fn memory_bytes(&self) -> usize {
+        self.raw_payload.capacity()
+            + self.tag_bytes.capacity()
+            + self.message_bytes.capacity()
+            + self.process_name.as_ref().map_or(0, String::capacity)
+            + std::mem::size_of::<Self>()
+    }
+}
+
+pub(crate) mod binary_base64 {
+    use base64::{Engine, engine::general_purpose::STANDARD};
+    use serde::{Deserialize, Deserializer, Serializer};
+    pub fn serialize<S: Serializer>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&STANDARD.encode(bytes))
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<u8>, D::Error> {
+        let encoded = String::deserialize(deserializer)?;
+        let limit = crate::protobuf::MAX_FRAME_BYTES as usize;
+        if encoded.len() > limit.div_ceil(3) * 4 {
+            return Err(serde::de::Error::custom(
+                "proto base64 exceeds 1 MiB field/frame limit",
+            ));
+        }
+        let bytes = STANDARD.decode(encoded).map_err(serde::de::Error::custom)?;
+        if bytes.len() > limit {
+            return Err(serde::de::Error::custom(
+                "proto bytes exceed 1 MiB field/frame limit",
+            ));
+        }
+        Ok(bytes)
+    }
+}
+
+/// Loss observed by the host text adapter. False does not establish that the
+/// device produced complete data; None on a row means these facts are unknown.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct TextLoss {
+    pub truncated: bool,
+    pub invalid_utf8_replaced: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct LogEntry {
+    /// Stable identity and host observation, absent for legacy/unowned input.
+    pub provenance: Option<crate::session::RecordIdentity>,
+    pub text_loss: Option<TextLoss>,
+    pub proto: Option<Arc<ProtoEvidence>>,
+    pub kind: LogEntryKind,
     pub time: Arc<str>,
     pub pid: u32,
     pub tid: u32,
     pub process: Option<Arc<str>>,
+    pub process_source: Option<ProcessSource>,
     pub tag: Arc<str>,
     pub level: Level,
     pub message: Arc<str>,
@@ -111,6 +194,7 @@ impl LogEntry {
             + self.tag.len()
             + self.message.len()
             + self.process.as_ref().map_or(0, |process| process.len())
+            + self.proto.as_ref().map_or(0, |proto| proto.memory_bytes())
             + 192
     }
 
@@ -123,10 +207,15 @@ impl LogEntry {
         message: impl Into<Arc<str>>,
     ) -> Self {
         Self {
+            provenance: None,
+            text_loss: None,
+            proto: None,
+            kind: LogEntryKind::Log,
             time: time.into(),
             pid,
             tid,
             process: None,
+            process_source: None,
             tag: tag.into(),
             level,
             message: message.into(),
@@ -134,7 +223,22 @@ impl LogEntry {
     }
 
     pub fn marker(message: impl Into<Arc<str>>) -> Self {
-        Self::new("", 0, 0, "logcat", Level::Info, message)
+        Self {
+            kind: LogEntryKind::Marker,
+            ..Self::new("", 0, 0, "logcat", Level::Info, message)
+        }
+    }
+
+    pub fn unparsed(message: impl Into<Arc<str>>) -> Self {
+        Self {
+            kind: LogEntryKind::Unparsed,
+            ..Self::new("", 0, 0, "logcat", Level::Info, message)
+        }
+    }
+
+    /// Counts only successfully parsed logs whose process name is unknown.
+    pub fn is_unresolved_process(&self) -> bool {
+        self.kind == LogEntryKind::Log && self.process.is_none()
     }
 
     pub fn process_name(&self) -> &str {
@@ -142,8 +246,11 @@ impl LogEntry {
     }
 
     pub fn matches_package(&self, package: &str) -> bool {
-        if package.is_empty() {
+        if package.is_empty() || self.kind == LogEntryKind::Marker {
             return true;
+        }
+        if self.kind == LogEntryKind::Unparsed {
+            return false;
         }
         let Some(process) = self.process.as_deref() else {
             return false;
@@ -210,6 +317,10 @@ impl LogEntry {
 pub struct SavedFilter {
     pub name: String,
     pub package: String,
+    #[serde(default)]
+    pub tag_include: String,
+    #[serde(default)]
+    pub tag_exclude: String,
     pub min_level: Level,
     pub query: String,
     pub regex: bool,
