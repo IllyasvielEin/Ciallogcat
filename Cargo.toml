@@ -1,6 +1,6 @@
 [package]
 name = "ciallogcat"
-version = "1.2.1"
+version = "1.2.2"
 edition = "2024"
 default-run = "ciallogcat"
 description = "A desktop Android Logcat viewer built with Rust and egui"
