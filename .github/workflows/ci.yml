@@ -157,6 +157,7 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v5
       - uses: actions/download-artifact@v7
         with:
           path: dist
@@ -181,7 +182,7 @@ jobs:
           else
             gh release create "$RELEASE_TAG" --verify-tag --draft \
               --title "Ciallogcat $RELEASE_TAG" --generate-notes \
-              --notes 'v1.0 introduces a shared headless Logcat core and a separate ciallogcat-cli for device discovery, bounded JSONL capture, and local background session start/status/query/stop. The default desktop application is retained. CLI-only builds omit GUI dependencies; standalone Windows x86_64 ZIP and Linux x86_64 tar.gz/DEB packages contain the CLI, MIT license and usage guide. GUI archives and an Ubuntu 24.04 DEB are also included. Install ADB separately. All GUI and CLI matrix jobs must pass before publication; DEB installation and removal are checked in a clean Ubuntu 24.04 container. Automated checks do not establish real-device capture, long-running memory behavior, Windows runtime or desktop interaction acceptance. Linux GUI packages require compatible system libraries and a graphical desktop.'
+              --notes-file "$GITHUB_WORKSPACE/docs/releases/${RELEASE_TAG}.md"
           fi
           gh release upload "$RELEASE_TAG" ./*.zip ./*.tar.gz ./*.deb ./*.sha256 --clobber
           gh release edit "$RELEASE_TAG" --draft=false --prerelease="$prerelease"
