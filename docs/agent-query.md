@@ -81,11 +81,21 @@ snapshot 到达上界后，要查看后续追加需省略 cursor 创建新快照
 边界内已有 token 仍可使用，超出关闭边界的旧 snapshot/ref 明确拒绝。原生 session 不要求补造 footer；
 `--file` 仍按原有离线文件规则处理。详情与兼容限制见 [CLI 指南](cli.md)。
 
-`--format text` 默认展示 readable/local，时间来源与 `--time-basis` 一致并显式标明。
+`--format text` 默认展示 readable/local，时间来源与 `--time-basis` 一致；默认 received 不逐行重复，device 及异常回退仍标注，summary 始终声明 basis。
 `--time-format epoch|rfc3339`、`--timezone utc` 可显式选择；纯展示参数不进入 cursor 过滤指纹。
 缺少绝对时间时仅展示明确未知与原始设备文本，不猜年份/时区；时间筛选仍按原有严格缺失规则报错。
 只在 message 没有末尾 LF 时追加一个，不移除内部换行、已有 CRLF 或有意的多个末尾换行。
 JSON/JSONL、归档字节和固定 protobuf 投影不受这些 text 选项影响。
+进程名默认限 32 个显示列，以中间省略号保留前后缀；`--process-width 0` 恢复全名。
+此行为不依赖 TTY，保留字素簇、PID/TID 和完整 message，不能把缩写作为唯一进程身份。
+text summary 的 `text_presentation` 报告列宽和实际缩短进程名的记录数。
+
+每个 query page / stream summary（包括零匹配）都返回 `time_window`：`basis`、
+`anchor_unix_ms`、`since_inclusive`、`until_exclusive`。边界值含精确十进制字符串
+`unix_ns` 和 UTC `rfc3339`；超出日历范围时后者为 null。空边界表示未指定，
+并不是 anchor 或 snapshot 末尾；无时间筛选时 anchor 为 null。相对时间沿用 cursor 的原始锚点。
+它描述解析后的筛选条件，不表示实际数据覆盖范围，也不能据此推断零结果的唯一原因。
+
 
 ## Cursor 和 reference 的有效性
 

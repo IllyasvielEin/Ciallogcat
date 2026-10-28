@@ -145,6 +145,8 @@ const QUERY_V2_HELP: &str = "query-v2 (--file FILE | --session-dir DIR) [OPTIONS
                         Uses --time-basis (received by default) for display too.
                         Missing absolute time is explicitly labeled, never guessed.
   --timezone local|utc  Text only; default local. Epoch ignores this setting.
+  --process-width N     Text process column display width; default 32, 0 unlimited.
+                        Middle ellipsis preserves prefix/suffix, not full identity.
   --all                 Automatically scan every page of a fixed snapshot.
                         Defaults to jsonl; requires jsonl/text, not tail mode.
                         Without --all, even text/jsonl returns only one page.

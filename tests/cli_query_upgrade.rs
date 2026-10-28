@@ -453,6 +453,7 @@ fn relative_time_cursor_reuses_first_page_anchor() {
         .page();
     assert_eq!(seqs(&second), [2]);
     assert_eq!(first["time_anchor_unix_ms"], second["time_anchor_unix_ms"]);
+    assert_eq!(first["time_window"], second["time_window"]);
     assert_eq!(second["complete"], true);
 }
 
@@ -741,4 +742,80 @@ fn malformed_legacy_receive_timestamps_are_invalid_sources_not_missing_times() {
             "invalid_source",
         );
     }
+}
+
+#[test]
+fn relative_empty_results_explain_resolved_window_without_inventing_coverage() {
+    let s = Sandbox::new();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let mut record = row(1, "ninety seconds old");
+    record["observed_unix_ms"] = (now - 90_000).into();
+    let file = s.file(&[record]);
+    for (since, seconds, expected) in [("60s", 60i128, 0usize), ("2m", 120, 1)] {
+        for stream in [false, true] {
+            let mut args = vec!["query-v2", "--file", &file, "--since", since];
+            if stream {
+                args.extend(["--all", "--format", "jsonl"]);
+            }
+            let output = s.run(&args);
+            let result = if stream {
+                output.summary()
+            } else {
+                output.page()
+            };
+            assert_eq!(result["complete"], true);
+            if stream {
+                assert_eq!(result["records_returned"], expected);
+            } else {
+                assert_eq!(result["records"].as_array().unwrap().len(), expected);
+            }
+            let window = &result["time_window"];
+            assert_eq!(window["basis"], "received");
+            let anchor = result["time_anchor_unix_ms"].as_u64().unwrap();
+            assert_eq!(window["anchor_unix_ms"], anchor);
+            assert_eq!(
+                window["since_inclusive"]["unix_ns"],
+                (i128::from(anchor) * 1_000_000 - seconds * 1_000_000_000).to_string()
+            );
+            let resolved = window["since_inclusive"]["rfc3339"].as_str().unwrap();
+            assert!(resolved.ends_with('Z'), "{resolved}");
+            assert!(window["until_exclusive"].is_null());
+        }
+    }
+    let unfiltered = s.run(&["query-v2", "--file", &file]).page();
+    assert_eq!(
+        unfiltered["time_window"],
+        json!({"basis":"received","anchor_unix_ms":null,"since_inclusive":null,"until_exclusive":null})
+    );
+}
+
+#[test]
+fn absolute_window_metadata_preserves_nanoseconds_and_exclusive_end() {
+    let s = Sandbox::new();
+    let mut record = row(1, "outside nanosecond interval");
+    record["observed_unix_ms"] = 1000.into();
+    let file = s.file(&[record]);
+    let page = s
+        .run(&[
+            "query-v2",
+            "--file",
+            &file,
+            "--since",
+            "1970-01-01T01:00:01.000000002+01:00",
+            "--until",
+            "1970-01-01T00:00:01.000000003Z",
+        ])
+        .page();
+    assert!(page["records"].as_array().unwrap().is_empty());
+    assert_eq!(
+        page["time_window"]["since_inclusive"],
+        json!({"unix_ns":"1000000002","rfc3339":"1970-01-01T00:00:01.000000002Z"})
+    );
+    assert_eq!(
+        page["time_window"]["until_exclusive"],
+        json!({"unix_ns":"1000000003","rfc3339":"1970-01-01T00:00:01.000000003Z"})
+    );
 }

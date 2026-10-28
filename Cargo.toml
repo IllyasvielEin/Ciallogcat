@@ -23,6 +23,8 @@ path = "src/bin/ciallogcat-cli.rs"
 
 [dependencies]
 jiff = "0.2"
+unicode-segmentation = "1.13"
+unicode-width = "0.2"
 base64 = "0.22"
 ctrlc = "3.5"
 hmac = "0.12"
