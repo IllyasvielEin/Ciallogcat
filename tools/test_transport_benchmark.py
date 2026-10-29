@@ -1,5 +1,9 @@
 """Adversarial checks for benchmark evidence, using an independent wire fixture."""
 import base64
+import contextlib
+import io
+import sys
+from unittest.mock import patch
 import importlib.util
 import json
 from pathlib import Path
@@ -45,7 +49,9 @@ def fixture(version=3, transport="proto"):
         del row["proto"]
         row["device_time"] = {"text": "10-23 20:53:20.123"}
         row["process"] = None
-        header["normalization"] = {}
+        header["normalization"] = ({"proto_projection": "aosp_logcat_16r1_host_v1",
+                                    "protobuf_raw_payload": "preserved_base64"} if version == 3 else {})
+        row.update(message=BODY.decode(), pid=1234, tid=1235, tag="Perf", level="I")
     footer = {"schema_version": version, "type": "artifact_end", "artifact_id": ARTIFACT,
               "record_count": 1, "first_seq": 1, "last_seq": 1, "finalized": True,
               "scope": {"kind": "retained", "source_record_count": 1,
@@ -68,10 +74,10 @@ class EvidenceTests(unittest.TestCase):
     def check(self, rows, version=3, transport="proto", trailer=""):
         artifact = self.root / "artifact.jsonl"
         artifact.write_text("".join(json.dumps(row) + "\n" for row in rows) + trailer)
-        return bench.validate(artifact, 1, 48, transport, f"v{version}", self.source)
+        return bench.validate(artifact, 1, 48, transport, version, self.source)
 
-    def test_all_three_formats_accept_independent_fixture(self):
-        for version, transport in ((2, "text"), (2, "proto"), (3, "proto")):
+    def test_current_transports_and_historical_baseline_accept_independent_fixture(self):
+        for version, transport in ((2, "text"), (2, "proto"), (3, "text"), (3, "proto")):
             with self.subTest(version=version, transport=transport):
                 result = self.check(fixture(version, transport), version, transport)
                 self.assertTrue(result["success"], result)
@@ -162,23 +168,63 @@ class EvidenceTests(unittest.TestCase):
         rows[1]["message"] = 42
         self.assertFalse(self.check(rows, 2)["success"])
 
+    def test_current_commands_never_use_historical_format_flags(self):
+        for transport in ("text", "proto"):
+            command = bench.capture_command("current-cli", "mock", "output", 1, transport)
+            self.assertNotIn("--record-format", command)
+            self.assertEqual(command[command.index("--transport") + 1], transport)
+            baseline = bench.capture_command("old-cli", "mock", "output", 1, transport, True)
+            self.assertEqual(baseline[baseline.index("--record-format") + 1],
+                             "v2")
+            self.assertEqual(baseline[0], "old-cli")
+        compact = bench.capture_command("old-cli", "mock", "output", 1, "proto", True, True)
+        self.assertEqual(compact[-2:], ["--record-format", "v3"])
+
+    def test_current_only_run_completes_without_a_baseline_binary(self):
+        output = self.root / "report"
+        def capture(cli, replay, root, source, count, size, trial, combo):
+            (root / "not-retained.jsonl").write_text("fixture")
+            return {"combination": combo, "warmup": trial == 0, "success": True,
+                    "artifact": "not-retained.jsonl", "wall_s": 1, "records_per_s": count,
+                    "message_mib_per_s": 1, "cpu_s": 1, "cpu_user_s": .8,
+                    "cpu_system_s": .2, "cli_sampled_peak_rss_kib": 4000,
+                    "cli_sampled_peak_hwm_kib": 4000, "wait4_maxrss_kib": 4000,
+                    "artifact_bytes": 1000}
+        def inputs(source, count, size):
+            source.with_suffix(".text").write_bytes(b"text")
+            source.with_suffix(".proto").write_bytes(b"proto")
+        with (patch.object(sys, "argv", ["benchmark", "--cli", sys.executable,
+                                       "--output-dir", str(output), "--smoke"]),
+              patch.object(bench.platform, "system", return_value="Linux"),
+              patch.object(bench.subprocess, "run"),
+              patch.object(bench, "inputs", side_effect=inputs),
+              patch.object(bench, "sha256", return_value="fixed"),
+              patch.object(bench, "run_capture", side_effect=capture),
+              contextlib.redirect_stdout(io.StringIO())):
+            self.assertEqual(bench.main(), 0)
+        report = json.loads((output / "report.json").read_text())
+        self.assertTrue(report["success"])
+        self.assertEqual(report["state"], "completed")
+        self.assertIsNone(report["baseline_cli"])
+        self.assertTrue(report["baseline_cli_unchanged"])
+
     def test_failed_and_warmup_measurements_cannot_contaminate_summary(self):
-        good = {"combination": "v3/proto", "warmup": False, "success": True,
+        good = {"combination": "current/proto", "warmup": False, "success": True,
                 "wall_s": 2, "records_per_s": 50, "message_mib_per_s": 1,
                 "cpu_s": 1, "cpu_user_s": .6, "cpu_system_s": .4,
                 "cli_sampled_peak_rss_kib": None, "cli_sampled_peak_hwm_kib": None,
                 "wait4_maxrss_kib": 100, "artifact_bytes": 1000}
         warmup = dict(good, warmup=True, wall_s=100)
         failed = dict(good, success=False, wall_s=1000)
-        result = bench.summarize([good, warmup, failed], ["v3/proto"], 2)["v3/proto"]
+        result = bench.summarize([good, warmup, failed], ["current/proto"], 2)["current/proto"]
         self.assertEqual(result["median"]["wall_s"], 2)
         self.assertIsNone(result["median"]["cli_sampled_peak_rss_kib"])
         self.assertEqual((result["successful_runs"], result["failed_runs"]), (1, 1))
         self.assertFalse(result["complete"])
         failed["warmup"] = True
-        self.assertFalse(bench.summarize([good, failed], ["v3/proto"], 1)["v3/proto"]["complete"])
+        self.assertFalse(bench.summarize([good, failed], ["current/proto"], 1)["current/proto"]["complete"])
         failed["warmup"] = False
-        self.assertIsNone(bench.summarize([failed], ["v3/proto"], 1)["v3/proto"]["median"])
+        self.assertIsNone(bench.summarize([failed], ["current/proto"], 1)["current/proto"]["median"])
 
 
 if __name__ == "__main__":

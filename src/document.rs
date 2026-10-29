@@ -16,29 +16,18 @@ use crate::log_store::LogStore;
 use crate::model::{
     Level, LogBuffer, LogEntry, LogEntryKind, ProcessSource, ProtoEvidence, TextLoss,
 };
-use crate::record_io::MAX_RECORD_BYTES;
 use crate::session::{RecordIdentity, SessionId};
 
 /// Arbitrary-precision JSON numbers retain extension values through flatten,
-/// selection and format conversion; core DTO fields keep their typed bounds.
+/// selection and re-encoding; core DTO fields keep their typed bounds.
 pub type Extensions = BTreeMap<String, Value>;
 
-pub const COMPACT_RECORD_ENCODING: &str = "proto_raw_v1";
+/// Maximum encoded JSONL line size, including an optional newline.
+pub const MAX_RECORD_BYTES: u64 = 8 * 1024 * 1024;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum NativeFormat {
-    V2,
-    CompactV3,
-}
-
-impl NativeFormat {
-    fn version(self) -> u8 {
-        match self {
-            Self::V2 => 2,
-            Self::CompactV3 => 3,
-        }
-    }
-}
+/// Current storage schema. This is a validation contract, not a format choice.
+pub const SCHEMA_VERSION: u8 = 3;
+const RECORD_ENCODING: &str = "proto_raw_v1";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct SourceMetadata {
@@ -68,45 +57,9 @@ pub struct DocumentHeader {
 }
 
 impl DocumentHeader {
-    /// Select the encoding for a new snapshot or stream. Existing documents
-    /// must use `Document::convert_format` to validate before removing fields.
-    /// V2's unknown declarations are never overwritten during conversion.
-    pub fn set_format(&mut self, format: NativeFormat) -> Result<(), DocumentError> {
-        validate_header(self)?;
-        if self.schema_version == format.version() {
-            return Ok(());
-        }
-        if format == NativeFormat::CompactV3 {
-            no_reserved(&self.extra, &["record_encoding"])?;
-            no_reserved(&self.normalization, &["proto_projection"])?;
-            if self
-                .normalization
-                .get("protobuf_raw_payload")
-                .is_some_and(|v| v != "preserved_base64")
-            {
-                return Err(DocumentError::invalid(
-                    "conflicting protobuf_raw_payload declaration",
-                ));
-            }
-            self.extra
-                .insert("record_encoding".into(), COMPACT_RECORD_ENCODING.into());
-            self.normalization.insert(
-                "proto_projection".into(),
-                crate::protobuf::PROJECTION_PROFILE.into(),
-            );
-            self.normalization
-                .insert("protobuf_raw_payload".into(), "preserved_base64".into());
-        } else {
-            self.extra.remove("record_encoding");
-            self.normalization.remove("proto_projection");
-        }
-        self.schema_version = format.version();
-        Ok(())
-    }
-
     pub fn live(session_id: SessionId, device_serial: String, buffers: Vec<LogBuffer>) -> Self {
         Self {
-            schema_version: 2,
+            schema_version: SCHEMA_VERSION,
             record_type: "document".into(),
             artifact_id: SessionId::new(),
             session_id: Some(session_id),
@@ -119,35 +72,22 @@ impl DocumentHeader {
                 extra: Extensions::new(),
             },
             derived_from_artifact: None,
-            normalization: Extensions::new(),
-            extra: Extensions::new(),
-        }
-    }
-
-    fn legacy() -> Self {
-        Self {
-            schema_version: 2,
-            record_type: "document".into(),
-            artifact_id: SessionId::new(),
-            session_id: None,
-            source: SourceMetadata {
-                kind: "legacy_v1".into(),
-                device_serial: None,
-                requested_buffers: None,
-                requested_buffers_scope: None,
-                transport_format: None,
-                extra: Extensions::new(),
-            },
-            derived_from_artifact: None,
-            normalization: Extensions::new(),
-            extra: Extensions::new(),
+            normalization: [
+                (
+                    "proto_projection".into(),
+                    crate::protobuf::PROJECTION_PROFILE.into(),
+                ),
+                ("protobuf_raw_payload".into(), "preserved_base64".into()),
+            ]
+            .into(),
+            extra: [("record_encoding".into(), RECORD_ENCODING.into())].into(),
         }
     }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ExportScope {
-    /// `retained`, `filtered`, or `legacy_import`. Sequence gaps are not loss proof.
+    /// `retained` or `filtered`. Sequence gaps are not loss proof.
     pub kind: String,
     pub source_first_seq: Option<u64>,
     pub source_last_seq: Option<u64>,
@@ -214,27 +154,11 @@ pub struct ArtifactEnd {
     pub extra: Extensions,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum DocumentOrigin {
-    NativeV2,
-    NativeV3,
-    LegacyV1,
-}
-
-fn native_origin(version: u8) -> DocumentOrigin {
-    if version == 3 {
-        DocumentOrigin::NativeV3
-    } else {
-        DocumentOrigin::NativeV2
-    }
-}
-
 /// Sidecar aligned with `entries`; it does not duplicate log text.
 #[derive(Debug, Default)]
 #[cfg_attr(not(test), derive(Clone))]
 pub struct RecordMetadata {
     pub seq: u64,
-    pub legacy_original_seq: Option<u64>,
     pub event_kind: Option<String>,
     pub extra: Extensions,
     pub device_time_extra: Extensions,
@@ -244,8 +168,38 @@ pub struct RecordMetadata {
     pub provenance_extra: Extensions,
     pub text_loss_extra: Extensions,
     pub proto_extra: Extensions,
-    /// Unknown members of v3's projection_extensions container.
+    /// Unknown members of the projection_extensions container.
     pub projection_extra: Extensions,
+}
+
+impl RecordMetadata {
+    fn has_extensions(&self) -> bool {
+        // Exhaustive on purpose: a new arbitrary-value field must participate
+        // in final-layout admission rather than silently bypassing it.
+        let Self {
+            seq: _,
+            event_kind: _,
+            process_source: _,
+            extra,
+            device_time_extra,
+            process_extra,
+            provenance_extra,
+            text_loss_extra,
+            proto_extra,
+            projection_extra,
+        } = self;
+        [
+            extra,
+            device_time_extra,
+            process_extra,
+            provenance_extra,
+            text_loss_extra,
+            proto_extra,
+            projection_extra,
+        ]
+        .iter()
+        .any(|extension| !extension.is_empty())
+    }
 }
 
 // Exercise the actual sidecar deep-copy boundary in cancellation regressions,
@@ -255,7 +209,6 @@ impl Clone for RecordMetadata {
     fn clone(&self) -> Self {
         let cloned = Self {
             seq: self.seq,
-            legacy_original_seq: self.legacy_original_seq,
             event_kind: self.event_kind.clone(),
             extra: self.extra.clone(),
             device_time_extra: self.device_time_extra.clone(),
@@ -281,7 +234,6 @@ pub struct Document {
     pub entries: Arc<LogStore>,
     pub record_metadata: Vec<RecordMetadata>,
     pub end: ArtifactEnd,
-    pub origin: DocumentOrigin,
 }
 
 impl Document {
@@ -324,15 +276,14 @@ impl Document {
         scope.source_last_seq = metadata.last().map(|row| row.seq);
         scope.source_record_count = metadata.len() as u64;
         let end = make_end(&header, &metadata, scope, capture);
-        let origin = native_origin(header.schema_version);
         let doc = Self {
             header,
             entries,
             record_metadata: metadata,
             end,
-            origin,
         };
         doc.validate_cancellable(cancel)?;
+        doc.validate_encoded_cancellable(cancel)?;
         Ok(doc)
     }
 
@@ -385,9 +336,9 @@ impl Document {
             entries: Arc::new(store),
             record_metadata: metadata,
             end,
-            origin: self.origin,
         };
         doc.validate_cancellable(cancel)?;
+        doc.validate_encoded_cancellable(cancel)?;
         Ok(doc)
     }
 
@@ -402,133 +353,18 @@ impl Document {
             .saturating_add(metadata_bytes(&self.record_metadata))
     }
 
-    /// Create a distinct artifact in the requested format. Preflight the actual
-    /// encoder, including header/footer and expanded v2 rows, against both the
-    /// per-line cap and total output budget. No data is truncated or published.
-    pub fn convert_format(
-        &self,
-        format: NativeFormat,
-        memory_budget: usize,
-        output_budget: u64,
-        cancel: &AtomicBool,
-    ) -> Result<Self, DocumentError> {
-        self.validate_cancellable(cancel)?;
-        let check_budget = |used| {
-            if used > memory_budget {
-                Err(DocumentError::budget(memory_budget, used))
-            } else {
-                Ok(())
-            }
-        };
-        // Check fixed candidate costs before cloning even the header/footer or
-        // allocating the sidecar vector. Each of these objects is one JSON line.
-        let metadata_capacity = self
-            .record_metadata
-            .len()
-            .saturating_mul(std::mem::size_of::<RecordMetadata>());
+    /// Preflight the exact storage layout one line at a time, including JSON
+    /// nesting introduced by derived extension containers and composed filters.
+    fn validate_encoded_cancellable(&self, cancel: &AtomicBool) -> Result<(), DocumentError> {
         cancelled(cancel)?;
-        let header_bytes = typed_bytes(&self.header);
-        cancelled(cancel)?;
-        let end_bytes = typed_bytes(&self.end);
-        cancelled(cancel)?;
-        let mut source_used = self
-            .entries
-            .memory_bytes()
-            .saturating_add(header_bytes)
-            .saturating_add(end_bytes)
-            .saturating_add(
-                self.record_metadata
-                    .capacity()
-                    .saturating_mul(std::mem::size_of::<RecordMetadata>()),
-            );
-        check_budget(source_used)?;
-        // Retain the source-budget preflight without memory_bytes()'s
-        // uninterrupted walk over every row's unknown JSON tree.
-        for meta in &self.record_metadata {
+        encode_header(&self.header)?;
+        for (entry, metadata) in self.entries.iter().zip(&self.record_metadata) {
             cancelled(cancel)?;
-            source_used = source_used.saturating_add(row_metadata_bytes(meta));
-            check_budget(source_used)?;
+            encode_record(&self.header, entry, metadata)?;
         }
         cancelled(cancel)?;
-        let mut header = self.header.clone();
-        header.set_format(format)?;
-        header.derived_from_artifact = Some(self.header.artifact_id);
-        header.artifact_id = SessionId::new();
-        cancelled(cancel)?;
-        let mut end = self.end.clone();
-        end.artifact_id = header.artifact_id;
-        end.schema_version = format.version();
-        cancelled(cancel)?;
-        let header_bytes = typed_bytes(&header);
-        cancelled(cancel)?;
-        let mut used = self
-            .entries
-            .memory_bytes()
-            .saturating_add(header_bytes)
-            .saturating_add(typed_bytes(&end));
-        cancelled(cancel)?;
-        check_budget(used.saturating_add(metadata_capacity))?;
-        let mut record_metadata = Vec::with_capacity(self.record_metadata.len());
-        used = used.saturating_add(
-            record_metadata
-                .capacity()
-                .saturating_mul(std::mem::size_of::<RecordMetadata>()),
-        );
-        check_budget(used)?;
-        for original in &self.record_metadata {
-            cancelled(cancel)?;
-            // Admit the next row before its deep copy; recheck the actual owned
-            // cost after conversion, which may add an extension container.
-            check_budget(used.saturating_add(row_metadata_bytes(original)))?;
-            cancelled(cancel)?;
-            let mut meta = original.clone();
-            cancelled(cancel)?;
-            if self.header.schema_version == 3
-                && format == NativeFormat::V2
-                && !meta.projection_extra.is_empty()
-            {
-                no_reserved(&meta.extra, &["projection_extensions"])?;
-                meta.extra.insert(
-                    "projection_extensions".into(),
-                    Value::Object(
-                        std::mem::take(&mut meta.projection_extra)
-                            .into_iter()
-                            .collect(),
-                    ),
-                );
-            }
-            used = used.saturating_add(row_metadata_bytes(&meta));
-            check_budget(used)?;
-            record_metadata.push(meta);
-        }
-        let converted = Self {
-            header,
-            entries: Arc::clone(&self.entries),
-            record_metadata,
-            end,
-            origin: native_origin(format.version()),
-        };
-        converted.validate_cancellable(cancel)?;
-        let mut total = 0u64;
-        let mut admit = |line: Vec<u8>| -> Result<(), DocumentError> {
-            total = total
-                .checked_add(line.len() as u64)
-                .ok_or_else(|| DocumentError::invalid("output byte count overflow"))?;
-            if total > output_budget {
-                return Err(DocumentError::invalid(
-                    "conversion exceeds output byte budget",
-                ));
-            }
-            Ok(())
-        };
-        admit(encode_line(&converted.header)?)?;
-        for (entry, meta) in converted.entries.iter().zip(&converted.record_metadata) {
-            cancelled(cancel)?;
-            admit(encode_record(&converted.header, entry, meta)?)?;
-        }
-        admit(encode_line(&converted.end)?)?;
-        cancelled(cancel)?;
-        Ok(converted)
+        encode_end(&self.end, &self.header)?;
+        cancelled(cancel)
     }
 
     fn validate_cancellable(&self, cancel: &AtomicBool) -> Result<(), DocumentError> {
@@ -542,7 +378,7 @@ impl Document {
         let mut previous = 0;
         for (entry, meta) in self.entries.iter().zip(&self.record_metadata) {
             cancelled(cancel)?;
-            validate_row(&self.header, entry, meta, previous)?;
+            validate_row_fields(&self.header, entry, meta, previous)?;
             previous = meta.seq;
         }
         cancelled(cancel)?;
@@ -693,7 +529,6 @@ struct WireRecord {
     text_loss: Option<WireTextLoss>,
     #[serde(skip_serializing_if = "Option::is_none")]
     proto: Option<WireProtoEvidence>,
-    legacy_original_seq: Option<u64>,
     device_time: Option<DeviceTime>,
     pid: Option<u32>,
     tid: Option<u32>,
@@ -708,12 +543,11 @@ struct WireRecord {
 
 impl WireRecord {
     fn into_row(self) -> Result<(LogEntry, RecordMetadata), DocumentError> {
-        if !matches!(self.schema_version, 2 | 3) {
+        if self.schema_version != SCHEMA_VERSION {
             return Err(DocumentError::invalid("unsupported record schema"));
         }
         let mut meta = RecordMetadata {
             seq: self.seq,
-            legacy_original_seq: self.legacy_original_seq,
             event_kind: self.event_kind,
             extra: self.extra,
             ..RecordMetadata::default()
@@ -798,7 +632,7 @@ impl WireRecord {
     fn from_row(entry: &LogEntry, meta: &RecordMetadata) -> Self {
         let log = entry.kind == LogEntryKind::Log;
         Self {
-            schema_version: 2,
+            schema_version: SCHEMA_VERSION,
             record_type: match entry.kind {
                 LogEntryKind::Log => "entry",
                 LogEntryKind::Marker => "event",
@@ -823,7 +657,6 @@ impl WireRecord {
                 evidence: (**evidence).clone(),
                 extra: meta.proto_extra.clone(),
             }),
-            legacy_original_seq: meta.legacy_original_seq,
             device_time: log.then(|| DeviceTime {
                 text: entry.time.to_string(),
                 extra: meta.device_time_extra.clone(),
@@ -875,7 +708,6 @@ struct CompactRecord {
     provenance: Option<WireIdentity>,
     text_loss: Option<WireTextLoss>,
     proto: RawProto,
-    legacy_original_seq: Option<u64>,
     event_kind: Option<String>,
     #[serde(default)]
     projection_extensions: ProjectionExtensions,
@@ -885,7 +717,7 @@ struct CompactRecord {
 
 impl CompactRecord {
     fn into_row(self) -> Result<(LogEntry, RecordMetadata), DocumentError> {
-        if self.schema_version != 3 {
+        if self.schema_version != SCHEMA_VERSION {
             return Err(DocumentError::invalid("unsupported compact record schema"));
         }
         // Even null redundant fields are a conflict. Do not silently discard
@@ -938,7 +770,6 @@ impl CompactRecord {
         }
         let mut meta = RecordMetadata {
             seq: self.seq,
-            legacy_original_seq: self.legacy_original_seq,
             event_kind: self.event_kind,
             extra: self.extra,
             device_time_extra: self.projection_extensions.device_time.unwrap_or_default(),
@@ -976,7 +807,7 @@ impl CompactRecord {
 }
 
 /// Borrow the only stored payload; compact writes never clone the evidence or
-/// allocate the redundant v2 display/base64 fields.
+/// allocate redundant projected display/base64 fields.
 #[derive(Serialize)]
 struct RawProtoRef<'a> {
     #[serde(serialize_with = "crate::model::binary_base64::serialize")]
@@ -1004,7 +835,6 @@ struct CompactRecordRef<'a> {
     provenance: Option<WireIdentity>,
     text_loss: Option<WireTextLoss>,
     proto: RawProtoRef<'a>,
-    legacy_original_seq: Option<u64>,
     event_kind: &'a Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     projection_extensions: Option<ProjectionExtensionsRef<'a>>,
@@ -1012,16 +842,10 @@ struct CompactRecordRef<'a> {
     extra: &'a Extensions,
 }
 
-fn encode_record(
-    header: &DocumentHeader,
-    entry: &LogEntry,
-    meta: &RecordMetadata,
-) -> Result<Vec<u8>, DocumentError> {
-    if header.schema_version == 3
-        && let Some(proto) = &entry.proto
-    {
+fn encode_record_layout(entry: &LogEntry, meta: &RecordMetadata) -> Result<Vec<u8>, DocumentError> {
+    if let Some(proto) = &entry.proto {
         encode_line(&CompactRecordRef {
-            schema_version: 3,
+            schema_version: SCHEMA_VERSION,
             record_type: if entry.kind == LogEntryKind::Log {
                 "entry"
             } else {
@@ -1045,7 +869,6 @@ fn encode_record(
                 raw_payload: &proto.raw_payload,
                 extra: &meta.proto_extra,
             },
-            legacy_original_seq: meta.legacy_original_seq,
             event_kind: &meta.event_kind,
             projection_extensions: (!meta.device_time_extra.is_empty()
                 || !meta.process_extra.is_empty()
@@ -1058,10 +881,42 @@ fn encode_record(
             extra: &meta.extra,
         })
     } else {
-        let mut wire = WireRecord::from_row(entry, meta);
-        wire.schema_version = header.schema_version;
+        let wire = WireRecord::from_row(entry, meta);
         encode_line(&wire)
     }
+}
+
+fn encode_header(header: &DocumentHeader) -> Result<Vec<u8>, DocumentError> {
+    let bytes = encode_line(header)?;
+    decode_header(&bytes)?;
+    Ok(bytes)
+}
+
+fn encode_record(
+    header: &DocumentHeader,
+    entry: &LogEntry,
+    metadata: &RecordMetadata,
+) -> Result<Vec<u8>, DocumentError> {
+    validate_row(header, entry, metadata, 0)?;
+    let bytes = encode_record_layout(entry, metadata)?;
+    // Without arbitrary extensions these typed DTOs contain only fixed-depth
+    // objects and scalar/string fields (including base64 payloads). Strings
+    // cannot add JSON depth. All mutable model/raw semantics were checked above.
+    // Arbitrary Value trees need admission against the exact final reader shape.
+    if metadata.has_extensions() {
+        if entry.proto.is_some() {
+            decode_line::<CompactRecord>(&bytes)?;
+        } else {
+            decode_line::<WireRecord>(&bytes)?;
+        }
+    }
+    Ok(bytes)
+}
+
+fn encode_end(end: &ArtifactEnd, header: &DocumentHeader) -> Result<Vec<u8>, DocumentError> {
+    let bytes = encode_line(end)?;
+    decode_end(&bytes, header)?;
+    Ok(bytes)
 }
 
 fn parse_level(value: &str) -> Option<Level> {
@@ -1095,7 +950,7 @@ fn validate_header(header: &DocumentHeader) -> Result<(), DocumentError> {
             "transport_format",
         ],
     )?;
-    if !matches!(header.schema_version, 2 | 3)
+    if header.schema_version != SCHEMA_VERSION
         || header.record_type != "document"
         || header.artifact_id.is_nil()
         || header.session_id.is_some_and(SessionId::is_nil)
@@ -1105,19 +960,17 @@ fn validate_header(header: &DocumentHeader) -> Result<(), DocumentError> {
             "invalid document schema or identity",
         ));
     }
-    if header.schema_version == 3
-        && (header.extra.get("record_encoding").and_then(Value::as_str)
-            != Some(COMPACT_RECORD_ENCODING)
-            || header
-                .normalization
-                .get("proto_projection")
-                .and_then(Value::as_str)
-                != Some(crate::protobuf::PROJECTION_PROFILE)
-            || header
-                .normalization
-                .get("protobuf_raw_payload")
-                .and_then(Value::as_str)
-                != Some("preserved_base64"))
+    if header.extra.get("record_encoding").and_then(Value::as_str) != Some(RECORD_ENCODING)
+        || header
+            .normalization
+            .get("proto_projection")
+            .and_then(Value::as_str)
+            != Some(crate::protobuf::PROJECTION_PROFILE)
+        || header
+            .normalization
+            .get("protobuf_raw_payload")
+            .and_then(Value::as_str)
+            != Some("preserved_base64")
     {
         return Err(DocumentError::invalid(
             "unsupported compact encoding or proto projection profile",
@@ -1144,15 +997,6 @@ fn validate_header(header: &DocumentHeader) -> Result<(), DocumentError> {
                     header.source.transport_format.as_deref(),
                     Some("threadtime" | "logcat_proto_experimental")
                 ) =>
-        {
-            Ok(())
-        }
-        "legacy_v1"
-            if header.session_id.is_none()
-                && header.source.device_serial.is_none()
-                && header.source.requested_buffers.is_none()
-                && header.source.requested_buffers_scope.is_none()
-                && header.source.transport_format.is_none() =>
         {
             Ok(())
         }
@@ -1201,11 +1045,9 @@ fn validate_row_fields(
             "event_kind",
         ],
     )?;
-    if header.schema_version == 3 {
-        no_reserved(&meta.extra, &["projection_extensions"])?;
-    }
+    no_reserved(&meta.extra, &["projection_extensions"])?;
     no_reserved(&meta.projection_extra, &["device_time", "process"])?;
-    if !meta.projection_extra.is_empty() && (header.schema_version != 3 || entry.proto.is_none()) {
+    if !meta.projection_extra.is_empty() && entry.proto.is_none() {
         return Err(DocumentError::invalid(
             "projection extensions require a compact proto parent",
         ));
@@ -1251,10 +1093,7 @@ fn validate_row_fields(
             if p.session_id == session
                 && p.seq == meta.seq
                 && p.segment > 0
-                && p.attempt >= p.segment
-                && meta.legacy_original_seq.is_none() => {}
-        (None, None)
-            if header.source.kind == "legacy_v1" && meta.legacy_original_seq == Some(meta.seq) => {}
+                && p.attempt >= p.segment => {}
         _ => {
             return Err(DocumentError::invalid(
                 "record identity does not match document source/session",
@@ -1476,10 +1315,8 @@ pub fn validate_end_summary(
         ));
     }
     let scope = &end.scope;
-    if !matches!(
-        scope.kind.as_str(),
-        "retained" | "filtered" | "legacy_import"
-    ) || (scope.kind == "filtered") != scope.filter.is_some()
+    if !matches!(scope.kind.as_str(), "retained" | "filtered")
+        || (scope.kind == "filtered") != scope.filter.is_some()
         || scope.filter.as_ref().is_some_and(Value::is_null)
         || scope.source_record_count < end.record_count
         || (scope.source_record_count == 0)
@@ -1532,9 +1369,8 @@ pub(crate) fn reject_ambiguous_number_key(bytes: &[u8]) -> Result<(), DocumentEr
 
 pub fn decode_header(bytes: &[u8]) -> Result<DocumentHeader, DocumentError> {
     let header: DocumentHeader = decode_line(bytes)?;
-    if header.schema_version == 3 {
-        // These were open extension keys in v2. Parse their v3 contract directly
-        // from bytes, so duplicate declarations cannot be hidden by map parsing.
+    {
+        // Parse declarations directly so flatten buffering cannot hide duplicates.
         #[derive(Deserialize)]
         struct Normalization {
             proto_projection: String,
@@ -1546,7 +1382,7 @@ pub fn decode_header(bytes: &[u8]) -> Result<DocumentHeader, DocumentError> {
             normalization: Normalization,
         }
         let declarations: Declarations = decode_line(bytes)?;
-        if declarations.record_encoding != COMPACT_RECORD_ENCODING
+        if declarations.record_encoding != RECORD_ENCODING
             || declarations.normalization.proto_projection != crate::protobuf::PROJECTION_PROFILE
             || declarations.normalization.protobuf_raw_payload != "preserved_base64"
         {
@@ -1576,7 +1412,7 @@ pub fn decode_record(
             "record schema does not match document",
         ));
     }
-    let (entry, metadata) = if header.schema_version == 3 && envelope.proto.is_some() {
+    let (entry, metadata) = if envelope.proto.is_some() {
         let wire: CompactRecord = decode_line(bytes)?;
         let (entry, metadata) = wire.into_row()?;
         // The payload was just decoded/projected once by this private path.
@@ -1593,7 +1429,7 @@ pub fn decode_record(
 }
 
 /// Encode a full structured, derived view of one native row, without a final LF.
-/// This is not an archive record: v3 proto fields are expanded using the fixed
+/// This is not an archive record: proto fields are expanded using the fixed
 /// projection, and its schema_version identifies the source schema. Unknown
 /// fields survive, with device_time/process extensions restored to their parents.
 /// The independent budget permits compact records to expand beyond 8 MiB.
@@ -1606,7 +1442,6 @@ pub fn encode_record_projection(
     validate_header(header)?;
     validate_row(header, entry, metadata, 0)?;
     let mut wire = WireRecord::from_row(entry, metadata);
-    wire.schema_version = header.schema_version;
     if !metadata.projection_extra.is_empty() {
         no_reserved(&wire.extra, &["projection_extensions"])?;
         wire.extra.insert(
@@ -1638,6 +1473,11 @@ pub fn encode_record_projection(
     };
     serde_json::to_writer(&mut output, &wire).map_err(DocumentError::invalid)?;
     reject_ambiguous_number_key(&output.bytes)?;
+    // The same fixed-depth proof as archive encoding applies to the expanded
+    // DTO. Any arbitrary extension still checks the complete derived layout.
+    if metadata.has_extensions() {
+        serde_json::from_slice::<WireRecord>(&output.bytes).map_err(DocumentError::invalid)?;
+    }
     Ok(output.bytes)
 }
 
@@ -1660,7 +1500,7 @@ pub struct StreamEncoder {
 
 impl StreamEncoder {
     pub fn new(header: DocumentHeader) -> Result<Self, DocumentError> {
-        validate_header(&header)?;
+        encode_header(&header)?;
         Ok(Self {
             header: Arc::new(header),
             count: 0,
@@ -1670,7 +1510,7 @@ impl StreamEncoder {
     }
 
     pub fn header_bytes(&self) -> Result<Vec<u8>, DocumentError> {
-        encode_line(self.header.as_ref())
+        encode_header(self.header.as_ref())
     }
 
     /// Advances only after valid bounded encoding; the caller separately tracks
@@ -1684,7 +1524,7 @@ impl StreamEncoder {
             event_kind: (entry.kind == LogEntryKind::Marker).then(|| "logcat_marker".into()),
             ..RecordMetadata::default()
         };
-        validate_row(&self.header, entry, &metadata, self.last_seq.unwrap_or(0))?;
+        validate_row_fields(&self.header, entry, &metadata, self.last_seq.unwrap_or(0))?;
         let bytes = encode_record(&self.header, entry, &metadata)?;
         self.count = self
             .count
@@ -1721,12 +1561,12 @@ impl StreamEncoder {
             self.first_seq,
             self.last_seq,
         )?;
-        encode_line(&end)
+        encode_end(&end, &self.header)
     }
 }
 
 /// Reads a completed offline artifact; errors return no partial candidate.
-/// Empty input is accepted as an empty legacy file with unknown capture state.
+/// A current native header and finalization footer are mandatory, even when empty.
 pub fn load(
     mut reader: impl BufRead,
     memory_budget: usize,
@@ -1738,7 +1578,6 @@ pub fn load(
     let mut header = None;
     let mut footer = None;
     let mut footer_location = None;
-    let mut origin = DocumentOrigin::LegacyV1;
     let mut store = LogStore::default();
     let mut metadata = Vec::new();
     let mut meta_cost = 0usize;
@@ -1790,12 +1629,16 @@ pub fn load(
         }
         let probe: Probe = serde_json::from_slice(&buffer)
             .map_err(|e| DocumentError::invalid(e).at(line, offset))?;
-        if line == 1 && matches!(probe.schema_version, 2 | 3) && probe.kind == "document" {
+        if line == 1 {
+            if probe.schema_version != SCHEMA_VERSION || probe.kind != "document" {
+                return Err(DocumentError::invalid(
+                    "expected current native document header; old formats and headerless JSONL are unsupported",
+                ).at(line, offset));
+            }
             let parsed = decode_header(&buffer).map_err(|e| e.at(line, offset))?;
             header_cost = typed_bytes(&parsed);
-            origin = native_origin(parsed.schema_version);
             header = Some(parsed);
-        } else if origin != DocumentOrigin::LegacyV1 && probe.kind == "artifact_end" {
+        } else if probe.kind == "artifact_end" {
             footer_location = Some((line, offset));
             footer = Some(
                 decode_end(&buffer, header.as_ref().expect("native header"))
@@ -1803,25 +1646,9 @@ pub fn load(
             );
         } else {
             let previous = metadata.last().map_or(0, |m: &RecordMetadata| m.seq);
-            let (entry, meta) = if origin != DocumentOrigin::LegacyV1 {
+            let (entry, meta) =
                 decode_record(&buffer, header.as_ref().expect("native header"), previous)
-                    .map_err(|e| e.at(line, offset))?
-            } else {
-                if header.is_none() {
-                    let h = DocumentHeader::legacy();
-                    header_cost = typed_bytes(&h);
-                    header = Some(h);
-                }
-                let (entry, meta) = legacy_row(&buffer).map_err(|e| e.at(line, offset))?;
-                validate_row(
-                    header.as_ref().expect("legacy header"),
-                    &entry,
-                    &meta,
-                    previous,
-                )
-                .map_err(|e| e.at(line, offset))?;
-                (entry, meta)
-            };
+                    .map_err(|e| e.at(line, offset))?;
             meta_cost = meta_cost.saturating_add(row_metadata_bytes(&meta));
             store.push(entry);
             metadata.push(meta);
@@ -1844,93 +1671,29 @@ pub fn load(
         line += 1;
     }
     cancelled(cancel)?;
-    let header = header.unwrap_or_else(DocumentHeader::legacy);
-    let end = if origin != DocumentOrigin::LegacyV1 {
-        footer.ok_or_else(|| {
-            DocumentError::invalid("native artifact lacks artifact_end").at(line, offset)
-        })?
-    } else {
-        let scope = ExportScope {
-            kind: "legacy_import".into(),
-            source_first_seq: metadata.first().map(|m| m.seq),
-            source_last_seq: metadata.last().map(|m| m.seq),
-            source_record_count: metadata.len() as u64,
-            ..ExportScope::default()
-        };
-        make_end(&header, &metadata, scope, CaptureStatus::default())
-    };
+    let header = header.ok_or_else(|| {
+        DocumentError::invalid("empty input lacks a native document header").at(line, offset)
+    })?;
+    let end = footer.ok_or_else(|| {
+        DocumentError::invalid("native artifact lacks artifact_end").at(line, offset)
+    })?;
     let doc = Document {
         header,
         entries: Arc::new(store),
         record_metadata: metadata,
         end,
-        origin,
     };
     let validation_location = footer_location.unwrap_or((line, offset));
-    // V3 rows were already derived and validated by decode_record; no public
-    // mutation can occur during load. Do not decode their payloads a second time.
-    let validation = if origin == DocumentOrigin::NativeV3 {
-        validate_end(&doc.header, &doc.end, &doc.record_metadata)
-    } else {
-        doc.validate_cancellable(cancel)
-    };
-    validation.map_err(|e| e.at(validation_location.0, validation_location.1))?;
+    // Every row already passed decode_record; validate the observed footer
+    // without repeating protobuf projection for the entire artifact.
+    validate_end(&doc.header, &doc.end, &doc.record_metadata)
+        .map_err(|e| e.at(validation_location.0, validation_location.1))?;
     let used = doc.memory_bytes();
     if used > memory_budget {
         return Err(DocumentError::budget(memory_budget, used).at(line, offset));
     }
     cancelled(cancel)?;
     Ok(doc)
-}
-
-fn legacy_row(bytes: &[u8]) -> Result<(LogEntry, RecordMetadata), DocumentError> {
-    reject_ambiguous_number_key(bytes)?;
-    let record: crate::record_io::LegacyRecord =
-        serde_json::from_slice(bytes).map_err(DocumentError::invalid)?;
-    let mut value: Value = serde_json::from_slice(bytes).map_err(DocumentError::invalid)?;
-    if value.get("schema_version").and_then(Value::as_u64) != Some(1)
-        || value.get("type").and_then(Value::as_str) != Some("entry")
-        || record.seq == 0
-    {
-        return Err(DocumentError::invalid("invalid legacy record schema"));
-    }
-    let level =
-        parse_level(&record.level).ok_or_else(|| DocumentError::invalid("invalid legacy level"))?;
-    let object = value
-        .as_object_mut()
-        .ok_or_else(|| DocumentError::invalid("record is not an object"))?;
-    for key in [
-        "schema_version",
-        "type",
-        "seq",
-        "time",
-        "pid",
-        "tid",
-        "level",
-        "tag",
-        "message",
-    ] {
-        object.remove(key);
-    }
-    let mut meta = RecordMetadata {
-        seq: record.seq,
-        legacy_original_seq: Some(record.seq),
-        ..RecordMetadata::default()
-    };
-    if !object.is_empty() {
-        meta.extra.insert("legacy_extensions".into(), value);
-    }
-    Ok((
-        LogEntry::new(
-            record.time,
-            record.pid,
-            record.tid,
-            record.tag,
-            level,
-            record.message,
-        ),
-        meta,
-    ))
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1948,7 +1711,7 @@ pub fn write_snapshot(
 ) -> Result<WriteSummary, DocumentError> {
     cancelled(cancel)?;
     doc.validate_cancellable(cancel)?;
-    let mut bytes = write_line(&mut writer, &doc.header)?;
+    let mut bytes = write_encoded(&mut writer, &encode_header(&doc.header)?)?;
     for (entry, meta) in doc.entries.iter().zip(&doc.record_metadata) {
         cancelled(cancel)?;
         bytes = bytes
@@ -1960,7 +1723,10 @@ pub fn write_snapshot(
     }
     cancelled(cancel)?;
     bytes = bytes
-        .checked_add(write_line(&mut writer, &doc.end)?)
+        .checked_add(write_encoded(
+            &mut writer,
+            &encode_end(&doc.end, &doc.header)?,
+        )?)
         .ok_or_else(|| DocumentError::invalid("output byte count overflow"))?;
     writer.flush().map_err(|e| DocumentError {
         kind: DocumentErrorKind::Io,
@@ -1973,11 +1739,6 @@ pub fn write_snapshot(
         records: doc.entries.len() as u64,
         bytes,
     })
-}
-
-fn write_line(writer: &mut impl Write, value: &impl Serialize) -> Result<u64, DocumentError> {
-    let encoded = encode_line(value)?;
-    write_encoded(writer, &encoded)
 }
 
 fn write_encoded(writer: &mut impl Write, encoded: &[u8]) -> Result<u64, DocumentError> {
@@ -2100,7 +1861,7 @@ mod tests {
         AtomicBool::new(false)
     }
 
-    fn sample() -> Document {
+    pub(super) fn sample() -> Document {
         let mut session = Session::new();
         session.begin_attempt().unwrap();
         session.stream_started().unwrap();
@@ -2201,39 +1962,34 @@ mod tests {
     }
 
     #[test]
-    fn v1_import_and_native_resave_do_not_invent_source_or_process() {
-        let row = LogEntry::new(
-            "12-31 23:59:59.123",
-            0,
-            0,
-            "logcat",
-            Level::Info,
-            "--------- beginning of main",
+    fn legacy_headerless_and_empty_inputs_are_rejected_without_fabricated_documents() {
+        for bytes in [
+            Vec::new(),
+            br#"{"schema_version":1,"type":"entry","seq":9,"time":"old","pid":1,"tid":2,"level":"I","tag":"T","message":"old"}"#.to_vec(),
+            serde_json::to_vec(&values(&sample())[1]).unwrap(),
+        ] {
+            let error = reject(bytes);
+            assert_eq!(error.kind, DocumentErrorKind::InvalidData);
+            assert_eq!(error.line, 1);
+            assert!(error.message.contains("document header"));
+        }
+        let mut lines = values(&sample());
+        lines[0]["source"]["kind"] = "legacy_v1".into();
+        assert!(
+            reject(serialize_values(&lines))
+                .message
+                .contains("source metadata")
         );
-        let mut value =
-            serde_json::to_value(crate::record_io::LegacyRecord::from_entry(&row, 9)).unwrap();
-        value["unknown"] = serde_json::json!({"a": "b"});
-        value["process"] = "not an established v1 field".into();
-        let doc = load(
-            Cursor::new(serde_json::to_vec(&value).unwrap()),
-            BUDGET,
-            &cancel(),
-        )
-        .unwrap();
-        assert_eq!(doc.origin, DocumentOrigin::LegacyV1);
-        assert!(doc.header.session_id.is_none());
-        assert!(doc.header.source.device_serial.is_none());
-        assert!(doc.entries[0].provenance.is_none());
-        assert!(doc.entries[0].process.is_none());
-        assert_eq!(doc.entries[0].kind, LogEntryKind::Log); // Original kind is unknown.
-        assert_eq!(doc.record_metadata[0].legacy_original_seq, Some(9));
-        let again = load(Cursor::new(encode(&doc)), BUDGET, &cancel()).unwrap();
-        assert!(again.entries[0].provenance.is_none());
-        assert_eq!(
-            again.record_metadata[0].extra["legacy_extensions"]["unknown"],
-            value["unknown"]
+        let mut lines = values(&sample());
+        lines[1]["legacy_original_seq"] = 1.into();
+        assert!(
+            reject(serialize_values(&lines))
+                .message
+                .contains("legacy_original_seq")
         );
-        assert_eq!(again.end.capture.completeness, "unknown");
+        let mut lines = values(&sample());
+        lines.last_mut().unwrap()["scope"]["kind"] = "legacy_import".into();
+        assert!(reject(serialize_values(&lines)).message.contains("scope"));
     }
 
     #[test]
@@ -2397,8 +2153,8 @@ mod tests {
     fn duplicate_known_json_fields_and_reserved_extensions_are_rejected() {
         let encoded = String::from_utf8(encode(&sample())).unwrap();
         let duplicate = encoded.replacen(
-            "\"schema_version\":2",
-            "\"schema_version\":2,\"schema_version\":2",
+            "\"schema_version\":3",
+            "\"schema_version\":3,\"schema_version\":3",
             1,
         );
         assert!(reject(duplicate.into_bytes()).message.contains("duplicate"));
@@ -2436,7 +2192,7 @@ mod tests {
     }
 
     #[test]
-    fn host_text_loss_round_trips_without_inventing_legacy_observations() {
+    fn host_text_loss_round_trips_without_inventing_missing_observations() {
         let mut lines = values(&sample());
         lines[1]["text_loss"] = serde_json::json!({
             "truncated": true, "invalid_utf8_replaced": false, "future_host_observation": "kept"
@@ -2462,15 +2218,10 @@ mod tests {
         );
         assert_eq!(doc.entries[2].text_loss, Some(TextLoss::default()));
         assert_eq!(values(&doc), lines);
-        let legacy = crate::record_io::LegacyRecord::from_entry(&doc.entries[0], 7);
-        let old = load(
-            Cursor::new(serde_json::to_vec(&legacy).unwrap()),
-            BUDGET,
-            &cancel(),
-        )
-        .unwrap();
-        assert_eq!(old.entries[0].text_loss, None);
-        let reread = load(Cursor::new(encode(&old)), BUDGET, &cancel()).unwrap();
+        lines[1]["text_loss"] = Value::Null;
+        let unknown = load(Cursor::new(serialize_values(&lines)), BUDGET, &cancel()).unwrap();
+        assert_eq!(unknown.entries[0].text_loss, None);
+        let reread = load(Cursor::new(encode(&unknown)), BUDGET, &cancel()).unwrap();
         assert_eq!(reread.entries[0].text_loss, None);
         lines[1]["text_loss"] = serde_json::json!({"truncated": true});
         assert_eq!(
@@ -2512,22 +2263,22 @@ mod tests {
                     .contains("parent field")
             );
         }
-        let row = crate::record_io::LegacyRecord::from_entry(&sample().entries[0], 7);
-        let mut legacy = load(
-            Cursor::new(serde_json::to_vec(&row).unwrap()),
-            BUDGET,
-            &cancel(),
-        )
-        .unwrap();
-        legacy.record_metadata[0]
+        let mut missing_identity = sample();
+        let mut store = LogStore::default();
+        for mut row in missing_identity.entries.iter().cloned() {
+            row.provenance = None;
+            store.push(row);
+        }
+        missing_identity.entries = Arc::new(store);
+        missing_identity.record_metadata[0]
             .provenance_extra
             .insert("extension".into(), true.into());
         assert!(
-            write_snapshot(Vec::new(), &legacy, &cancel())
+            write_snapshot(Vec::new(), &missing_identity, &cancel())
                 .err()
                 .unwrap()
                 .message
-                .contains("parent field")
+                .contains("identity")
         );
     }
 }

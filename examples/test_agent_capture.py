@@ -17,7 +17,7 @@ import agent_capture as capture
 
 
 def status(seq=0, state="running", **changes):
-    value = {"schema_version": 1, "record_schema_version": 2,
+    value = {"schema_version": 1, "record_schema_version": 3,
              "artifact_id": "artifact", "session_id": "session",
              "state": state, "readiness": "adb_process_started", "stale": False,
              "visible_end": {"seq": seq, "offset": 100 + seq * 100},
@@ -93,7 +93,7 @@ class WorkflowTests(unittest.TestCase):
             return copy.deepcopy(self.start)
         if verb == "status":
             return copy.deepcopy(self.statuses.pop(0) if len(self.statuses) > 1 else self.statuses[0])
-        if verb == "query-v2":
+        if verb == "query":
             self.assertEqual(argv[argv.index("--mode") + 1], "tail")
             self.assertEqual(argv[argv.index("--query") + 1], "failure")
             result = self.pages.pop(0)
@@ -132,7 +132,7 @@ class WorkflowTests(unittest.TestCase):
     def test_success_header_only_baseline_and_published_boundaries(self):
         code, report = self.run_workflow()
         self.assertEqual(code, 0)
-        self.assertEqual([c[0] for c in self.calls], ["start", "query-v2", "status", "stop", "query-v2"])
+        self.assertEqual([c[0] for c in self.calls], ["start", "query", "status", "stop", "query"])
         self.assertEqual(report["boundaries"]["before_action"]["visible_end"], {"seq": 0, "offset": 100})
         self.assertEqual(report["boundaries"]["after_action"]["visible_end"]["seq"], 2)
         self.assertEqual(report["action"]["elapsed_secs"], 1)
@@ -228,7 +228,7 @@ class WorkflowTests(unittest.TestCase):
         self.pages.insert(0, page(upper=10000, state="reconnecting"))
         code, report = self.run_workflow()
         self.assertEqual(code, 0)
-        initial = [call[1] for call in self.calls if call[0] == "query-v2"][:2]
+        initial = [call[1] for call in self.calls if call[0] == "query"][:2]
         for argv in initial:
             self.assertEqual(argv[-2:], ("--start-at", "end"))
             self.assertNotIn("--cursor", argv)
@@ -284,7 +284,7 @@ class WorkflowTests(unittest.TestCase):
         original = self.cli
         def slow_query(binary, *argv, timeout):
             value = original(binary, *argv, timeout=timeout)
-            if argv[0] == "query-v2" and self.action_at is not None:
+            if argv[0] == "query" and self.action_at is not None:
                 self.clock.sleep(self.args.evidence_timeout)
             return value
         self.cli = slow_query
@@ -362,7 +362,7 @@ class WorkflowTests(unittest.TestCase):
         code, report = self.run_workflow()
         self.assertEqual(code, 1)
         self.assertIsNone(report["action"])
-        self.assertEqual([c[0] for c in self.calls], ["start", "stop", "query-v2"])
+        self.assertEqual([c[0] for c in self.calls], ["start", "stop", "query"])
 
     def test_query_error_preserves_action_and_capture(self):
         self.pages[1] = capture.WorkflowError("invalid_source", "broken source")

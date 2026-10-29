@@ -2333,19 +2333,23 @@ impl CiallogcatApp {
                     }
                     ui.add(
                         egui::Label::new(
-                            RichText::new(format!(
-                                "{} · {}/{} · {}{} · {}",
-                                entry.time,
-                                entry.pid,
-                                entry.tid,
-                                preview_message(entry.process_name()),
-                                if entry.process_source == Some(ProcessSource::PsSnapshot) {
-                                    " (ps 推定)"
-                                } else {
-                                    ""
-                                },
-                                preview_message(&entry.tag)
-                            ))
+                            RichText::new(if let Some(fields) = entry.log_fields() {
+                                format!(
+                                    "{} · {}/{} · {}{} · {}",
+                                    fields.time,
+                                    fields.pid,
+                                    fields.tid,
+                                    preview_message(fields.process_name()),
+                                    if fields.process_source == Some(ProcessSource::PsSnapshot) {
+                                        " (ps 推定)"
+                                    } else {
+                                        ""
+                                    },
+                                    preview_message(fields.tag)
+                                )
+                            } else {
+                                format!("[{}] · 非日志记录；无日志元字段", entry.kind.label())
+                            })
                             .weak()
                             .monospace(),
                         )
@@ -2422,9 +2426,13 @@ impl CiallogcatApp {
                         .show(ui, |ui| {
                             ui.add(
                                 egui::Label::new(
-                                    RichText::new(message.as_ref())
-                                        .monospace()
-                                        .color(entry.level.color(self.dark)),
+                                    RichText::new(message.as_ref()).monospace().color(
+                                        entry
+                                            .log_fields()
+                                            .map_or(ui.visuals().text_color(), |fields| {
+                                                fields.level.color(self.dark)
+                                            }),
+                                    ),
                                 )
                                 .selectable(true),
                             );
@@ -2449,7 +2457,10 @@ impl CiallogcatApp {
         let interaction_blocked = self.files.is_modal()
             || self.show_save_filter
             || self.pending_clear
-            || self.pending_device.is_some();
+            || self.pending_device.is_some()
+            // File diagnostics float over the table. Their clicks must not
+            // freeze the underlying live view or move its accessible selection.
+            || egui::Popup::is_id_open(&ctx, egui::Id::new("file_notice_diagnostic"));
         // A valid action can arrive with new capture rows. Pause before the
         // ScrollArea schedules its tail offset, not only after focus resolves.
         // The cache contains only last frame's viewport, never the whole store.
@@ -2543,13 +2554,13 @@ impl CiallogcatApp {
                     } else if self.filter_error.is_some() {
                         "Invalid regular expression. Correct the query or turn off .* ."
                     } else if !entries.is_empty() {
-                        "No matching logs. Check the package, minimum level and message filter."
+                        "No matching logs. Check the package, Tag include/exclude, minimum level and message filter."
                     } else if self.files.document.is_some() {
                         "文件中没有日志记录。可以打开其他文件或选择设备开始采集。"
                     } else {
                         match self.capture_state {
-                            CaptureState::NoAdb => "Install Android platform-tools, then click Refresh to find ADB.",
-                            CaptureState::WaitingForDevice => "Connect and authorize an Android device, then select it above.",
+                            CaptureState::NoAdb => "Install Android platform-tools, then click Refresh to find ADB.\nOr open a native JSONL file via File / Ctrl+O; no device required.",
+                            CaptureState::WaitingForDevice => "Connect and authorize an Android device, then select it above.\nOr open a native JSONL file via File / Ctrl+O; no device required.",
                             CaptureState::Error(_) => "Capture stopped. Click Retry to resume.",
                             CaptureState::Paused => "采集已暂停。点击开始采集继续接收日志。",
                             _ => "Waiting for logs from the selected device…",
@@ -2641,10 +2652,18 @@ impl CiallogcatApp {
 
                         let mut row_id = egui::Id::NULL;
                         let mut semantic_response = None;
-                        let pid_tid = format!("{} / {}", entry.pid, entry.tid);
-                        let values = [entry.time.as_ref(), entry.level.short(), &pid_tid,
-                            preview_message(entry.process_name()), preview_message(entry.tag.as_ref()),
-                            preview_first_line(&entry.message)];
+                        let fields = entry.log_fields();
+                        let pid_tid = fields.map_or_else(String::new, |fields| format!("{} / {}", fields.pid, fields.tid));
+                        let raw_preview = preview_first_line(&entry.message);
+                        let kind_prefix = if fields.is_some() { String::new() } else { format!("[{}] ", entry.kind.label()) };
+                        let message = if kind_prefix.is_empty() {
+                            std::borrow::Cow::Borrowed(raw_preview)
+                        } else {
+                            std::borrow::Cow::Owned(format!("{kind_prefix}{raw_preview}"))
+                        };
+                        let values = [fields.map_or("", |fields| fields.time), fields.map_or("", |fields| fields.level.short()), &pid_tid,
+                            fields.map_or("", |fields| preview_message(fields.process_name())), fields.map_or("", |fields| preview_message(fields.tag)),
+                            message.as_ref()];
                         for (column, value) in values.iter().enumerate() {
                             row.col(|ui| {
                                 if column == 0 {
@@ -2662,14 +2681,16 @@ impl CiallogcatApp {
                                 log_table_ui::cell(ui, row_id, match_index + 1, column, value,
                                     Some(header_ids[column]), |ui| {
                                         if column == 5 {
-                                            let job = highlighted_message(value, highlight, ui.visuals().text_color(), dark);
+                                            let job = highlighted_message(&kind_prefix, raw_preview, highlight, ui.visuals().text_color(), dark);
                                             ui.add(egui::Label::new(job).truncate());
                                         } else {
                                             let mut text = RichText::new(*value).monospace().size(12.0);
-                                            if column == 1 || column == 4 {
-                                                text = text.color(selected_level_color(entry.level, dark, is_selected));
+                                            if let Some(fields) = fields {
+                                                if column == 1 || column == 4 {
+                                                    text = text.color(selected_level_color(fields.level, dark, is_selected));
+                                                }
+                                                if column == 1 { text = RichText::new(*value).monospace().strong().color(selected_level_color(fields.level, dark, is_selected)); }
                                             }
-                                            if column == 1 { text = RichText::new(*value).monospace().strong().color(selected_level_color(entry.level, dark, is_selected)); }
                                             ui.add(egui::Label::new(text).truncate());
                                         }
                                     });
@@ -2683,16 +2704,21 @@ impl CiallogcatApp {
                             response.request_focus();
                             focused_selected = true;
                         }
-                        let truncated = values[3].len() < entry.process_name().len()
-                            || values[4].len() < entry.tag.len()
-                            || values[5].len() < entry.message.len();
+                        let truncated = fields.is_some_and(|fields| values[3].len() < fields.process_name().len()
+                            || values[4].len() < fields.tag.len())
+                            || raw_preview.len() < entry.message.len();
                         response.widget_info(|| egui::WidgetInfo::selected(
                             egui::WidgetType::SelectableLabel, true, is_selected,
-                            format!("Log row {}. Time {}. Level {:?}. PID / TID {}. Process {}{}. Tag {}. Message {}{}",
-                                match_index + 1, values[0], entry.level, values[2], values[3],
-                                if entry.process_source == Some(ProcessSource::PsSnapshot) { " (sampled ps hint, unverified)" } else { "" },
-                                values[4], values[5],
-                                if truncated { ". Preview truncated. Select for full details or use Copy full log." } else { "" }),
+                            if let Some(fields) = fields {
+                                format!("Log row {}. Time {}. Level {:?}. PID / TID {}. Process {}{}. Tag {}. Message {}{}",
+                                    match_index + 1, values[0], fields.level, values[2], values[3],
+                                    if fields.process_source == Some(ProcessSource::PsSnapshot) { " (sampled ps hint, unverified)" } else { "" },
+                                    values[4], values[5],
+                                    if truncated { ". Preview truncated. Select for full details or use Copy full log." } else { "" })
+                            } else {
+                                format!("{} row {}. Message {}{}", entry.kind.label(), match_index + 1, raw_preview,
+                                    if truncated { ". Preview truncated. Select for full details or use Copy full log." } else { "" })
+                            },
                         ));
                         ctx.accesskit_node_builder(row_id, |node| {
                             node.set_role(egui::accesskit::Role::Row);
@@ -2718,7 +2744,7 @@ impl CiallogcatApp {
                         }
                         response.context_menu(|ui| {
                             if ui.add_enabled(self.context_view.is_none() && !self.filter_pending && self.filter_dirty_since.is_none(), egui::Button::new("查看上下文")).clicked() { context_requested = Some(entry_index); ui.close(); }
-                            if entry.process_source == Some(ProcessSource::PsSnapshot) {
+                            if fields.is_some_and(|fields| fields.process_source == Some(ProcessSource::PsSnapshot)) {
                                 ui.label("进程名来自近期 ps 快照，仅为推定；不能证明历史 PID 归属。");
                                 ui.separator();
                             }
@@ -2730,9 +2756,10 @@ impl CiallogcatApp {
                                 copy_requested = Some(CopyTarget::Row(entry_index));
                                 ui.close();
                             }
-                            if entry.process.is_some() && ui.button("Filter this process").clicked()
+                            if let Some(process) = fields.and_then(|fields| fields.process)
+                                && ui.button("Filter this process").clicked()
                             {
-                                filter_process = entry.process.as_deref().map(ToOwned::to_owned);
+                                filter_process = Some(process.to_owned());
                                 ui.close();
                             }
                         });
@@ -3357,6 +3384,7 @@ fn configure_fonts(ctx: &egui::Context) {
 }
 
 fn highlighted_message(
+    prefix: &str,
     text: &str,
     matcher: Option<&Regex>,
     text_color: Color32,
@@ -3383,6 +3411,10 @@ fn highlighted_message(
     };
 
     let mut job = LayoutJob::default();
+    // Kind labels are presentation, never part of the message search corpus.
+    if !prefix.is_empty() {
+        job.append(prefix, 0.0, base.clone());
+    }
     let Some(matcher) = matcher else {
         job.append(text, 0.0, base);
         return job;

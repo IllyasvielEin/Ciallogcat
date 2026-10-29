@@ -60,14 +60,14 @@ while True:
     cursor = None
     try:
         ready, _ = command("start", "--adb", adb, "--serial", args.serial,
-                           "--session-dir", str(session), "--record-format", "v2",
+                           "--session-dir", str(session),
                            "--duration-secs", str(args.seconds + 15),
                            "--max-bytes", "1073741824")
         pid = ready["worker_pid"]
         while time.monotonic() - started < args.seconds:
             time.sleep(min(10, max(0, args.seconds - (time.monotonic() - started))))
             status, _ = command("status", "--session-dir", str(session))
-            query_args = ["query-v2", "--session-dir", str(session), "--mode", "tail",
+            query_args = ["query", "--session-dir", str(session), "--mode", "tail",
                           "--query", "probe-", "--preview-bytes", "32"]
             if cursor:
                 query_args += ["--cursor", cursor]

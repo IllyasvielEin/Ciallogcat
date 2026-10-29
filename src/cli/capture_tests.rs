@@ -2,16 +2,69 @@
 use super::*;
 
 #[test]
-fn legacy_worker_config_keeps_default_history_and_gui_buffers() {
-    let config: Config = serde_json::from_value(json!({
+fn worker_config_requires_explicit_current_fields() {
+    let full = json!({
         "adb":"adb", "serial":"TEST-USB", "duration_secs":600,
-        "max_bytes":67108864, "max_entries":10000000
-    }))
-    .unwrap();
+        "max_bytes":67108864, "max_entries":10000000,
+        "transport":"text",
+        "scope":CaptureScope::default(), "buffers":LogBuffer::defaults()
+    });
+    let config: Config = serde_json::from_value(full.clone()).unwrap();
     assert_eq!(config.scope.logcat_args(), ["-T", "1"]);
     assert_eq!(config.buffers, LogBuffer::defaults());
-    assert_eq!(config.record_schema_version, 1);
     assert_eq!(config.transport, adb::LogTransport::Text);
+    for field in ["transport", "scope", "buffers"] {
+        let mut missing = full.clone();
+        missing.as_object_mut().unwrap().remove(field);
+        assert!(
+            serde_json::from_value::<Config>(missing).is_err(),
+            "{field}"
+        );
+    }
+    let mut obsolete = full;
+    obsolete["record_schema_version"] = 3.into();
+    assert!(serde_json::from_value::<Config>(obsolete).is_err());
+}
+
+#[test]
+fn native_published_packet_is_visible_with_a_buffered_writer() {
+    struct Sink(Arc<Mutex<Vec<u8>>>);
+    impl Write for Sink {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let contents = Arc::new(Mutex::new(Vec::new()));
+    let sink = Sink(Arc::clone(&contents));
+    let visible = Arc::new(Mutex::new(Progress::default()));
+    let published = Arc::clone(&visible);
+    let (tx, rx) = packets();
+    let (notify, notifications) = mpsc::sync_channel(1);
+    let worker = std::thread::spawn(move || {
+        write_packets(io::BufWriter::new(sink), rx, &published, &notify)
+    });
+    let line = b"{\"seq\":1,\"message\":\"ready\"}\n";
+    tx.send(Packet {
+        bytes: line.to_vec(),
+        seq: Some(1),
+    })
+    .unwrap();
+    notifications.recv_timeout(Duration::from_secs(3)).unwrap();
+    assert_eq!(&*contents.lock().unwrap(), line);
+    assert_eq!(
+        *visible.lock().unwrap(),
+        Progress {
+            entries: 1,
+            bytes: line.len() as u64,
+            seq: 1
+        }
+    );
+    drop(tx);
+    worker.join().unwrap().unwrap();
 }
 
 fn packets() -> (mpsc::Sender<Packet>, mpsc::Receiver<Packet>) {
@@ -19,7 +72,7 @@ fn packets() -> (mpsc::Sender<Packet>, mpsc::Receiver<Packet>) {
 }
 
 #[test]
-fn v2_writer_counts_header_and_footer_bytes_without_advancing_sequence() {
+fn native_writer_counts_header_and_footer_bytes_without_advancing_sequence() {
     let (tx, rx) = packets();
     let header = b"header\n";
     let entry = b"record\n";
@@ -53,7 +106,7 @@ fn v2_writer_counts_header_and_footer_bytes_without_advancing_sequence() {
 }
 
 #[test]
-fn v2_partial_packet_failure_preserves_both_published_boundaries() {
+fn native_partial_packet_failure_preserves_both_published_boundaries() {
     struct FailAfter(usize);
     impl Write for FailAfter {
         fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
@@ -100,7 +153,7 @@ fn v2_partial_packet_failure_preserves_both_published_boundaries() {
 }
 
 #[test]
-fn v2_flush_failure_does_not_publish_a_whole_written_packet() {
+fn native_flush_failure_does_not_publish_a_whole_written_packet() {
     struct FailSecondFlush(usize);
     impl Write for FailSecondFlush {
         fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
@@ -141,7 +194,7 @@ fn v2_flush_failure_does_not_publish_a_whole_written_packet() {
 }
 
 #[test]
-fn v2_pair_is_published_only_after_flush_and_notifies_a_quiet_consumer() {
+fn native_pair_is_published_only_after_flush_and_notifies_a_quiet_consumer() {
     struct Gate {
         written: mpsc::SyncSender<()>,
         release: mpsc::Receiver<()>,

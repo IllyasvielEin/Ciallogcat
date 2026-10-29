@@ -5,9 +5,7 @@ use std::path::PathBuf;
 use std::process::{Command, Output};
 use std::sync::{Arc, atomic::AtomicBool};
 
-use ciallogcat::document::{
-    self, CaptureStatus, Document, DocumentHeader, ExportScope, NativeFormat,
-};
+use ciallogcat::document::{self, CaptureStatus, Document, DocumentHeader, ExportScope};
 use ciallogcat::log_store::LogStore;
 use ciallogcat::model::LogBuffer;
 use ciallogcat::protobuf::DecodedEntry;
@@ -21,7 +19,7 @@ struct Fixture {
 }
 
 impl Fixture {
-    fn new(format: NativeFormat) -> Self {
+    fn new() -> Self {
         let mut session = Session::new();
         session.begin_attempt().unwrap();
         session.stream_started().unwrap();
@@ -36,7 +34,6 @@ impl Fixture {
         store.push(row);
         let mut header = DocumentHeader::live(session.id(), "mock".into(), vec![LogBuffer::Main]);
         header.source.transport_format = Some("logcat_proto_experimental".into());
-        header.set_format(format).unwrap();
         let mut doc = Document::from_snapshot(
             header,
             Arc::new(store),
@@ -99,66 +96,76 @@ impl Drop for Fixture {
 
 #[test]
 fn query_rejects_raw_magic_number_objects_in_native_header_record_and_footer() {
-    for format in [NativeFormat::V2, NativeFormat::CompactV3] {
-        let fixture = Fixture::new(format);
-        for object in [
-            r#"{"$serde_json::private::Number":"1e-400"}"#,
-            r#"{"nested":[{"\u0024serde_json::private::Number":"1e-400"}]}"#,
-        ] {
-            for layer in 0..3 {
-                fixture.write(Some(layer), object);
-                let output = fixture.run("query-v2", &[]);
-                assert!(
-                    !output.status.success(),
-                    "{format:?} layer {layer}: {}",
-                    String::from_utf8_lossy(&output.stdout)
-                );
-                let error: Value = serde_json::from_slice(&output.stderr).unwrap();
-                assert_eq!(error["error"]["code"], "invalid_source");
-                assert!(
-                    error["error"]["message"]
-                        .as_str()
-                        .unwrap()
-                        .contains("unsupported JSON object key")
-                );
-            }
+    let fixture = Fixture::new();
+    for object in [
+        r#"{"$serde_json::private::Number":"1e-400"}"#,
+        r#"{"nested":[{"\u0024serde_json::private::Number":"1e-400"}]}"#,
+    ] {
+        for layer in 0..3 {
+            fixture.write(Some(layer), object);
+            let output = fixture.run("query", &[]);
+            assert!(
+                !output.status.success(),
+                "native layer {layer}: {}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+            let error: Value = serde_json::from_slice(&output.stderr).unwrap();
+            assert_eq!(error["error"]["code"], "invalid_source");
+            assert!(
+                error["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("unsupported JSON object key")
+            );
         }
     }
 }
 
 #[test]
 fn query_decoded_view_keeps_underflow_and_large_integer_extension_tokens() {
-    for format in [NativeFormat::V2, NativeFormat::CompactV3] {
-        let fixture = Fixture::new(format);
-        for token in ["1e-400", "18446744073709551617"] {
-            fixture.write(None, token);
-            let output = fixture.run("query-v2", &[]);
+    let fixture = Fixture::new();
+    for token in ["1e-400", "18446744073709551617"] {
+        fixture.write(None, token);
+        let output = fixture.run("query", &[]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let page: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let reference = page["records"][0]["record_ref"].as_str().unwrap();
+        let stream = fixture.run("query", &["--all", "--format", "jsonl"]);
+        assert!(
+            stream.status.success(),
+            "{}",
+            String::from_utf8_lossy(&stream.stderr)
+        );
+        let line = std::str::from_utf8(&stream.stdout).unwrap();
+        assert_eq!(line.lines().count(), 1);
+        assert!(line.ends_with('\n'));
+        assert!(line.contains(&format!("\"future\":{token}")));
+        serde_json::from_slice::<Value>(&stream.stdout).unwrap();
+        let completion: Value = serde_json::from_slice(&stream.stderr).unwrap();
+        assert_eq!(completion["complete"], true);
+        assert_eq!(completion["records_returned"], 1);
+        for view in ["stored", "decoded"] {
+            let output = fixture.run("get", &["--ref", reference, "--view", view]);
             assert!(
                 output.status.success(),
                 "{}",
                 String::from_utf8_lossy(&output.stderr)
             );
-            let page: Value = serde_json::from_slice(&output.stdout).unwrap();
-            let reference = page["records"][0]["record_ref"].as_str().unwrap();
-            for view in ["stored", "decoded"] {
-                let output = fixture.run("get-v2", &["--ref", reference, "--view", view]);
-                assert!(
-                    output.status.success(),
-                    "{}",
-                    String::from_utf8_lossy(&output.stderr)
-                );
-                let response: Value = serde_json::from_slice(&output.stdout).unwrap();
-                assert!(
-                    response["record_json_chunk"]
-                        .as_str()
-                        .unwrap()
-                        .contains(&format!("\"future\":{token}"))
-                );
-                assert!(
-                    response["next_offset"].is_null(),
-                    "small fixture should fit one chunk"
-                );
-            }
+            let response: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert!(
+                response["record_json_chunk"]
+                    .as_str()
+                    .unwrap()
+                    .contains(&format!("\"future\":{token}"))
+            );
+            assert!(
+                response["next_text_offset"].is_null(),
+                "small fixture should fit one chunk"
+            );
         }
     }
 }

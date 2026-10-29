@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run one external test command with bounded v2 log evidence (Python 3.10+).
+"""Run one external test command with bounded native log evidence (Python 3.10+).
 
 Executor output goes to stderr; stdout is one JSON result. Device operations and
 cleanup belong to the supplied executor. See docs/agent-test-workflow.md.
@@ -127,7 +127,7 @@ def require_running(status):
 
 
 def query_page(args, session, cursor, deadline, start_at=None):
-    flags = ["query-v2", "--session-dir", str(session), "--mode", "tail",
+    flags = ["query", "--session-dir", str(session), "--mode", "tail",
              "--query", args.query, "--limit", str(args.evidence_records),
              "--max-response-bytes", str(args.evidence_bytes), "--preview-bytes", "512",
              "--max-scan-records", str(args.scan_records),
@@ -142,7 +142,7 @@ def query_page(args, session, cursor, deadline, start_at=None):
             or any(not isinstance(page.get(key), dict)
                    for key in ("source_status", "snapshot", "scan", "validation"))
             or not isinstance(page.get("has_more"), bool)):
-        raise WorkflowError("invalid_response", "expected a v2 tail query page")
+        raise WorkflowError("invalid_response", "expected a tail query page")
     return page
 
 
@@ -151,9 +151,9 @@ def establish_baseline(args, session, status, deadline):
     while True:
         remaining(deadline, args.command_timeout)
         if require_running(status):
-            if (status.get("record_schema_version") != 2 or not status.get("session_id")
+            if (status.get("record_schema_version") != 3 or not status.get("session_id")
                     or not status.get("artifact_id")):
-                raise WorkflowError("invalid_response", "expected v2 capture identities")
+                raise WorkflowError("invalid_response", "expected native capture identities")
             try:
                 page = query_page(args, session, None, deadline, start_at="end")
             except WorkflowError as error:
@@ -260,7 +260,7 @@ def run(args):
     start_attempted = False
     try:
         flags = ["start", "--serial", args.serial, "--session-dir", str(session),
-                 "--record-format", "v2", "--duration-secs", str(args.duration_secs),
+                 "--duration-secs", str(args.duration_secs),
                  "--max-bytes", str(args.max_bytes), "--max-entries", str(args.max_entries)]
         if args.adb:
             flags += ["--adb", args.adb]

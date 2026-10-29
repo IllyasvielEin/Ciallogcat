@@ -298,7 +298,7 @@ fn open_row_menu(h: &mut Harness) {
     let pos = h
         .labels
         .iter()
-        .find(|(text, pos)| text.starts_with("row-0 keep") && pos.x > 500.0)
+        .find(|(text, pos)| text.starts_with("[event] row-0 keep") && pos.x > 500.0)
         .expect("visible row")
         .1;
     for pressed in [true, false] {
@@ -431,7 +431,7 @@ fn held_pointer_target_stays_at_same_screen_position_through_prefix_trim() {
     let (label, pos) = h
         .labels
         .iter()
-        .find(|(label, _)| label.starts_with("row-25 "))
+        .find(|(label, _)| label.starts_with("[event] row-25 "))
         .expect("target row")
         .clone();
     h.pointer(pos, true);
@@ -440,7 +440,10 @@ fn held_pointer_target_stays_at_same_screen_position_through_prefix_trim() {
     h.frame(vec![egui::Event::PointerMoved(pos)]);
     h.pointer(pos, false);
     assert_eq!(h.app.selected, Some(15));
-    assert_eq!(h.app.entries[15].message.as_ref(), label);
+    assert_eq!(
+        h.app.entries[15].message.as_ref(),
+        label.strip_prefix("[event] ").unwrap()
+    );
 }
 
 #[test]

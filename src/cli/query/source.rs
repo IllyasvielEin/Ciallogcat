@@ -3,9 +3,8 @@ use std::fs::{self, File, Metadata};
 use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::PathBuf;
 
-use ciallogcat::document::{self, ArtifactEnd, DocumentHeader};
+use ciallogcat::document::{self, ArtifactEnd, DocumentHeader, MAX_RECORD_BYTES};
 use ciallogcat::model::LogEntry;
-use ciallogcat::record_io::{InputMode, LegacyReader, MAX_RECORD_BYTES, ReadOutcome};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -20,7 +19,7 @@ pub(super) struct Binding {
     pub session: bool,
     pub prefix_len: u64,
     pub prefix_hash: String,
-    pub artifact_id: Option<String>,
+    pub artifact_id: String,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -65,13 +64,13 @@ pub(super) struct Source {
     path: PathBuf,
     pub binding: Binding,
     pub upper: Boundary,
+    fence: Boundary,
     pub published_count: Option<u64>,
     pub data_start: u64,
-    pub header: Option<DocumentHeader>,
+    pub header: DocumentHeader,
     pub footer: Option<ArtifactEnd>,
     pub status: Value,
     pub active: bool,
-    first: Option<Vec<u8>>,
     // A closure can race a get/context read. Remember decoded sequence bounds
     // for the final consistency check without adding filesystem I/O per row.
     highest_seen_seq: Cell<u64>,
@@ -81,9 +80,7 @@ pub(super) struct Row {
     pub seq: u64,
     pub entry: LogEntry,
     pub kind: &'static str,
-    pub metadata: Option<document::RecordMetadata>,
-    /// Legacy receive time is not a native capture identity.
-    pub legacy_received_unix_ms: Option<u64>,
+    pub metadata: document::RecordMetadata,
 }
 
 pub(super) fn invalid(message: impl Into<String>) -> super::super::Error {
@@ -152,6 +149,26 @@ impl Source {
         } else {
             (path, None)
         };
+        let session_schema = status_value
+            .as_ref()
+            .map(|value| match value["record_schema_version"].as_u64() {
+                Some(schema) if schema == u64::from(document::SCHEMA_VERSION) => {
+                    Ok(document::SCHEMA_VERSION)
+                }
+                None if value["bytes"].as_u64() == Some(0) && value["visible_end"].is_null() => {
+                    Err(error(
+                        "source_not_ready",
+                        "native header is not visible yet",
+                        3,
+                    ))
+                }
+                _ => Err(error(
+                    "unsupported_format",
+                    "session uses an unsupported archive schema; current native format is required",
+                    3,
+                )),
+            })
+            .transpose()?;
         regular(&path)?;
         let path = fs::canonicalize(path).map_err(io_error)?;
         let file = File::open(&path).map_err(io_error)?;
@@ -161,27 +178,14 @@ impl Source {
         }
         let id = identity(&file, &metadata)?;
         let path_hash = hash(path.as_os_str().as_encoded_bytes());
-        let mut schema_hint = expected.map(|b| b.schema);
+        let schema_hint = session_schema.or_else(|| expected.map(|b| b.schema));
         let (upper, status, active) = if let Some(value) = &status_value {
-            let schema = value
-                .get("record_schema_version")
-                .and_then(Value::as_u64)
-                .unwrap_or(1);
-            if !matches!(schema, 1..=3) {
-                return Err(invalid("unsupported session record schema"));
-            }
-            if schema_hint.is_some_and(|s| u64::from(s) != schema) {
+            let schema = session_schema.expect("validated native session schema");
+            if expected.is_some_and(|binding| binding.schema != schema) {
                 return Err(stale("session record schema changed"));
             }
-            schema_hint = Some(schema as u8);
-            let (offset, seq) = if matches!(schema, 2 | 3) {
-                (
-                    value["visible_end"]["offset"].as_u64(),
-                    value["visible_end"]["seq"].as_u64(),
-                )
-            } else {
-                (value["bytes"].as_u64(), value["entries"].as_u64())
-            };
+            let offset = value["visible_end"]["offset"].as_u64();
+            let seq = value["visible_end"]["seq"].as_u64();
             let upper = Boundary {
                 offset: offset.ok_or_else(|| invalid("session lacks a visible byte boundary"))?,
                 seq: Some(seq.ok_or_else(|| invalid("session lacks a visible sequence boundary"))?),
@@ -251,89 +255,79 @@ impl Source {
         {
             return Err(stale("token belongs to a different or replaced source"));
         }
+        if expected.is_some_and(|binding| binding.prefix_len > upper.offset) {
+            return Err(stale("file was truncated below its identity prefix"));
+        }
+        if upper.offset == 0 {
+            return Err(if active {
+                error("source_not_ready", "native header is not visible yet", 3)
+            } else {
+                invalid("empty input is not a native document")
+            });
+        }
+        let mut reader = BufReader::new(Counted {
+            file,
+            bytes: 0,
+            upper: upper.offset,
+            position: 0,
+        });
+        // Header validation is counted I/O outside logical record-scan budgets.
+        let first = read_line(&mut reader, active, 0, upper.offset, MAX_RECORD_BYTES)?;
+        let value: Value =
+            ciallogcat::json_input::from_slice(&first).map_err(|e| invalid(e.to_string()))?;
+        let schema = value["schema_version"].as_u64();
+        if schema != Some(u64::from(document::SCHEMA_VERSION)) {
+            return Err(error(
+                "unsupported_format",
+                "input uses an unsupported archive schema; current native document header is required",
+                3,
+            ));
+        }
+        if schema_hint.is_some_and(|hint| Some(u64::from(hint)) != schema) {
+            return Err(invalid("session and document record schemas differ"));
+        }
+        let header = document::decode_header(&first).map_err(|e| invalid(e.to_string()))?;
+        if let Some(value) = &status_value
+            && (value["artifact_id"].as_str() != Some(&header.artifact_id.to_string())
+                || value["session_id"].as_str()
+                    != header.session_id.map(|id| id.to_string()).as_deref())
+        {
+            return Err(stale("native status and document identities differ"));
+        }
         let mut source = Self {
-            reader: BufReader::new(Counted {
-                file,
-                bytes: 0,
-                upper: upper.offset,
-                position: 0,
-            }),
+            reader,
             path,
             binding: Binding {
                 path: path_hash,
                 identity: id,
-                schema: schema_hint.unwrap_or(1),
+                schema: header.schema_version,
                 session,
                 prefix_len: 0,
                 prefix_hash: String::new(),
-                artifact_id: None,
+                artifact_id: header.artifact_id.to_string(),
             },
             upper,
+            fence: upper,
             published_count: status_value.as_ref().and_then(|v| v["entries"].as_u64()),
-            data_start: 0,
-            header: None,
+            data_start: first.len() as u64,
+            header,
             footer: None,
             status,
             active,
-            first: None,
             highest_seen_seq: Cell::new(0),
         };
-        // Headers share the codec's encoded line limit with records and footers,
-        // including source extensions. These counted reads are source validation,
-        // outside the logical scan budget. A v1 first record is never reread on
-        // cursor continuations, even if it was several MiB long.
-        if schema_hint != Some(1) && upper.offset != 0 {
-            let first = source.line(0, upper.offset, MAX_RECORD_BYTES)?;
-            let value: Value =
-                ciallogcat::json_input::from_slice(&first).map_err(|e| invalid(e.to_string()))?;
-            let schema = value["schema_version"]
-                .as_u64()
-                .ok_or_else(|| invalid("missing record schema"))?;
-            if !matches!(schema, 1..=3) {
-                return Err(invalid("unsupported record schema"));
-            }
-            if schema_hint.is_some_and(|hint| u64::from(hint) != schema) {
-                return Err(invalid("session and document record schemas differ"));
-            }
-            source.binding.schema = schema as u8;
-            if matches!(schema, 2 | 3) {
-                let header = document::decode_header(&first).map_err(|e| invalid(e.to_string()))?;
-                source.data_start = first.len() as u64;
-                source.binding.artifact_id = Some(header.artifact_id.to_string());
-                source.header = Some(header);
-            } else {
-                source.first = Some(first);
-            }
-        } else if matches!(schema_hint, Some(2 | 3)) {
-            return Err(error(
-                "source_not_ready",
-                "native header is not visible yet",
-                3,
-            ));
-        }
-        if let Some(header) = &source.header
-            && let Some(value) = &status_value
-            && (value["artifact_id"].as_str() != Some(&header.artifact_id.to_string())
-                || value["session_id"].as_str()
-                    != header.session_id.map(|s| s.to_string()).as_deref())
-        {
-            return Err(stale("native status and document identities differ"));
-        }
-        if let Some(header) = &source.header {
-            source.status["artifact_id"] = json!(header.artifact_id);
-            source.status["session_id"] = json!(header.session_id);
-        }
-        if source.header.is_some() && !active {
-            // Footers share the codec's encoded line limit with sequential
-            // query/session reads. Include the preceding LF in the backward
-            // search so an exactly maximal footer after data can be located.
+        source.status["artifact_id"] = json!(source.header.artifact_id);
+        source.status["session_id"] = json!(source.header.session_id);
+        if !active {
+            // Include preceding LF so an exactly maximal footer can be located.
             let start = source
                 .previous_line_start(upper.offset, source.data_start, MAX_RECORD_BYTES + 1)?
                 .ok_or_else(|| invalid("native artifact lacks a bounded artifact_end"))?;
             let bytes = source.line(start, upper.offset, MAX_RECORD_BYTES)?;
-            let footer = document::decode_end(&bytes, source.header.as_ref().unwrap())
-                .map_err(|e| invalid(e.to_string()))?;
+            let footer =
+                document::decode_end(&bytes, &source.header).map_err(|e| invalid(e.to_string()))?;
             source.upper.seq = footer.last_seq.or(Some(0));
+            source.fence = source.upper;
             source.status["capture_completeness"] = json!(footer.capture.completeness);
             source.status["capture_state"] = json!(super::preview(&footer.capture.state, 96));
             source.status["capture_observed_unix_ms"] = json!(footer.capture.observed_unix_ms);
@@ -351,6 +345,46 @@ impl Source {
             return Err(stale("source prefix, schema or artifact identity changed"));
         }
         Ok(source)
+    }
+
+    pub fn reopen(&self) -> Result<Self> {
+        let path = if self.binding.session {
+            self.path
+                .parent()
+                .ok_or_else(|| invalid("session path lacks parent"))?
+                .to_path_buf()
+        } else {
+            self.path.clone()
+        };
+        Self::open(path, self.binding.session, Some(&self.binding))
+    }
+
+    /// Pin every subsequent record/control read to the caller's original
+    /// snapshot. Ref/context calls must not inherit a later session watermark.
+    pub fn pin_boundary(&mut self, upper: Boundary) -> Result<()> {
+        if upper.seq.is_none() {
+            return Err(stale("snapshot lacks its sequence boundary"));
+        }
+        if upper.offset > self.upper.offset
+            || upper
+                .seq
+                .zip(self.upper.seq)
+                .is_some_and(|(requested, published)| requested > published)
+            || upper.offset < self.data_start
+        {
+            return Err(stale("published source boundary moved backwards"));
+        }
+        let position = self
+            .reader
+            .stream_position()
+            .map_err(io_error)?
+            .min(upper.offset);
+        self.reader
+            .seek(SeekFrom::Start(position))
+            .map_err(io_error)?;
+        self.reader.get_mut().upper = upper.offset;
+        self.fence = upper;
+        Ok(())
     }
 
     pub fn bytes_read(&self) -> u64 {
@@ -379,7 +413,7 @@ impl Source {
             let kind: Kind = serde_json::from_slice(&bytes).map_err(|e| invalid(e.to_string()))?;
             if kind.kind == "artifact_end" {
                 footer = Some(
-                    document::decode_end(&bytes, self.header.as_ref().unwrap())
+                    document::decode_end(&bytes, &self.header)
                         .map_err(|e| invalid(e.to_string()))?,
                 );
                 end = start;
@@ -426,14 +460,8 @@ impl Source {
             return Err(invalid("visible sequence and byte boundary disagree"));
         }
         if let Some(footer) = &footer {
-            document::validate_end_summary(
-                self.header.as_ref().unwrap(),
-                footer,
-                count,
-                first_seq,
-                last_seq,
-            )
-            .map_err(|e| invalid(e.to_string()))?;
+            document::validate_end_summary(&self.header, footer, count, first_seq, last_seq)
+                .map_err(|e| invalid(e.to_string()))?;
         }
         Ok((count, first_seq, footer.is_some()))
     }
@@ -441,7 +469,7 @@ impl Source {
     pub fn block(&mut self, start: u64, size: u64) -> Result<Vec<u8>> {
         if start
             .checked_add(size)
-            .is_none_or(|end| end > self.upper.offset)
+            .is_none_or(|end| end > self.fence.offset)
         {
             return Err(stale("requested bytes are outside the visible boundary"));
         }
@@ -457,86 +485,33 @@ impl Source {
     }
 
     pub fn line(&mut self, start: u64, upper: u64, limit: u64) -> Result<Vec<u8>> {
-        if start > upper || upper > self.upper.offset {
+        if start > upper || upper > self.fence.offset {
             return Err(stale("invalid record boundary"));
         }
-        if start == 0
-            && let Some(bytes) = self.first.take()
-            && bytes.len() as u64 <= upper
-            && bytes.len() as u64 <= limit
-        {
-            return Ok(bytes);
-        }
-        if self.reader.stream_position().map_err(io_error)? != start {
-            self.reader.seek(SeekFrom::Start(start)).map_err(io_error)?;
-        }
-        let mut bytes = Vec::new();
-        self.reader
-            .by_ref()
-            .take(upper.saturating_sub(start).min(limit + 1))
-            .read_until(b'\n', &mut bytes)
-            .map_err(io_error)?;
-        if bytes.len() as u64 > limit {
-            return Err(invalid("record or metadata exceeds its encoded byte limit"));
-        }
-        if self.active && !bytes.is_empty() && !bytes.ends_with(b"\n") {
-            return Err(invalid("published boundary contains an incomplete line"));
-        }
-        Ok(bytes)
+        read_line(&mut self.reader, self.active, start, upper, limit)
     }
 
     pub fn row(&self, bytes: &[u8], previous: u64) -> Result<Row> {
         if self.active && !bytes.ends_with(b"\n") {
             return Err(invalid("published boundary contains an incomplete record"));
         }
-        let row = if let Some(header) = &self.header {
-            let (entry, meta) = document::decode_record(bytes, header, previous)
-                .map_err(|e| invalid(e.to_string()))?;
-            let kind = match entry.kind {
-                ciallogcat::model::LogEntryKind::Log => "entry",
-                ciallogcat::model::LogEntryKind::Marker => "event",
-                ciallogcat::model::LogEntryKind::Unparsed => "unparsed",
-            };
-            Row {
-                seq: meta.seq,
-                entry,
-                kind,
-                metadata: Some(meta),
-                legacy_received_unix_ms: None,
-            }
-        } else {
-            let mut reader = LegacyReader::new(
-                io::Cursor::new(bytes),
-                if self.active {
-                    InputMode::Active
-                } else {
-                    InputMode::Offline
-                },
-            );
-            let ReadOutcome::Record(located) =
-                reader.read_record().map_err(|e| invalid(e.to_string()))?
-            else {
-                return Err(invalid("incomplete legacy record"));
-            };
-            let row = located.record;
-            if row.seq <= previous {
-                return Err(invalid("record sequence is not strictly increasing"));
-            }
-            let level = row.level().ok_or_else(|| invalid("invalid level"))?;
-            Row {
-                seq: row.seq,
-                kind: "entry",
-                metadata: None,
-                legacy_received_unix_ms: row.observed_unix_ms,
-                entry: LogEntry::new(row.time, row.pid, row.tid, row.tag, level, row.message),
-            }
+        let (entry, meta) = document::decode_record(bytes, &self.header, previous)
+            .map_err(|e| invalid(e.to_string()))?;
+        let kind = match entry.kind {
+            ciallogcat::model::LogEntryKind::Log => "entry",
+            ciallogcat::model::LogEntryKind::Marker => "event",
+            ciallogcat::model::LogEntryKind::Unparsed => "unparsed",
+        };
+        let row = Row {
+            seq: meta.seq,
+            entry,
+            kind,
+            metadata: meta,
         };
         self.highest_seen_seq
             .set(self.highest_seen_seq.get().max(row.seq));
-        if self.status["state"] == "abandoned" && self.upper.seq.is_some_and(|seq| row.seq > seq) {
-            return Err(invalid(
-                "record exceeds administratively closed sequence boundary",
-            ));
+        if self.fence.seq.is_some_and(|seq| row.seq > seq) {
+            return Err(invalid("record exceeds pinned snapshot sequence boundary"));
         }
         Ok(row)
     }
@@ -566,14 +541,8 @@ impl Source {
                     .ok_or_else(|| invalid("session path lacks parent"))?,
             )?
         {
-            let (offset, seq) = if self.binding.schema == 1 {
-                (closed["bytes"].as_u64(), closed["entries"].as_u64())
-            } else {
-                (
-                    closed["visible_end"]["offset"].as_u64(),
-                    closed["visible_end"]["seq"].as_u64(),
-                )
-            };
+            let offset = closed["visible_end"]["offset"].as_u64();
+            let seq = closed["visible_end"]["seq"].as_u64();
             if offset.is_none_or(|value| upper.offset > value)
                 || upper.seq.zip(seq).is_some_and(|(a, b)| a > b)
                 || seq.is_none_or(|value| self.highest_seen_seq.get() > value)
@@ -620,4 +589,29 @@ impl Source {
         }
         Ok((minimum == lower).then_some(lower))
     }
+}
+
+fn read_line(
+    reader: &mut BufReader<Counted>,
+    active: bool,
+    start: u64,
+    upper: u64,
+    limit: u64,
+) -> Result<Vec<u8>> {
+    if reader.stream_position().map_err(io_error)? != start {
+        reader.seek(SeekFrom::Start(start)).map_err(io_error)?;
+    }
+    let mut bytes = Vec::new();
+    reader
+        .by_ref()
+        .take(upper.saturating_sub(start).min(limit + 1))
+        .read_until(b'\n', &mut bytes)
+        .map_err(io_error)?;
+    if bytes.len() as u64 > limit {
+        return Err(invalid("record or metadata exceeds its encoded byte limit"));
+    }
+    if active && !bytes.is_empty() && !bytes.ends_with(b"\n") {
+        return Err(invalid("published boundary contains an incomplete line"));
+    }
+    Ok(bytes)
 }

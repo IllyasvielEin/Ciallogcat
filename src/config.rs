@@ -58,22 +58,7 @@ impl AppConfig {
         let Some(path) = config_path() else {
             return Self::default();
         };
-        let contents = fs::read_to_string(&path).or_else(|error| {
-            // Import old default settings without overwriting or removing them.
-            // Explicit configuration directories must remain isolated.
-            if error.kind() == io::ErrorKind::NotFound
-                && env::var_os("CIALLOGCAT_CONFIG_DIR").is_none()
-                && let Some(base) = path.parent().and_then(|parent| parent.parent())
-            {
-                let legacy_dir = if cfg!(target_os = "windows") {
-                    "Ciallocat"
-                } else {
-                    "ciallocat"
-                };
-                return fs::read_to_string(base.join(legacy_dir).join(CONFIG_FILE));
-            }
-            Err(error)
-        });
+        let contents = fs::read_to_string(&path);
         let Ok(contents) = contents else {
             return Self::default();
         };
@@ -152,14 +137,14 @@ mod tests {
     }
 
     #[test]
-    fn old_configuration_gets_memory_and_buffer_defaults() {
+    fn partial_preferences_use_defaults_for_unspecified_settings() {
         let config: AppConfig = serde_json::from_str(r#"{"dark":false}"#).unwrap();
         assert_eq!(config.memory_limit_mib, 300);
         assert!(config.filter_history.is_empty());
         assert_eq!(config.buffers, LogBuffer::defaults());
         assert!(config.tag_include.is_empty() && config.tag_exclude.is_empty());
-        let old: SavedFilter = serde_json::from_str(r#"{"name":"old","package":"","min_level":"Info","query":"","regex":false,"case_sensitive":false}"#).unwrap();
-        assert!(old.tag_include.is_empty() && old.tag_exclude.is_empty());
+        let filter: SavedFilter = serde_json::from_str(r#"{"name":"partial","package":"","min_level":"Info","query":"","regex":false,"case_sensitive":false}"#).unwrap();
+        assert!(filter.tag_include.is_empty() && filter.tag_exclude.is_empty());
     }
 }
 

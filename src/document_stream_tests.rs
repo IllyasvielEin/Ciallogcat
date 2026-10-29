@@ -93,9 +93,8 @@ fn compact_stream_snapshot_and_generic_decoders_agree_for_mixed_rows_and_empty_f
     let mut session = Session::new();
     session.begin_attempt().unwrap();
     session.stream_started().unwrap();
-    let mut header = DocumentHeader::live(session.id(), "serial".into(), vec![LogBuffer::Main]);
-    assert_eq!(header.schema_version, 2);
-    header.set_format(NativeFormat::CompactV3).unwrap();
+    let header = DocumentHeader::live(session.id(), "serial".into(), vec![LogBuffer::Main]);
+    assert_eq!(header.schema_version, SCHEMA_VERSION);
     let mut encoder = StreamEncoder::new(header.clone()).unwrap();
     let mut bytes = encoder.header_bytes().unwrap();
     let mut store = LogStore::default();
@@ -187,22 +186,18 @@ fn compact_stream_snapshot_and_generic_decoders_agree_for_mixed_rows_and_empty_f
 }
 
 #[test]
-fn native_versions_cannot_mix_header_data_or_footer_and_v2_never_guesses_compact() {
-    let v2 = super::proto_tests::sample_for_stream_tests();
-    let v3 = v2
-        .convert_format(
-            NativeFormat::CompactV3,
-            usize::MAX,
-            u64::MAX,
-            &AtomicBool::new(false),
-        )
-        .unwrap();
-    for (doc, other) in [(&v2, &v3), (&v3, &v2)] {
+fn old_or_mixed_schema_versions_are_rejected_in_every_layer() {
+    let doc = super::proto_tests::sample_for_stream_tests();
+    for old_version in [1, 2, 4] {
+        let mut header = doc.header.clone();
+        header.schema_version = old_version;
+        assert!(decode_header(&encode_line(&header).unwrap()).is_err());
+        assert!(StreamEncoder::new(header).is_err());
         let mut row: Value = serde_json::from_slice(
             &encode_record(&doc.header, &doc.entries[0], &doc.record_metadata[0]).unwrap(),
         )
         .unwrap();
-        row["schema_version"] = other.header.schema_version.into();
+        row["schema_version"] = old_version.into();
         let line = encode_line(&row).unwrap();
         assert!(decode_record(&line, &doc.header, 0).is_err());
         let bytes = [
@@ -223,9 +218,8 @@ fn native_versions_cannot_mix_header_data_or_footer_and_v2_never_guesses_compact
             2
         );
         let mut end = doc.end.clone();
-        end.schema_version = other.header.schema_version;
+        end.schema_version = old_version;
         assert!(decode_end(&encode_line(&end).unwrap(), &doc.header).is_err());
-        assert!(validate_end_summary(&doc.header, &end, 1, Some(1), Some(1)).is_err());
         let bytes = [
             encode_line(&doc.header).unwrap(),
             encode_record(&doc.header, &doc.entries[0], &doc.record_metadata[0]).unwrap(),
@@ -244,20 +238,14 @@ fn native_versions_cannot_mix_header_data_or_footer_and_v2_never_guesses_compact
             3
         );
     }
-    let mut compact: Value = serde_json::from_slice(
-        &encode_record(&v3.header, &v3.entries[0], &v3.record_metadata[0]).unwrap(),
-    )
-    .unwrap();
-    compact["schema_version"] = 2.into();
-    assert!(decode_record(&encode_line(&compact).unwrap(), &v2.header, 0).is_err());
-    let mut invalid = v3.header.clone();
+    let mut invalid = doc.header.clone();
     invalid
         .normalization
         .insert("proto_projection".into(), "unknown".into());
     assert!(StreamEncoder::new(invalid.clone()).is_err());
     assert!(
         decode_record(
-            &encode_record(&v3.header, &v3.entries[0], &v3.record_metadata[0]).unwrap(),
+            &encode_record(&doc.header, &doc.entries[0], &doc.record_metadata[0]).unwrap(),
             &invalid,
             0
         )
@@ -266,30 +254,25 @@ fn native_versions_cannot_mix_header_data_or_footer_and_v2_never_guesses_compact
 }
 
 #[test]
-fn compact_preserves_legacy_unknowns_and_writer_revalidates_mutable_evidence() {
+fn compact_preserves_text_extensions_and_writer_revalidates_mutable_evidence() {
     let cancel = AtomicBool::new(false);
-    let legacy = load(Cursor::new(br#"{"schema_version":1,"type":"entry","seq":9,"time":"old","pid":1,"tid":2,"level":"I","tag":"T","message":"m","future":true}"#), 16*1024*1024, &cancel).unwrap();
-    let compact = legacy
-        .convert_format(NativeFormat::CompactV3, 16 * 1024 * 1024, u64::MAX, &cancel)
-        .unwrap();
+    let mut text = super::tests::sample();
+    text.record_metadata[0]
+        .extra
+        .insert("future".into(), true.into());
+    let compact = text.clone();
     let mut bytes = Vec::new();
     write_snapshot(&mut bytes, &compact, &cancel).unwrap();
     let reopened = load(Cursor::new(bytes), 16 * 1024 * 1024, &cancel).unwrap();
-    assert_eq!(reopened.header.source.kind, "legacy_v1");
-    assert!(reopened.header.session_id.is_none());
-    assert!(reopened.entries[0].provenance.is_none());
-    assert!(reopened.entries[0].text_loss.is_none());
+    assert_eq!(reopened.header.source.kind, "adb");
+    assert_eq!(reopened.header.session_id, text.header.session_id);
+    assert_eq!(reopened.entries[0].provenance, text.entries[0].provenance);
+    assert_eq!(reopened.entries[0].text_loss, text.entries[0].text_loss);
     assert!(reopened.entries[0].proto.is_none());
-    assert_eq!(reopened.record_metadata[0].legacy_original_seq, Some(9));
-    assert_eq!(
-        reopened.record_metadata[0].extra["legacy_extensions"]["future"],
-        true
-    );
+    assert_eq!(reopened.record_metadata[0].extra["future"], true);
 
     let source = super::proto_tests::sample_for_stream_tests();
-    let compact = source
-        .convert_format(NativeFormat::CompactV3, usize::MAX, u64::MAX, &cancel)
-        .unwrap();
+    let compact = source;
     let mut stream = StreamEncoder::new(compact.header.clone()).unwrap();
     let initial_footer = stream.finish_bytes(CaptureStatus::default()).unwrap();
     let mut forged = compact.entries[0].clone();
@@ -309,7 +292,7 @@ fn compact_preserves_legacy_unknowns_and_writer_revalidates_mutable_evidence() {
     cancel.store(true, Ordering::Release);
     assert_eq!(
         compact
-            .convert_format(NativeFormat::V2, usize::MAX, u64::MAX, &cancel)
+            .select_cancellable(&[0], serde_json::json!({"query":"x"}), &cancel)
             .err()
             .unwrap()
             .kind,

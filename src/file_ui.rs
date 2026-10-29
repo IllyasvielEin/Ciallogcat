@@ -20,8 +20,6 @@ enum Action {
     Save,
     Export,
     SaveBeforeOpen,
-    SaveV2,
-    SaveCompact,
 }
 
 struct PathDialog {
@@ -59,6 +57,7 @@ pub(super) struct FileUiState {
     candidate: Option<(Document, PathBuf, usize)>,
     replace: Option<Replace>,
     pub notice: Option<String>,
+    retry: Option<(Action, PathBuf)>,
 }
 
 impl FileUiState {
@@ -163,24 +162,21 @@ impl CiallogcatApp {
                 self.process_watch = process_watch::Watcher::default();
                 ui.close();
             }
-            if let Some(document) = &self.files.document {
-                let compact = document.header.schema_version == 3;
-                let can_compact = !compact && document.header.source.transport_format.as_deref() == Some("logcat_proto_experimental");
-                if (compact || can_compact) && ui.add_enabled(ready,
-                    egui::Button::new(if compact { "另存为兼容 v2…" } else { "另存为紧凑 v3…" }))
-                    .on_hover_text("转换为新文件，保留原始 protobuf 与记录引用；单行最多 8 MiB，转换输出最多 512 MiB").clicked() {
-                    self.file_dialog(if compact { Action::SaveV2 } else { Action::SaveCompact });
-                    ui.close();
-                }
-            }
             ui.separator();
-            ui.label("可将 v1 / v2 / v3 JSONL 文件拖入窗口打开。");
+            ui.label("可将 原生日志 JSONL 文件拖入窗口打开。");
             ui.label("另存为新文件；不会覆盖已有文件。");
         });
     }
 
     fn file_dialog(&mut self, action: Action) {
-        let path = if action == Action::Open {
+        let path = if let Some((_, path)) = self
+            .files
+            .retry
+            .as_ref()
+            .filter(|(failed, _)| *failed == action)
+        {
+            path.to_string_lossy().into_owned()
+        } else if action == Action::Open {
             String::new()
         } else {
             let name = format!("ciallogcat-{}.jsonl", ciallogcat::session::SessionId::new());
@@ -332,7 +328,7 @@ impl CiallogcatApp {
             match self.snapshot_for_save() {
                 Ok(snapshot) => Some(snapshot),
                 Err(error) => {
-                    self.files.notice = Some(error);
+                    self.file_operation_failed(action, path, error, false);
                     return;
                 }
             }
@@ -363,18 +359,6 @@ impl CiallogcatApp {
                     }
                     file_io::check_cancel(&worker_cancel).map_err(|e| e.to_string())?;
                     let mut document = snapshot.expect("save snapshot").document(&worker_cancel)?;
-                    if matches!(action, Action::SaveV2 | Action::SaveCompact) {
-                        let format = if action == Action::SaveV2 {
-                            document::NativeFormat::V2
-                        } else {
-                            document::NativeFormat::CompactV3
-                        };
-                        document = Arc::new(
-                            document
-                                .convert_format(format, budget, 512 * MIB as u64, &worker_cancel)
-                                .map_err(|error| error.to_string())?,
-                        );
-                    }
                     if let Some(spec) = spec {
                         let matcher = filter::compile_matcher(&spec)?;
                         let mut indices = Vec::new();
@@ -409,6 +393,7 @@ impl CiallogcatApp {
         match spawned {
             Ok(_) => {
                 self.files.notice = None;
+                self.files.retry = None;
                 self.files.job = Some(Job {
                     cancel,
                     receiver,
@@ -417,9 +402,44 @@ impl CiallogcatApp {
                 });
             }
             Err(error) => {
-                self.files.notice = Some(format!("无法启动文件任务：{error}"));
+                self.file_operation_failed(
+                    action,
+                    path,
+                    format!("无法启动文件任务：{error}"),
+                    false,
+                );
             }
         }
+    }
+
+    fn file_operation_failed(
+        &mut self,
+        action: Action,
+        path: PathBuf,
+        error: String,
+        cancelled: bool,
+    ) {
+        let status = if action == Action::SaveBeforeOpen {
+            self.files.replace = None;
+            self.files.candidate = None;
+            "当前日志已保留，采集已停止。重新保存不会自动打开原候选文件。"
+        } else {
+            "当前日志已保留。"
+        };
+        self.files.notice = Some(format!(
+            "文件操作未完成：{error}。{status} 路径：{}",
+            path.display()
+        ));
+        // Retain only an editable path/action, never an old snapshot or a latent
+        // source replacement. The user must confirm again against the current view.
+        self.files.retry = (!cancelled).then_some((
+            if action == Action::SaveBeforeOpen {
+                Action::Save
+            } else {
+                action
+            },
+            path,
+        ));
     }
 
     pub(super) fn poll_files(&mut self, ctx: &egui::Context) {
@@ -467,16 +487,12 @@ impl CiallogcatApp {
                     }
                 }
                 Err(error) => {
-                    let status = if job.action == Action::SaveBeforeOpen {
-                        "当前日志已保留，采集已停止。"
-                    } else {
-                        "当前日志已保留。"
-                    };
-                    self.files.notice = Some(format!("文件操作未完成：{error}。{status}"));
-                    if job.action == Action::SaveBeforeOpen {
-                        self.files.replace = None;
-                        self.files.candidate = None;
-                    }
+                    self.file_operation_failed(
+                        job.action,
+                        job.path,
+                        error,
+                        job.cancel.load(Ordering::Acquire),
+                    );
                 }
             }
         }
@@ -537,6 +553,8 @@ impl CiallogcatApp {
         {
             return;
         }
+        let mut retry = false;
+        let mut dismiss = false;
         egui::Panel::top("file_notice").show(root_ui, |ui| {
             ui.horizontal_wrapped(|ui| {
                 if let Some(document) = &self.files.document {
@@ -567,14 +585,33 @@ impl CiallogcatApp {
                     }
                 }
                 if let Some(notice) = &self.files.notice {
-                    ui.add(egui::Label::new(notice).truncate())
-                        .on_hover_text(notice);
-                    if ui.small_button("×").clicked() {
-                        self.files.notice = None;
-                    }
+                    // One bounded row: long paths must not wrap the actions into
+                    // separate rows or take reading space away from the log table.
+                    ui.horizontal(|ui| {
+                        if let Some((action, _)) = &self.files.retry {
+                            let has_source = self.files.document.is_some() || self.retained_device.is_some();
+                            let filter_ready = *action != Action::Export
+                                || (!self.filter_pending && self.filter_dirty_since.is_none());
+                            retry = ui.add_enabled(
+                                !self.files.busy() && filter_ready && (*action == Action::Open || has_source),
+                                egui::Button::new("修改路径重试…"),
+                            ).on_hover_text("保留失败路径供修改；再次确认后使用当前视图，不会自动重试或覆盖已有文件。").clicked();
+                        }
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            dismiss = ui.small_button("×").on_hover_text("关闭文件通知").clicked();
+                            Self::status_diagnostic(ui, "file_notice_diagnostic", "详情", notice);
+                            ui.add(egui::Label::new(notice).truncate()).on_hover_text(notice);
+                        });
+                    });
                 }
             });
         });
+        if dismiss {
+            self.files.notice = None;
+            self.files.retry = None;
+        } else if retry && let Some((action, _)) = self.files.retry {
+            self.file_dialog(action);
+        }
     }
 
     pub(super) fn file_dialogs(&mut self, ctx: &egui::Context) {
@@ -587,19 +624,14 @@ impl CiallogcatApp {
                 ui.heading(match dialog.action {
                     Action::Open => "打开日志文件",
                     Action::Export => "导出当前筛选结果",
-                    Action::SaveV2 => "另存为兼容 v2",
-                    Action::SaveCompact => "另存为紧凑 v3",
                     _ => "另存保留日志",
                 });
                 ui.label(if dialog.action == Action::Open {
-                    "输入本地 v1 / v2 / v3 JSONL 文件路径，也可取消后将文件拖入窗口。"
+                    "输入本地 原生日志 JSONL 文件路径，也可取消后将文件拖入窗口。"
                 } else {
                     "输入新文件路径。保存固定快照，不包含后续到达的日志；已有文件不会被覆盖。"
                 });
                 if dialog.action != Action::Open {
-                    if matches!(dialog.action, Action::SaveV2 | Action::SaveCompact) {
-                        ui.label("转换保存全部保留记录及原有范围说明；输出上限 512 MiB，失败时保留原文件。");
-                    }
                     let retained = self.entries.len();
                     if dialog.action == Action::Export {
                         ui.label(format!(

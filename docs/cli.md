@@ -51,19 +51,20 @@ unauthorized or offline device cannot produce a usable capture.
 
 ## Recommended query workflow
 
-Use `query-v2` for both legacy v1 and native v2/v3 files or sessions. The legacy
-`query` command remains compatible with sequence-based v1 callers; it now also
-reports `complete` and `stop_reason`. Prefer offset cursors to repeated prefix scans.
+Use `query` for native files or sessions. It uses the
+bounded query engine, with signed offset cursors rather than repeated
+prefix scans. It is the only query command; existing callers should read the
+[migration notes](#migrating-query-callers).
 
 ```sh
 # One bounded JSON preview page for agents; continue next_cursor while has_more.
-ciallogcat-cli query-v2 --session-dir ./capture-session --query timeout --ignore-case
+ciallogcat-cli query --session-dir ./capture-session --query timeout --ignore-case
 # A finite snapshot, scanned to the end automatically; no truncated previews.
-ciallogcat-cli query-v2 --file capture.jsonl --all --format text --regex --query 'timeout|failed' --tag Network --pid 1234 --min-level W
+ciallogcat-cli query --file capture.jsonl --all --format text --regex --query 'timeout|failed' --tag Network --pid 1234 --min-level W
 # Full decoded JSONL on stdout, completion metadata on stderr.
-ciallogcat-cli query-v2 --session-dir ./capture-session --all --format jsonl > matches.jsonl 2> summary.json
+ciallogcat-cli query --session-dir ./capture-session --all --format jsonl > matches.jsonl 2> summary.json
 # Host receipt time, not yearless device display time (new captures).
-ciallogcat-cli query-v2 --session-dir ./capture-session --all --since 5m --until 30s
+ciallogcat-cli query --session-dir ./capture-session --all --since 5m --until 30s
 ```
 
 `--all` fixes a snapshot and internally follows signed offset cursors until
@@ -113,7 +114,7 @@ successfully written rows with shortened names (`process_names_truncated`).
 The text writer adds a record-ending LF only if the message does not already
 end in LF. Existing LF/CRLF, internal newlines, trailing spaces and intentional
 multiple trailing newlines are preserved; it does not trim message evidence.
-JSONL contains full decoded JSON including extensions; compact v3 decoded output
+JSONL contains full decoded JSON including extensions; protobuf decoded output
 is a **derived view, not a native archive**. Neither format is raw device output.
 A late validation, time-data, or write error may leave partial stdout; check the
 exit status and the final JSON summary on stderr before treating an export as
@@ -122,12 +123,15 @@ rename only after successful completion. Existing source files are never changed
 
 Filters combine with AND. `--query` remains literal and case-sensitive by default;
 `--regex` enables Rust regex syntax, `--ignore-case` affects message matching only,
-and `--case-sensitive` explicitly selects the default. `--tag`/`--tag-include`
+and `--case-sensitive` explicitly selects the default. `--tag`
 and `--tag-exclude` use case-sensitive literal substrings as in the GUI.
 `--package` uses the shared GUI process/package predicate when that metadata is
 stored; `--pid` and `--tid` match exact unsigned IDs. `--min-level` accepts
-V/D/I/W/E/F or full names. Metadata filters never match placeholder fields of
-marker/unparsed records. Each text filter is limited to 4096 UTF-8 bytes.
+V/D/I/W/E/F or full names. Omitted minimum level and explicit `V`/`verbose` are
+the same unrestricted threshold, including for cursor fingerprints. Message-only
+queries can include marker/unparsed records; package, Tag inclusion/exclusion,
+PID/TID or a level stricter than V exclude them because no corresponding log
+metadata exists. Each text filter is limited to 4096 UTF-8 bytes.
 
 Query `--since` (inclusive) and `--until` (exclusive) accept RFC3339 timestamps
 with explicit timezone (e.g. `2026-10-28T02:00:00Z`) or integer ages such as
@@ -147,78 +151,149 @@ The snapshot byte/sequence fence remains independent of the time window.
 `--time-basis received` (default) uses persisted host `observed_unix_ms`;
 `--time-basis device` requires the exact protobuf epoch. An otherwise matching
 record without the requested time returns `time_unavailable`, not an invented
-year/timezone or a silent omission. New default v1 captures add optional `observed_unix_ms`, sampled when the ADB
-adapter observes the record, before queue/backpressure waiting (the same clock
-as native provenance). This is host UTC receipt time, not device event time;
-host clock adjustments remain observable. It does not create a v1 session
-identity. Older v1 records lacking this optional field remain readable but
-return `time_unavailable` for receipt-time filtering; ordinary text logcat
-timestamps are not absolute instants. Explicit null also means unavailable;
+year/timezone or a silent omission. Native captures store `observed_unix_ms` in
+provenance, sampled when the ADB adapter observes the record, before
+queue/backpressure waiting. This is host UTC receipt time, not device event time;
+host clock adjustments remain observable. A missing host observation returns
+`time_unavailable` for receipt-time filtering; ordinary text logcat timestamps
+are not absolute instants. Explicit null also means unavailable;
 non-integer, negative, or out-of-u64 timestamp values are invalid records. Capture/start `--since` retains
 its separate device-logcat history syntax; it is not this offline query option.
 
+### Migrating query callers
+
+`query` now runs the former `query-v2` implementation. The old sequence-scanning
+query implementation and the `query-v2` command name are removed; there is no
+compatibility alias. `get-v2` and `context-v2` are likewise replaced by the sole
+names `get` and `context`. Historical release notes describe the commands
+available in those releases, not the current command set.
+
+For former `query-v2` callers, use `query` and start a fresh query. Its
+snapshot/tail modes, `--all`, full text/JSONL output, text presentation,
+resolved `time_window`, and response schema remain available. Snapshot byte and
+sequence fences now apply consistently to `query`, `get`, and `context`.
+The shared kind-aware filter policy treats omitted `--min-level` and explicit
+`V`/`verbose` identically: both permit event/unparsed message matches. Metadata
+predicates and stricter levels exclude those rows rather than matching internal
+placeholder fields. Cursor payloads
+now use version 4 and one canonical structured filter fingerprint; old version
+2/3 cursors and the literal-only fingerprint compatibility path are unsupported.
+The signing key is now `query.key`; the old `query-v2.key` is neither read nor
+migrated. Restart pagination without `--cursor` and obtain new `record_ref`
+values rather than reusing saved tokens. Tokens remain opaque, local handles,
+not portable evidence. Do not rename keys or hand-edit tokens to bypass this reset.
+
+Use `--tag` instead of the removed `--tag-include` alias. `get` rejects
+`--preview-bytes`, `--max-scan-bytes`, and `--max-scan-records`, which previously
+were accepted but unused; retain only `--max-response-bytes` to control its
+response chunks. `query` and `context` continue to support preview/scan budgets.
+
+For callers of the old `query`, this is a breaking argument and JSON contract
+change:
+
+| Old sequence query | Current `query` |
+| --- | --- |
+| `--after-seq N` / `next_after_seq` | Omit the cursor to start; continue with opaque `next_cursor` via `--cursor`. Numeric sequence positions cannot be converted into signed cursors. |
+| `schema_version: 1`, full `entries` | `schema_version: 2`, bounded `records` previews with `message_preview` and `record_ref`. Use `get` or `--all --format jsonl` for full records. |
+| `--limit` up to 10000 | `--limit` is 1–1000 (default 100), subject to per-page response/scan budgets. |
+| Top-level `scanned_records`, `scan_limited`, `stop_reason`, `partial` | Use `scan.records`, `scan.stop_reason`, `has_more`, `complete`, and the explicit `snapshot` boundary; old fields are not emitted. |
+| Reading the current file tail on each sequence page | Default `snapshot` fixes the first page's published boundary. Use `--mode tail` with a session to read later publications with the returned cursor; neither mode waits for future logs. |
+
+Restart old sequence pagination as a fresh query and update response parsing;
+do not pass a saved sequence number to `--cursor` or assume previews are full
+messages. Continue empty matching pages while `has_more=true`. Session queries
+read only the status-published native prefix; an unpublished
+partial tail is ignored, while a malformed published boundary fails explicitly
+instead of returning the old `partial` flag. Source/token failures use the current query API
+error codes described in the [query contract](agent-query.md), rather than the
+old v1-query error contract.
+
+Older storage layouts are also removed: neither CLI queries nor GUI import accepts
+v1 or expanded schema-2 JSONL/session sources. Native documents created by the old legacy importer
+are rejected too (`source.kind: legacy_v1`, `scope.kind: legacy_import`, or
+`legacy_original_seq` metadata). These are not generic JSONL import paths.
+Preserve old evidence separately; do not relabel its schema or fabricate native
+provenance to make it load. There is no automatic conversion or fallback.
+Current sources must be valid native documents or sessions; zero-byte files
+are invalid, while a header and matching zero-record footer form a valid empty
+document. The on-disk schema marker is an internal protocol constant, not a format option.
+
+### Migrating capture callers
+
+`capture` and `start` use one native document format. `--record-format` is removed,
+not renamed or ignored. Text transport remains the default; `--transport proto`
+explicitly selects experimental protobuf transport without changing the storage
+format. The CLI neither chooses transports automatically nor silently falls back.
+Remove old format flags and start a new session using the current CLI.
+
+Update JSONL consumers to handle the document header, `entry`/`event`/`unparsed`
+records, and final footer rather than assuming every line is a v1 entry. Native
+identity, process/provenance, text-loss and capture observations are retained.
+`--max-bytes` must be at least 8192 and includes header/footer bytes; 4096 bytes
+are reserved for the footer. Unexpected stream exits now follow the bounded
+native retry policy described below, rather than the former v1 exit behavior.
+
+Saved worker `config.json` files must contain the complete current transport,
+history scope and buffer fields, with no obsolete record-format field. Missing fields are no longer filled
+with old defaults. Start a new session with the current CLI; do not revive an
+old incomplete worker configuration or reuse an existing session directory.
+
 ## Commands
 
-Run `ciallogcat-cli --help` for the argument reference, or `query-v2 --help`,
-`get-v2 --help` and `context-v2 --help` for focused source, budget and pagination
+Run `ciallogcat-cli --help` for the argument reference, or `query --help`,
+`get --help` and `context --help` for focused source, budget and pagination
 instructions, including defaults and inclusive ranges. `-h` is also supported;
 help is plain text on stdout and requires neither ADB nor a source file.
 Control responses are JSON on stdout; diagnostics go to stderr.
 Captured records are JSONL: one JSON object per line. `capture --output -`
-(the default) streams only record JSONL to stdout for pipelines; its capture
-summary goes to stderr. An output path writes the records to that file.
+(the default) streams native document JSONL, including header/footer, to stdout
+for pipelines; its capture summary goes to stderr. An output path writes the
+document to that file.
 
 ```sh
 ciallogcat-cli devices
 ciallogcat-cli capture --serial DEVICE_SERIAL --output capture.jsonl --duration-secs 30 --max-bytes 67108864
 ciallogcat-cli start --serial DEVICE_SERIAL --session-dir ./capture-session --duration-secs 300 --max-bytes 67108864
 ciallogcat-cli status --session-dir ./capture-session
-ciallogcat-cli query --session-dir ./capture-session --after-seq 0 --limit 100 --query "timeout"
+ciallogcat-cli query --session-dir ./capture-session --limit 100 --query "timeout"
 ciallogcat-cli stop --session-dir ./capture-session
 ```
 
 `capture` runs in the foreground. `start` launches a local, finite background
 capture worker. Session directories must be new; existing files are not silently
 overwritten. `status`, `query`, and `stop` use the session directory rather than
-a network service. Query records in pages, using their sequence positions to
-avoid repeatedly returning the same records. Optional `--query TEXT` matches a
-case-sensitive literal substring in the message, using the shared filter
-semantics; it does not search tags and is not a regex. Capture defaults to the
+a network service; `query` also accepts an offline `--file`. Query records in
+pages, passing `next_cursor` as `--cursor` with the same source, mode and filters.
+Optional `--query TEXT` defaults to a case-sensitive literal substring in the
+message, using the shared filter semantics; `--regex` explicitly enables regex
+matching. Capture defaults to the
 same `main`, `system`, and `crash` buffers as the GUI. `--buffers LIST` selects
 comma-separated `main,system,crash,events,radio`, or `all` alone. Names must be
 exact, with no empty tokens or duplicates. There are no package, level, or regex
-capture flags; message filtering is available through query commands.
-`--limit` defaults to 100 (maximum 10000). Query returns an `entries` array,
-`next_after_seq`, `has_more`, `partial`, `scan_limited`, `complete`, and `stop_reason`. Pass
-`next_after_seq` back as `--after-seq` for the next page, including when matching
-returns no entries. The cursor advances over scanned nonmatches. Per-call scan
-limits are 16 MiB / 100000 candidate records after the cursor, with an
-8 MiB returned-record budget, plus the JSON envelope. `scan_limited` reports a candidate-scan budget being
-reached. These limits do not bound total input read: each query rereads and
-parses the earlier prefix from the start of the file, with no index, so later
-pages can read up to the entire configured capture size (default 1 GiB,
-maximum 1 GiB). Query cost grows with that prefix. `partial` means a trailing
-incomplete JSONL record was skipped and can be retried after the writer finishes.
-
-The legacy `query` command reads v1 sessions only. If `logs.jsonl` begins with a
-valid native v2/v3 header, it exits 3 with JSON error code `unsupported_format` and
-directs you to `query-v2 --session-dir DIR` using the same directory. This is a
-command/format mismatch, not evidence of file corruption. Malformed v1 records
-retain `invalid_session` errors. See the [v2 query contract](agent-query.md) for
-bounded responses, scan budgets and reference-based retrieval.
+capture flags; filtering is available through `query`.
+`--limit` defaults to 100 (maximum 1000) preview records per page. Query returns
+`records`, `next_cursor`, `has_more`, `complete`, `time_window`, and nested `scan`
+metadata. Continue while `has_more`, even if a page contains no matching records.
+Default per-page scan budgets are 16 MiB / 100000 candidate records; the JSON
+response budget is 64 KiB including the envelope. Scan budgets do not include
+all source-validation I/O; `scan.file_bytes_read` reports actual log-file reads.
+Use `get` for full records or `--all --format text|jsonl` to stream a finite
+snapshot. See the [query contract](agent-query.md) for budget ranges, snapshot/tail
+boundaries and reference-based retrieval.
 
 Both duration and output-byte bounds remain active for each capture:
 `--duration-secs` defaults to 600 (maximum 86400), and `--max-bytes` defaults
-to 1073741824 (1 GiB; also the maximum). This is a disk/output cap, not a RAM allocation, and reaching it stops capture; no rolling overwrite is introduced. Both must be positive. Optional
-`--max-entries` lowers the positive record bound (default and maximum 10000000). A v1 session ends when a bound is reached, ADB
-exits, a stop is requested, or an error occurs. V2 applies bounded reconnects as described below. This is a bounded capture tool,
+to 1073741824 (1 GiB; also the maximum), with a minimum of 8192. This is a disk/output cap, not a RAM allocation, and reaching it stops capture; no rolling overwrite is introduced. Duration must be positive. Optional
+`--max-entries` lowers the positive record bound (default and maximum 10000000).
+A session ends on a bound, a stop request, successful dump completion, or a
+terminal error; unexpected stream exits use bounded reconnects as described below. This is a bounded capture tool,
 not an indefinitely running daemon. Foreground Ctrl-C requests graceful
 shutdown and stops the CLI's owned ADB child. It does not install a service, autostart
 entry, remote endpoint, or HTTP server.
 
 ### Device history and finite snapshots
 
-`capture` and `start` accept the same history options for v1/v2/v3 and their supported transports:
+`capture` and `start` accept the same history options for both supported transports:
 
 - No history options: request the most recent record, then follow (`-T 1`).
 - `--tail N`: request the most recent N records, then follow (`-T N`). N is an
@@ -238,9 +313,9 @@ rejected. Device logcat support still determines whether a valid request succeed
 
 ```sh
 ciallogcat-cli capture --serial DEVICE_SERIAL --tail 500 --duration-secs 30
-ciallogcat-cli capture --serial DEVICE_SERIAL --since '10-23 12:30:00.000' --record-format v2 --output since.jsonl
-ciallogcat-cli capture --serial DEVICE_SERIAL --dump --tail 2000 --buffers main,crash --record-format v2 --output snapshot.jsonl
-ciallogcat-cli start --serial DEVICE_SERIAL --session-dir ./history --dump --since 1792742400.0 --record-format v2
+ciallogcat-cli capture --serial DEVICE_SERIAL --since '10-23 12:30:00.000' --output since.jsonl
+ciallogcat-cli capture --serial DEVICE_SERIAL --dump --tail 2000 --buffers main,crash --output snapshot.jsonl
+ciallogcat-cli start --serial DEVICE_SERIAL --session-dir ./history --dump --since 1792742400.0
 ```
 
 Host duration, record and byte budgets apply during both history retrieval and
@@ -248,7 +323,7 @@ following. They can stop a snapshot before device EOF. Clean snapshot EOF after
 the child is reaped and readers drain reports `reason: "snapshot_complete"` and
 does not reconnect; nonzero exits and reader errors retain error/interruption
 handling. This confirms the requested dump ended, not that logd retained every
-original record. Native completeness remains conservative. The v2/v3 header records
+original record. Native completeness remains conservative. The native header records
 `source.capture_scope` (typed mode/start), `source.logcat_scope_args`, actual
 `source.requested_buffers`, and `source.host_budgets`. A resumed follow attempt
 reissues its selected history request; there is no cross-attempt deduplication.
@@ -289,8 +364,7 @@ filesystems/permissions fail closed without a non-atomic overwrite fallback.
 
 `status` and session-based query/get/context commands in v1.2.1+ honor the immutable
 closure even if an old worker later publishes a newer status or appends records.
-The legacy `query` also caps reads to the frozen prefix. Existing references/cursors
-within that boundary remain usable; ones whose snapshot exceeds it are rejected
+Existing references/cursors within that boundary remain usable; ones whose snapshot exceeds it are rejected
 rather than silently expanded/truncated. A query racing closure may fail and should
 be reopened against the frozen session. Streaming may already have emitted a
 partial prefix, including bytes beyond a concurrently frozen boundary, before
@@ -332,20 +406,20 @@ for statuses, cancellation, serialized response bounds and mock-only validation.
 
 ## Native capture and Agent queries
 
-Use `--record-format v2` on `capture` or `start` to record a native document.
-The default remains v1 for existing scripts. V2 preserves record kinds, stable
+`capture` and `start` record the same native documents for text and protobuf
+transport. Native storage preserves record kinds, stable
 session/sequence references, host observation times and text-loss observations;
-its header and final footer let the GUI open the same evidence file. The v1
-`query` command does not read v2/v3 files: use the [Agent query commands](agent-query.md).
+its header and final footer let the GUI open the same evidence file. The shared
+`query` command reads native sources using the [Agent query contract](agent-query.md).
 
 ```sh
-ciallogcat-cli start --serial DEVICE_SERIAL --session-dir ./case-001 --record-format v2 --duration-secs 120
-ciallogcat-cli query-v2 --session-dir ./case-001 --mode tail --query timeout
+ciallogcat-cli start --serial DEVICE_SERIAL --session-dir ./case-001 --duration-secs 120
+ciallogcat-cli query --session-dir ./case-001 --mode tail --query timeout
 ciallogcat-cli stop --session-dir ./case-001
-ciallogcat-cli query-v2 --file ./case-001/logs.jsonl --mode snapshot
+ciallogcat-cli query --file ./case-001/logs.jsonl --mode snapshot
 ```
 
-V2 and V3 share the same capture pipeline, which retries unexpected stream exits at 1, 2 and 4 seconds, at most three times;
+Both transports share the same capture pipeline, which retries unexpected stream exits at 1, 2 and 4 seconds, at most three times;
 30 seconds of stable running restores the retry allowance. One session UUID and
 increasing sequence survive reconnects. `attempt` and `segment` distinguish
 streams. The owned child must be reaped and both readers drained before a new
@@ -357,13 +431,13 @@ observed concurrently with an intentional stop is recorded as
 Other decoding or cleanup failures remain errors. `finalized: true` only confirms
 that this artifact ended consistently, not that capture was complete.
 
-All attempts share the original duration, entry and byte limits. V2/V3's minimum
+All attempts share the original duration, entry and byte limits. The minimum
 `--max-bytes` is 8192; header and footer bytes count toward it, and 4096 bytes are
 reserved for the bounded footer. Metadata does not count as a log entry.
 Each footer diagnostic is limited to 1024 encoded JSON bytes, including JSON
 escaping, with an explicit truncation flag. This preserves space for the
 aggregate capture facts even when diagnostics contain control characters.
-The status adds `record_schema_version: 2|3`, `artifact_id`, `session_id` and
+Status carries an internal `record_schema_version` marker, `artifact_id`, `session_id` and
 `visible_end: {seq, offset}`, `capture_completeness`, `stream_interruptions` and
 `last_stream_error`. Completion of the bounded command can coexist with a
 partial source capture; inspect these observations, not only the exit code.
@@ -375,38 +449,36 @@ complete-file import rejects missing footers. Readiness still only confirms
 that the host ADB process started; the first query may legitimately be empty.
 
 An explicit experimental transport is available with
-`--record-format v2 --transport proto`. It requires target `shell_v2` support and
+`--transport proto`. It requires target `shell_v2` support and
 uses `adb shell -T -n` with separate stdout/stderr and no PTY. Unsupported devices
-or malformed frames fail without silent text fallback. It preserves bounded
-protobuf payloads and original tag/message bytes as base64, independently of
-normalized display text. AOSP Android 15+ has the schema; vendor and host-channel
+or malformed frames fail without silent text fallback. It preserves each bounded
+protobuf payload as base64, retaining original tag/message bytes inside that
+payload independently of normalized display text. AOSP Android 15+ has the schema; vendor and host-channel
 compatibility still needs device validation. See [protobuf findings](logcat-protobuf.md).
 
-Explicit `--record-format v3 --transport proto` records compact native v3: each
-proto payload is stored once and display fields are derived with the frozen
-`aosp_logcat_16r1_host_v1` projection. V3 with text (including an omitted
-`--transport`) is rejected before capture. Defaults remain v1/text; explicit
-v2/text and v2/proto retain their existing storage contracts. V3 shares the v2
-history options, total budgets, retry policy, flush-before-publication watermarks
-and status handling.
+The native format stores each protobuf payload once and derives display fields
+with the frozen `aosp_logcat_16r1_host_v1` projection. Text entries, events and
+unparsed rows use ordinary native fields in the same format. Transport choice
+does not select a storage version. Both transports share history options, total
+budgets, retry policy, flush-before-publication watermarks and status handling.
 
 ```sh
-ciallogcat-cli start --serial DEVICE_SERIAL --session-dir ./compact --record-format v3 --transport proto --duration-secs 120
-ciallogcat-cli query-v2 --session-dir ./compact --mode tail --start-at end
-ciallogcat-cli query-v2 --session-dir ./compact --mode tail --cursor '<next_cursor>'
-ciallogcat-cli get-v2 --session-dir ./compact --ref '<record_ref>' --view decoded
+ciallogcat-cli start --serial DEVICE_SERIAL --session-dir ./compact --transport proto --duration-secs 120
+ciallogcat-cli query --session-dir ./compact --mode tail --start-at end
+ciallogcat-cli query --session-dir ./compact --mode tail --cursor '<next_cursor>'
+ciallogcat-cli get --session-dir ./compact --ref '<record_ref>' --view decoded
 ```
 
-`query-v2`, `get-v2` and `context-v2` retain their API names and response version
-2, and report `source_schema_version: 3` for v3. `--start-at beginning|end`
-defaults to beginning; end requires a native v2/v3 session in tail mode without
+`query`, `get` and `context` use response schema version 2, independently
+of command names and the internal source schema marker. `--start-at beginning|end`
+defaults to beginning; end requires a native session in tail mode without
 a cursor. It returns an empty page at the published boundary, with the skipped
 prefix explicitly unscanned. Continue with the returned cursor.
 
-`get-v2 --view stored` is the default and returns the original archive JSON line.
+`get --view stored` is the default and returns the original archive JSON line.
 `--view decoded` returns full structured JSON, including complete message,
 metadata and extensions, marked as a derived view rather than archived bytes.
-It is not a v3 archive record for writing back. Join UTF-8 chunks using
+It is not a stored archive record for writing back. Join UTF-8 chunks using
 `next_text_offset`, keeping the same view. Stored lines retain the 8 MiB limit;
 decoded views have a separate 64 MiB cap to allow escaped protobuf text to expand.
 Every response still obeys `--max-response-bytes`. See the
@@ -414,8 +486,8 @@ Every response still obeys `--max-response-bytes`. See the
 
 ## Integrate with an existing test executor
 
-[examples/agent_capture.py](../examples/agent_capture.py) starts a finite v2
-session (fixed record_schema_version=2; it does not accept or create v3),
+[examples/agent_capture.py](../examples/agent_capture.py) starts a finite native
+session using the same current format as the CLI,
 invokes an explicitly supplied command without a shell, stops capture
 in `finally`, and returns a schema-2 workflow report with test outcome, capture
 state, action boundaries and a bounded evidence window separately. It establishes
@@ -428,8 +500,8 @@ python3 examples/agent_capture.py --serial DEVICE_SERIAL --session-dir ./case-00
 ```
 
 The executor's output streams to stderr. JSON on stdout contains at most 20
-record previews and continuation/reference tokens; use `query-v2`, `get-v2` and
-`context-v2` to request more. A test passing does not imply capture succeeded.
+record previews and continuation/reference tokens; use `query`, `get` and
+`context` to request more. A test passing does not imply capture succeeded.
 The example reaps the direct executor and, on POSIX, terminates its private process
 group. On Windows, descendants remain the executor's responsibility. Device cleanup
 always belongs to the supplied executor. See the [workflow contract](agent-test-workflow.md)
@@ -439,23 +511,25 @@ session/sequence identities. This example adds no resident service or model API.
 
 ## JSON and exit codes
 
-Existing control responses and v1 records use `schema_version: 1` and a `type` discriminator.
-V2 record files and the new query responses explicitly use version 2.
+Capture/control responses use `schema_version: 1` and a `type` discriminator.
+This control-envelope version does not enable storage-v1 reading or writing.
+Query/get/context responses use version 2, independently of the source archive
+layout. The fixed internal archive marker is `source_schema_version: 3`;
+control/query and archive markers describe different protocols, not user choices.
 Entry fields include `seq`, `time`, `pid`, `tid`, `level`, `tag`, and `message`.
 Status includes `state`, `readiness`, `entries`, `bytes`, `reason`, and `stale`.
 The current writer publishes `entries` and `bytes` together after a complete
 JSONL record is written and flushed from user-space buffers. A partial write or
 failed flush does not advance that confirmed prefix. This is visibility to
-other processes, not a per-record disk-sync guarantee. Existing v1 `query`
-still scans the file and reports an incomplete tail; it does not yet implement
-fixed-snapshot pagination using the status boundary, except that administratively
-closed sessions are strictly capped at their immutable published prefix.
+other processes, not a per-record disk-sync guarantee. Session queries use this
+published boundary for all record formats; snapshot pagination fixes its initial
+boundary and administrative closure caps reads at the immutable frozen prefix.
 Normal completion reasons include `max_entries`, `max_bytes`, `duration_limit`,
-`stopped`, and `adb_exit`; a failed capture reports its error instead.
+`stopped`, and `snapshot_complete`; a failed capture reports its error instead.
 `omitted_by_limit: true` means a configured output/entry limit was reached and
 capture may be truncated; it does not prove additional records existed.
 `discarded_entries` counts backend records received but not confirmed written,
-including structural and fallback records represented as v1 entries. It
+including structural and unparsed records. It
 excludes unread device records and cannot establish end-to-end
 losslessness. Diagnostics retain only the last line; `diagnostic_dropped_count`
 is the number of earlier received diagnostic lines no longer retained.
@@ -489,21 +563,18 @@ fields rather than match diagnostic prose.
 - Records are normalized parsed output, not forensic raw capture. Invalid
   UTF-8 is replaced; the shared core's 1 MiB input-line limit and truncation
   notices apply. Nonempty undecodable lines are retained as fallback records.
-  V1 preserves its existing entry shape, so it cannot distinguish those lines
-  from structural markers or carry the core's process-hint provenance.
   There is no guarantee that every device record is captured during startup,
   process discovery, disconnection, or shutdown.
 
-The shared `record_io` codec reads this v1 format with an 8 MiB encoded-record
-limit and validates required fields and increasing sequences. Sequence gaps
-are permitted, and unknown optional fields are preserved. The query now rejects
-incomplete or wrongly typed required v1 fields that the old permissive reader
-could pass through; records produced by the CLI retain their original shape.
-Invalid complete records report their line/byte position; no
-malformed line is silently skipped. Explicit offline readers accept a valid
-last record without a newline, as allowed by JSON Lines. Active session queries
-keep the existing `partial` behavior for a non-newline-terminated tail. V1 has
-no completeness footer, so a valid file alone does not prove continuous capture.
+The shared `document` codec reads native with an 8 MiB encoded-line limit
+for headers, records and footers. It validates required identity, increasing
+sequences, export scope and footer consistency. Sequence gaps are permitted,
+and unknown optional fields are preserved unless they are reserved or explicitly
+unsupported. Invalid records fail rather than being silently skipped. Offline
+files require a valid footer, which may omit its trailing newline. Session
+queries read only the published prefix and reject incomplete records within that
+boundary; an unpublished partial tail is not read. Neither a valid footer nor a
+successful query proves continuous capture.
 - Mock-based tests and release smoke tests do not establish real-device
   reliability, prolonged memory stability, or compatibility with every host.
 

@@ -105,32 +105,53 @@ fn public_parser_preserves_threadtime_and_fallback_contract() {
 }
 
 #[test]
-fn structural_markers_are_not_unknown_logs_and_keep_other_filter_conditions() {
+fn structural_rows_have_no_log_metadata_but_keep_message_and_default_level_filters() {
     let marker = LogEntry::marker("--------- beginning of crash");
     let unparsed = LogEntry::unparsed("unrecognized device output");
     let log = LogEntry::new("", 42, 42, "Tag", Level::Info, "unknown process");
-    for (filter, marker_matches) in [
-        (spec("com.example.app", Level::Info, "", false, false), true),
+    for (filter, expected) in [
         (
-            spec("com.example.app", Level::Warn, "", false, false),
-            false,
+            spec("", Level::Verbose, "", false, false),
+            [true, true, true],
         ),
         (
-            spec("com.example.app", Level::Info, "crash", false, false),
-            true,
+            spec("", Level::Verbose, "crash", false, false),
+            [true, false, false],
         ),
         (
-            spec("com.example.app", Level::Info, "missing", false, false),
-            false,
+            spec("", Level::Verbose, "device", false, false),
+            [false, true, false],
+        ),
+        (
+            spec("", Level::Verbose, "missing", false, false),
+            [false, false, false],
+        ),
+        (
+            spec("com.example.app", Level::Verbose, "", false, false),
+            [false, false, false],
+        ),
+        (
+            spec("", Level::Info, "", false, false),
+            [false, false, true],
+        ),
+        (
+            spec("", Level::Warn, "", false, false),
+            [false, false, false],
         ),
     ] {
         let matcher = compile_matcher(&filter).unwrap();
         assert_eq!(
-            entry_matches(&marker, &filter, matcher.as_ref()),
-            marker_matches
+            [&marker, &unparsed, &log].map(|entry| entry_matches(entry, &filter, matcher.as_ref())),
+            expected
         );
-        assert!(!entry_matches(&unparsed, &filter, matcher.as_ref()));
-        assert!(!entry_matches(&log, &filter, matcher.as_ref()));
+    }
+    for (include, exclude) in [("logcat", ""), ("", "Absent")] {
+        let mut filter = spec("", Level::Verbose, "", false, false);
+        filter.tag_include = include.into();
+        filter.tag_exclude = exclude.into();
+        assert!(!entry_matches(&marker, &filter, None));
+        assert!(!entry_matches(&unparsed, &filter, None));
+        assert_eq!(entry_matches(&log, &filter, None), include.is_empty());
     }
     let mut store = LogStore::default();
     store.push(marker);
@@ -282,7 +303,7 @@ fn callback_can_take_published_filter_and_highlight_results() {
     sender.send(request(
         2,
         Arc::new(entries),
-        spec("", Level::Info, "needle", false, false),
+        spec("", Level::Verbose, "needle", false, false),
     ));
     let (filter, _) = completed_rx.recv_timeout(WAIT).unwrap();
     let filter = filter.expect("worker must recover after invalid regex");

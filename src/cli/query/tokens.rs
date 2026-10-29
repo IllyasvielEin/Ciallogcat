@@ -42,7 +42,7 @@ fn unhex(text: &str) -> Result<Vec<u8>> {
 }
 
 fn invalid() -> super::super::Error {
-    error("invalid_token", "invalid or unauthenticated v2 token", 3)
+    error("invalid_token", "invalid or unauthenticated query token", 3)
 }
 
 pub(super) struct Signer([u8; 32]);
@@ -57,11 +57,11 @@ impl Signer {
             )
         })?;
         fs::create_dir_all(&directory).map_err(io_error)?;
-        let path = directory.join("query-v2.key");
+        let path = directory.join("query.key");
         if !path.try_exists().map_err(io_error)? {
             // Publish only a complete key. Concurrent first callers may race;
             // exactly one hard link wins and all callers read the winning key.
-            let temporary = directory.join(format!(".query-v2-{}.key", uuid::Uuid::new_v4()));
+            let temporary = directory.join(format!(".query-{}.key", uuid::Uuid::new_v4()));
             let mut bytes = [0u8; 32];
             bytes[..16].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
             bytes[16..].copy_from_slice(uuid::Uuid::new_v4().as_bytes());
@@ -87,7 +87,7 @@ impl Signer {
             if metadata.permissions().mode() & 0o077 != 0 {
                 return Err(error(
                     "token_key_unavailable",
-                    "v2 token key must be private (mode 0600)",
+                    "query token key must be private (mode 0600)",
                     5,
                 ));
             }
@@ -95,13 +95,13 @@ impl Signer {
         if metadata.len() != 32 {
             return Err(error(
                 "token_key_unavailable",
-                "invalid v2 token key length",
+                "invalid query token key length",
                 5,
             ));
         }
         let bytes: [u8; 32] = read_limited(&path, 32)?
             .try_into()
-            .map_err(|_| error("token_key_unavailable", "invalid v2 token key length", 5))?;
+            .map_err(|_| error("token_key_unavailable", "invalid query token key length", 5))?;
         Ok(Self(bytes))
     }
 

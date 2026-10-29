@@ -8,6 +8,9 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
+#[path = "support/native_fixture.rs"]
+mod native_fixture;
+
 struct ChildGuard(Child);
 impl Drop for ChildGuard {
     fn drop(&mut self) {
@@ -56,11 +59,30 @@ impl Sandbox {
     }
     fn file(&self, rows: &[Value]) -> String {
         let path = self.path("logs.jsonl");
-        let mut file = File::create(&path).unwrap();
-        for row in rows {
-            writeln!(file, "{row}").unwrap();
-        }
+        fs::write(&path, native_fixture::bytes(rows, true)).unwrap();
         path
+    }
+    fn session(&self, rows: &[Value]) -> String {
+        let directory = self.path("session");
+        fs::create_dir(&directory).unwrap();
+        fs::write(
+            Path::new(&directory).join("logs.jsonl"),
+            native_fixture::bytes(rows, false),
+        )
+        .unwrap();
+        self.publish(
+            &directory,
+            rows.last().map_or(0, |row| row["seq"].as_u64().unwrap()),
+        );
+        directory
+    }
+    fn publish(&self, directory: &str, seq: u64) {
+        let bytes = fs::metadata(Path::new(directory).join("logs.jsonl"))
+            .unwrap()
+            .len();
+        let mut status = json!({"schema_version":1,"type":"status","state":"running","updated_unix_ms":u64::MAX});
+        native_fixture::set_status(&mut status, seq, bytes);
+        fs::write(Path::new(directory).join("status.json"), status.to_string()).unwrap();
     }
     fn run(&self, args: &[&str]) -> Output {
         let id = uuid::Uuid::new_v4();
@@ -99,8 +121,9 @@ impl Sandbox {
     }
 }
 fn row(seq: u64, message: &str) -> Value {
-    json!({"schema_version":1,"type":"entry","seq":seq,"time":"10-28 00:00:00.000", "pid":42,"tid":43,"level":"I","tag":"AppTag","message":message})
+    native_fixture::row(seq, message, None)
 }
+
 fn seqs(page: &Value) -> Vec<u64> {
     page["records"]
         .as_array()
@@ -119,7 +142,7 @@ fn all_crosses_empty_and_sparse_scan_pages_until_explicit_completion() {
     let file = sandbox.file(&rows);
     let page = sandbox
         .run(&[
-            "query-v2",
+            "query",
             "--file",
             &file,
             "--query",
@@ -133,7 +156,7 @@ fn all_crosses_empty_and_sparse_scan_pages_until_explicit_completion() {
     assert_eq!(page["has_more"], true);
     assert_eq!(page["scan"]["stop_reason"], "scan_budget");
     let output = sandbox.run(&[
-        "query-v2",
+        "query",
         "--file",
         &file,
         "--query",
@@ -149,7 +172,7 @@ fn all_crosses_empty_and_sparse_scan_pages_until_explicit_completion() {
     assert_eq!(summary["total_scanned_records"], 9);
     assert!(summary["pages"].as_u64().unwrap() >= 5);
     let empty = sandbox.run(&[
-        "query-v2",
+        "query",
         "--file",
         &file,
         "--query",
@@ -170,7 +193,7 @@ fn full_utf8_streams_ignore_preview_and_response_sizes() {
     let original = row(1, &message);
     let file = sandbox.file(std::slice::from_ref(&original));
     let output = sandbox.run(&[
-        "query-v2",
+        "query",
         "--file",
         &file,
         "--all",
@@ -182,7 +205,7 @@ fn full_utf8_streams_ignore_preview_and_response_sizes() {
     assert_eq!(output.rows(), vec![original]);
     assert_eq!(output.summary()["records_returned"], 1);
     let text = sandbox.run(&[
-        "query-v2",
+        "query",
         "--file",
         &file,
         "--all",
@@ -203,13 +226,13 @@ fn one_page_stream_has_only_records_on_stdout_and_resumable_stderr() {
     let rows = [row(1, "first"), row(2, "second")];
     let file = sandbox.file(&rows);
     let first = sandbox.run(&[
-        "query-v2", "--file", &file, "--format", "jsonl", "--limit", "1",
+        "query", "--file", &file, "--format", "jsonl", "--limit", "1",
     ]);
     assert_eq!(first.rows(), vec![rows[0].clone()]);
     let summary = first.summary();
     assert_eq!(summary["complete"], false);
     let second = sandbox.run(&[
-        "query-v2",
+        "query",
         "--file",
         &file,
         "--format",
@@ -224,11 +247,12 @@ fn one_page_stream_has_only_records_on_stdout_and_resumable_stderr() {
 #[test]
 fn snapshot_cursor_does_not_expand_after_file_append_and_binds_filters() {
     let sandbox = Sandbox::new();
-    let file = sandbox.file(&[row(1, "Match"), row(2, "MATCH")]);
+    let directory = sandbox.session(&[row(1, "Match"), row(2, "MATCH")]);
+    let file = Path::new(&directory).join("logs.jsonl");
     let args = [
-        "query-v2",
-        "--file",
-        &file,
+        "query",
+        "--session-dir",
+        &directory,
         "--query",
         "^match$",
         "--regex",
@@ -255,6 +279,7 @@ fn snapshot_cursor_does_not_expand_after_file_append_and_binds_filters() {
     let mut mismatch = next.clone();
     mismatch[6] = "--case-sensitive";
     sandbox.fail(&mismatch, "cursor_mismatch");
+    sandbox.publish(&directory, 3);
     let fresh = sandbox.run(&args[..args.len() - 2]).page();
     assert_eq!(seqs(&fresh), [1, 2, 3]);
 }
@@ -274,19 +299,19 @@ fn message_case_tag_pid_tid_and_level_predicates_combine() {
     rows[4]["level"] = "D".into();
     let file = sandbox.file(&rows);
     let literal = sandbox
-        .run(&["query-v2", "--file", &file, "--query", "Error"])
+        .run(&["query", "--file", &file, "--query", "Error"])
         .page();
     assert_eq!(seqs(&literal), [1]);
     let filtered = sandbox
         .run(&[
-            "query-v2",
+            "query",
             "--file",
             &file,
             "--query",
             "^error [0-9]+$",
             "--regex",
             "--ignore-case",
-            "--tag-include",
+            "--tag",
             "App",
             "--tag-exclude",
             "Other",
@@ -300,13 +325,13 @@ fn message_case_tag_pid_tid_and_level_predicates_combine() {
         .page();
     assert_eq!(seqs(&filtered), [1, 2]);
     let excluded = sandbox
-        .run(&["query-v2", "--file", &file, "--tag-exclude", "App"])
+        .run(&["query", "--file", &file, "--tag-exclude", "App"])
         .page();
     assert_eq!(seqs(&excluded), [3]);
 }
 
 #[test]
-fn invalid_regex_incompatible_modes_and_ambiguous_legacy_time_fail_explicitly() {
+fn invalid_regex_incompatible_modes_and_missing_time_fail_explicitly() {
     let sandbox = Sandbox::new();
     let file = sandbox.file(&[row(1, "anything")]);
     for flags in [
@@ -317,23 +342,17 @@ fn invalid_regex_incompatible_modes_and_ambiguous_legacy_time_fail_explicitly() 
         vec!["--pid", "-1"],
         vec!["--tag", "a", "--tag-include", "b"],
     ] {
-        let mut args = vec!["query-v2", "--file", &file];
+        let mut args = vec!["query", "--file", &file];
         args.extend(flags);
         sandbox.fail(&args, "invalid_arguments");
     }
     sandbox.fail(
-        &[
-            "query-v2",
-            "--file",
-            &file,
-            "--since",
-            "2026-01-01T00:00:00Z",
-        ],
+        &["query", "--file", &file, "--since", "2026-01-01T00:00:00Z"],
         "time_unavailable",
     );
     sandbox.fail(
         &[
-            "query-v2",
+            "query",
             "--file",
             &file,
             "--since",
@@ -392,7 +411,7 @@ fn received_time_range_is_inclusive_exclusive_and_timezone_exact_across_year() {
     let file = native_file(&sandbox, &[midnight - 1, midnight, midnight + 1]);
     let page = sandbox
         .run(&[
-            "query-v2",
+            "query",
             "--file",
             &file,
             "--since",
@@ -405,7 +424,7 @@ fn received_time_range_is_inclusive_exclusive_and_timezone_exact_across_year() {
     assert_eq!(page["complete"], true);
     sandbox.fail(
         &[
-            "query-v2",
+            "query",
             "--file",
             &file,
             "--since",
@@ -414,13 +433,7 @@ fn received_time_range_is_inclusive_exclusive_and_timezone_exact_across_year() {
         "invalid_arguments",
     );
     sandbox.fail(
-        &[
-            "query-v2",
-            "--file",
-            &file,
-            "--since",
-            "2026-02-29T00:00:00Z",
-        ],
+        &["query", "--file", &file, "--since", "2026-02-29T00:00:00Z"],
         "invalid_arguments",
     );
 }
@@ -434,15 +447,13 @@ fn relative_time_cursor_reuses_first_page_anchor() {
         .as_millis() as u64;
     let file = native_file(&sandbox, &[now - 500, now - 400]);
     let first = sandbox
-        .run(&[
-            "query-v2", "--file", &file, "--since", "30s", "--limit", "1",
-        ])
+        .run(&["query", "--file", &file, "--since", "30s", "--limit", "1"])
         .page();
     assert_eq!(seqs(&first), [1]);
     std::thread::sleep(Duration::from_millis(20));
     let second = sandbox
         .run(&[
-            "query-v2",
+            "query",
             "--file",
             &file,
             "--since",
@@ -458,120 +469,115 @@ fn relative_time_cursor_reuses_first_page_anchor() {
 }
 
 #[test]
-fn protobuf_device_time_filters_preserve_nanosecond_boundaries_in_v2_and_v3() {
-    use ciallogcat::document::{
-        self, CaptureStatus, Document, DocumentHeader, ExportScope, NativeFormat,
-    };
+fn protobuf_device_time_filters_preserve_nanosecond_boundaries_in_native_records() {
+    use ciallogcat::document::{self, CaptureStatus, Document, DocumentHeader, ExportScope};
     use ciallogcat::log_store::LogStore;
     use ciallogcat::model::LogBuffer;
     use ciallogcat::session::Session;
     use std::sync::{Arc, atomic::AtomicBool};
-    for format in [NativeFormat::V2, NativeFormat::CompactV3] {
-        let sandbox = Sandbox::new();
-        let mut session = Session::new();
-        session.begin_attempt().unwrap();
-        session.stream_started().unwrap();
-        let mut store = LogStore::default();
-        for nanos in 1..=3 {
-            let mut payload =
-                b"\x08\x01\x10\x01\x18\x04\x28\x2a\x30\x2b\x3a\x03Tag\x42\x03msg".to_vec();
-            payload[3] = nanos;
-            let mut entry = ciallogcat::protobuf::DecodedEntry::decode_payload(payload)
-                .unwrap()
-                .project();
-            entry.provenance = session.next_record(Some(99_000));
-            store.push(entry);
-        }
-        let mut header = DocumentHeader::live(session.id(), "TEST".into(), vec![LogBuffer::Main]);
-        header.source.transport_format = Some("logcat_proto_experimental".into());
-        header.set_format(format).unwrap();
-        let mut document = Document::from_snapshot(
-            header,
-            Arc::new(store),
-            ExportScope::default(),
-            CaptureStatus::default(),
-        )
-        .unwrap();
-        let future = json!({"nested":["雪", 42, null]});
-        for metadata in &mut document.record_metadata {
-            metadata.extra.insert("future".into(), future.clone());
-            metadata.proto_extra.insert("future".into(), future.clone());
-            metadata
-                .provenance_extra
-                .insert("future".into(), future.clone());
-        }
-        let file = sandbox.path("proto.jsonl");
-        document::write_snapshot(
-            File::create(&file).unwrap(),
-            &document,
-            &AtomicBool::new(false),
-        )
-        .unwrap();
-        let page = sandbox
-            .run(&[
-                "query-v2",
-                "--file",
-                &file,
-                "--time-basis",
-                "device",
-                "--since",
-                "1970-01-01T00:00:01.000000002Z",
-                "--until",
-                "1970-01-01T00:00:01.000000003Z",
-            ])
-            .page();
-        assert_eq!(seqs(&page), [2]);
-        assert_eq!(page["complete"], true);
-        // The same numeric range does not match host receive-time provenance.
-        let received = sandbox
-            .run(&[
-                "query-v2",
-                "--file",
-                &file,
-                "--since",
-                "1970-01-01T00:00:01Z",
-                "--until",
-                "1970-01-01T00:00:02Z",
-            ])
-            .page();
-        assert!(seqs(&received).is_empty());
-
-        let stream = sandbox.run(&[
-            "query-v2",
+    let sandbox = Sandbox::new();
+    let mut session = Session::new();
+    session.begin_attempt().unwrap();
+    session.stream_started().unwrap();
+    let mut store = LogStore::default();
+    for nanos in 1..=3 {
+        let mut payload =
+            b"\x08\x01\x10\x01\x18\x04\x28\x2a\x30\x2b\x3a\x03Tag\x42\x03msg".to_vec();
+        payload[3] = nanos;
+        let mut entry = ciallogcat::protobuf::DecodedEntry::decode_payload(payload)
+            .unwrap()
+            .project();
+        entry.provenance = session.next_record(Some(99_000));
+        store.push(entry);
+    }
+    let mut header = DocumentHeader::live(session.id(), "TEST".into(), vec![LogBuffer::Main]);
+    header.source.transport_format = Some("logcat_proto_experimental".into());
+    let mut document = Document::from_snapshot(
+        header,
+        Arc::new(store),
+        ExportScope::default(),
+        CaptureStatus::default(),
+    )
+    .unwrap();
+    let future = json!({"nested":["雪", 42, null]});
+    for metadata in &mut document.record_metadata {
+        metadata.extra.insert("future".into(), future.clone());
+        metadata.proto_extra.insert("future".into(), future.clone());
+        metadata
+            .provenance_extra
+            .insert("future".into(), future.clone());
+    }
+    let file = sandbox.path("proto.jsonl");
+    document::write_snapshot(
+        File::create(&file).unwrap(),
+        &document,
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    let page = sandbox
+        .run(&[
+            "query",
             "--file",
             &file,
-            "--all",
-            "--format",
-            "jsonl",
-            "--max-scan-records",
-            "1",
-        ]);
-        assert_eq!(stream.summary()["records_returned"], 3);
-        assert_eq!(stream.summary()["complete"], true);
-        let streamed = stream.rows();
-        let references = sandbox.run(&["query-v2", "--file", &file]).page();
-        for (index, streamed) in streamed.iter().enumerate() {
-            let decoded = sandbox
-                .run(&[
-                    "get-v2",
-                    "--file",
-                    &file,
-                    "--ref",
-                    references["records"][index]["record_ref"].as_str().unwrap(),
-                    "--view",
-                    "decoded",
-                ])
-                .page();
-            assert_eq!(decoded["complete"], true);
-            let decoded: Value =
-                serde_json::from_str(decoded["record_json_chunk"].as_str().unwrap()).unwrap();
-            assert_eq!(*streamed, decoded);
-            assert_eq!(streamed["future"], future);
-            assert_eq!(streamed["proto"]["future"], future);
-            assert_eq!(streamed["provenance"]["future"], future);
-            assert!(streamed["proto"]["raw_payload"].is_string());
-            assert!(streamed["proto"]["message_bytes"].is_string());
-        }
+            "--time-basis",
+            "device",
+            "--since",
+            "1970-01-01T00:00:01.000000002Z",
+            "--until",
+            "1970-01-01T00:00:01.000000003Z",
+        ])
+        .page();
+    assert_eq!(seqs(&page), [2]);
+    assert_eq!(page["complete"], true);
+    // The same numeric range does not match host receive-time provenance.
+    let received = sandbox
+        .run(&[
+            "query",
+            "--file",
+            &file,
+            "--since",
+            "1970-01-01T00:00:01Z",
+            "--until",
+            "1970-01-01T00:00:02Z",
+        ])
+        .page();
+    assert!(seqs(&received).is_empty());
+
+    let stream = sandbox.run(&[
+        "query",
+        "--file",
+        &file,
+        "--all",
+        "--format",
+        "jsonl",
+        "--max-scan-records",
+        "1",
+    ]);
+    assert_eq!(stream.summary()["records_returned"], 3);
+    assert_eq!(stream.summary()["complete"], true);
+    let streamed = stream.rows();
+    let references = sandbox.run(&["query", "--file", &file]).page();
+    for (index, streamed) in streamed.iter().enumerate() {
+        let decoded = sandbox
+            .run(&[
+                "get",
+                "--file",
+                &file,
+                "--ref",
+                references["records"][index]["record_ref"].as_str().unwrap(),
+                "--view",
+                "decoded",
+            ])
+            .page();
+        assert_eq!(decoded["complete"], true);
+        let decoded: Value =
+            serde_json::from_str(decoded["record_json_chunk"].as_str().unwrap()).unwrap();
+        assert_eq!(*streamed, decoded);
+        assert_eq!(streamed["future"], future);
+        assert_eq!(streamed["proto"]["future"], future);
+        assert_eq!(streamed["provenance"]["future"], future);
+        assert!(streamed["proto"]["raw_payload"].is_string());
+        assert!(streamed["proto"]["message_bytes"].is_string());
     }
 }
 
@@ -606,16 +612,18 @@ fn capture_default_is_one_gib_disk_cap_not_an_unbounded_duration() {
 fn late_stream_validation_failure_keeps_prefix_but_never_emits_success_summary() {
     let sandbox = Sandbox::new();
     let first = row(1, "valid prefix");
-    let file = sandbox.file(std::slice::from_ref(&first));
+    let directory = sandbox.session(std::slice::from_ref(&first));
+    let file = Path::new(&directory).join("logs.jsonl");
     writeln!(
         OpenOptions::new().append(true).open(&file).unwrap(),
         "not JSON"
     )
     .unwrap();
+    sandbox.publish(&directory, 2);
     let output = sandbox.run(&[
-        "query-v2",
-        "--file",
-        &file,
+        "query",
+        "--session-dir",
+        &directory,
         "--all",
         "--format",
         "jsonl",
@@ -632,20 +640,20 @@ fn late_stream_validation_failure_keeps_prefix_but_never_emits_success_summary()
 }
 
 #[test]
-fn legacy_optional_received_time_filters_without_inventing_capture_identity() {
+fn native_received_time_filters_preserve_capture_identity() {
     let sandbox = Sandbox::new();
     let midnight = 1_767_225_600_000u64;
     let rows: Vec<_> = (0..3)
         .map(|i| {
-            let mut record = row(i + 1, "v1 observed");
-            record["observed_unix_ms"] = (midnight + i).into();
+            let mut record = row(i + 1, "native observed");
+            record["provenance"]["observed_unix_ms"] = (midnight + i).into();
             record
         })
         .collect();
     let file = sandbox.file(&rows);
     let page = sandbox
         .run(&[
-            "query-v2",
+            "query",
             "--file",
             &file,
             "--since",
@@ -655,23 +663,23 @@ fn legacy_optional_received_time_filters_without_inventing_capture_identity() {
         ])
         .page();
     assert_eq!(seqs(&page), [2]);
-    assert!(page["records"][0]["identity"].is_null());
-    assert_eq!(page["records"][0]["identity_scope"], "artifact_local");
+    assert_eq!(page["records"][0]["identity"], rows[1]["provenance"]);
+    assert_eq!(page["records"][0]["identity_scope"], "capture_session");
     let reference = page["records"][0]["record_ref"].as_str().unwrap();
     let get = sandbox
         .run(&[
-            "get-v2", "--file", &file, "--ref", reference, "--view", "decoded",
+            "get", "--file", &file, "--ref", reference, "--view", "decoded",
         ])
         .page();
-    assert!(get["identity"].is_null());
+    assert_eq!(get["identity"], rows[1]["provenance"]);
     let decoded: Value = serde_json::from_str(get["record_json_chunk"].as_str().unwrap()).unwrap();
     assert_eq!(decoded, rows[1]);
-    assert!(decoded.get("provenance").is_none());
+    assert_eq!(decoded["provenance"], rows[1]["provenance"]);
     assert!(decoded.get("session_id").is_none());
     // Optional receive time does not turn yearless text into an exact device clock.
     sandbox.fail(
         &[
-            "query-v2",
+            "query",
             "--file",
             &file,
             "--since",
@@ -684,43 +692,42 @@ fn legacy_optional_received_time_filters_without_inventing_capture_identity() {
 }
 
 #[test]
-fn legacy_received_time_and_unknown_fields_survive_every_query_view() {
+fn native_received_time_and_unknown_fields_survive_every_query_view() {
     let sandbox = Sandbox::new();
-    let mut original = row(1, "legacy extensions 雪");
-    original["observed_unix_ms"] = 1_767_225_600_123u64.into();
+    let mut original = row(1, "native extensions 雪");
+    original["provenance"]["observed_unix_ms"] = 1_767_225_600_123u64.into();
     original["future"] = json!({"nested":["雪",null,true], "precise":18446744073709551615u64});
     let file = sandbox.file(std::slice::from_ref(&original));
-    let page = sandbox.run(&["query-v2", "--file", &file]).page();
+    let page = sandbox.run(&["query", "--file", &file]).page();
     let reference = page["records"][0]["record_ref"].as_str().unwrap();
     for view in ["stored", "decoded"] {
         let get = sandbox
-            .run(&[
-                "get-v2", "--file", &file, "--ref", reference, "--view", view,
-            ])
+            .run(&["get", "--file", &file, "--ref", reference, "--view", view])
             .page();
         assert_eq!(get["complete"], true);
         let record: Value =
             serde_json::from_str(get["record_json_chunk"].as_str().unwrap()).unwrap();
         assert_eq!(record, original, "{view}");
-        assert!(get["identity"].is_null());
+        assert_eq!(get["identity"], original["provenance"]);
     }
-    let stream = sandbox.run(&["query-v2", "--file", &file, "--all"]);
+    let stream = sandbox.run(&["query", "--file", &file, "--all"]);
     assert_eq!(stream.rows(), vec![original.clone()]);
     assert_eq!(stream.summary()["complete"], true);
-    let directory = sandbox.path("legacy-session");
-    fs::create_dir(&directory).unwrap();
-    fs::copy(&file, Path::new(&directory).join("logs.jsonl")).unwrap();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis() as u64;
-    fs::write(Path::new(&directory).join("status.json"), json!({"schema_version":1,"type":"status","state":"completed","entries":1,"bytes":fs::metadata(&file).unwrap().len(),"updated_unix_ms":now,"session":directory,"worker_pid":0,"stale":false,"omitted_by_limit":false,"diagnostic_lines":0,"diagnostics_complete":true,"discarded_entries":0,"diagnostic_dropped_count":0}).to_string()).unwrap();
-    let legacy = sandbox.run(&["query", "--session-dir", &directory]).page();
-    assert_eq!(legacy["entries"], json!([original]));
+    let directory = sandbox.session(std::slice::from_ref(&original));
+    let page = sandbox.run(&["query", "--session-dir", &directory]).page();
+    assert_eq!(page["schema_version"], 2);
+    assert_eq!(page["source_schema_version"], 3);
+    assert_eq!(
+        page["records"][0]["observed_unix_ms"],
+        original["provenance"]["observed_unix_ms"]
+    );
+    let stream = sandbox.run(&["query", "--session-dir", &directory, "--all"]);
+    assert_eq!(stream.rows(), vec![original]);
+    assert_eq!(stream.summary()["complete"], true);
 }
 
 #[test]
-fn malformed_legacy_receive_timestamps_are_invalid_sources_not_missing_times() {
+fn malformed_native_receive_timestamps_are_invalid_sources_not_missing_times() {
     for invalid in [
         json!(-1),
         json!("1767225600000"),
@@ -728,17 +735,11 @@ fn malformed_legacy_receive_timestamps_are_invalid_sources_not_missing_times() {
     ] {
         let sandbox = Sandbox::new();
         let mut original = row(1, "invalid clock");
-        original["observed_unix_ms"] = invalid;
+        original["provenance"]["observed_unix_ms"] = invalid;
         let file = sandbox.file(&[original]);
-        sandbox.fail(&["query-v2", "--file", &file], "invalid_source");
+        sandbox.fail(&["query", "--file", &file], "invalid_source");
         sandbox.fail(
-            &[
-                "query-v2",
-                "--file",
-                &file,
-                "--since",
-                "2026-01-01T00:00:00Z",
-            ],
+            &["query", "--file", &file, "--since", "2026-01-01T00:00:00Z"],
             "invalid_source",
         );
     }
@@ -752,11 +753,11 @@ fn relative_empty_results_explain_resolved_window_without_inventing_coverage() {
         .unwrap()
         .as_millis() as u64;
     let mut record = row(1, "ninety seconds old");
-    record["observed_unix_ms"] = (now - 90_000).into();
+    record["provenance"]["observed_unix_ms"] = (now - 90_000).into();
     let file = s.file(&[record]);
     for (since, seconds, expected) in [("60s", 60i128, 0usize), ("2m", 120, 1)] {
         for stream in [false, true] {
-            let mut args = vec!["query-v2", "--file", &file, "--since", since];
+            let mut args = vec!["query", "--file", &file, "--since", since];
             if stream {
                 args.extend(["--all", "--format", "jsonl"]);
             }
@@ -785,7 +786,7 @@ fn relative_empty_results_explain_resolved_window_without_inventing_coverage() {
             assert!(window["until_exclusive"].is_null());
         }
     }
-    let unfiltered = s.run(&["query-v2", "--file", &file]).page();
+    let unfiltered = s.run(&["query", "--file", &file]).page();
     assert_eq!(
         unfiltered["time_window"],
         json!({"basis":"received","anchor_unix_ms":null,"since_inclusive":null,"until_exclusive":null})
@@ -796,11 +797,11 @@ fn relative_empty_results_explain_resolved_window_without_inventing_coverage() {
 fn absolute_window_metadata_preserves_nanoseconds_and_exclusive_end() {
     let s = Sandbox::new();
     let mut record = row(1, "outside nanosecond interval");
-    record["observed_unix_ms"] = 1000.into();
+    record["provenance"]["observed_unix_ms"] = 1000.into();
     let file = s.file(&[record]);
     let page = s
         .run(&[
-            "query-v2",
+            "query",
             "--file",
             &file,
             "--since",
@@ -818,4 +819,51 @@ fn absolute_window_metadata_preserves_nanoseconds_and_exclusive_end() {
         page["time_window"]["until_exclusive"],
         json!({"unix_ns":"1000000003","rfc3339":"1970-01-01T00:00:01.000000003Z"})
     );
+}
+
+#[test]
+fn structural_records_share_literal_filter_but_never_fabricate_log_metadata() {
+    use ciallogcat::model::{Level, LogEntry};
+    let s = Sandbox::new();
+    let rows = [
+        native_fixture::entry_row(
+            1,
+            LogEntry::new("now", 0, 0, "Tag", Level::Verbose, "shared log"),
+            None,
+        ),
+        native_fixture::entry_row(2, LogEntry::marker("shared event"), None),
+        native_fixture::entry_row(3, LogEntry::unparsed("shared raw"), None),
+    ];
+    let file = s.file(&rows);
+    let all = s
+        .run(&["query", "--file", &file, "--query", "shared"])
+        .page();
+    assert_eq!(seqs(&all), [1, 2, 3]);
+    let verbose = s
+        .run(&[
+            "query",
+            "--file",
+            &file,
+            "--query",
+            "shared",
+            "--min-level",
+            "V",
+        ])
+        .page();
+    assert_eq!(seqs(&verbose), [1, 2, 3]);
+    for record in &all["records"].as_array().unwrap()[1..] {
+        for field in ["pid", "tid", "level", "tag", "process"] {
+            assert!(record.get(field).is_none(), "{record}");
+        }
+    }
+    for flags in [
+        vec!["--tag-exclude", "Other"],
+        vec!["--tag", "Tag"],
+        vec!["--pid", "0"],
+        vec!["--tid", "0"],
+    ] {
+        let mut args = vec!["query", "--file", &file];
+        args.extend(flags);
+        assert_eq!(seqs(&s.run(&args).page()), [1]);
+    }
 }

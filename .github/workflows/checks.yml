@@ -68,7 +68,7 @@ jobs:
             target/adb-integration/
             target/cli-integration/
             target/config-integration/
-            target/query-v2-integration/
+            target/query-integration/
             target/native-adb-integration/
           if-no-files-found: ignore
           retention-days: 7
@@ -110,7 +110,7 @@ jobs:
             target/adb-integration/
             target/cli-integration/
             target/config-integration/
-            target/query-v2-integration/
+            target/query-integration/
             target/native-adb-integration/
             target/native-gui-smoke/
           if-no-files-found: ignore
@@ -154,7 +154,7 @@ jobs:
             target/adb-integration/
             target/cli-integration/
             target/config-integration/
-            target/query-v2-integration/
+            target/query-integration/
             target/native-adb-integration/
           if-no-files-found: ignore
           retention-days: 7
