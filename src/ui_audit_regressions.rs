@@ -99,7 +99,7 @@ fn simultaneous_diagnostics_preserve_counts_and_complete_copy_with_escape() {
             "采集错误",
             "设置保存失败",
             "包列表查询错误",
-            "1 total · 0/s",
+            "1 条日志 · 0/秒",
         ] {
             bounded(&h, label);
         }
@@ -114,7 +114,7 @@ fn simultaneous_diagnostics_preserve_counts_and_complete_copy_with_escape() {
             let pos = h
                 .labels
                 .iter()
-                .find(|(text, _)| text == "Copy diagnostic")
+                .find(|(text, _)| text == "复制诊断")
                 .unwrap()
                 .1;
             h.pointer(pos, true);
@@ -144,11 +144,11 @@ fn filter_controls_have_meaningful_accessible_names_and_states() {
     for dark in [true, false] {
         let mut h = harness(dark);
         for name in [
-            "Use a regular expression",
-            "Match case",
-            "Package filter",
-            "Message filter",
-            "Minimum level: Verbose and above",
+            "使用正则表达式",
+            "区分大小写",
+            "包名筛选",
+            "消息筛选",
+            "最低级别：Verbose 及以上",
         ] {
             assert!(
                 h.accessible_nodes
@@ -162,7 +162,7 @@ fn filter_controls_have_meaningful_accessible_names_and_states() {
         let node = h
             .accessible_nodes
             .iter()
-            .find(|(_, node)| node.label() == Some("Use a regular expression"))
+            .find(|(_, node)| node.label() == Some("使用正则表达式"))
             .unwrap();
         assert_eq!(node.1.toggled(), Some(egui::accesskit::Toggled::True));
         h.key(egui::Key::Space, egui::Modifiers::NONE);

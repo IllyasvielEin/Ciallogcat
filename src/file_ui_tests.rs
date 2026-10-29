@@ -1072,6 +1072,7 @@ fn file_recovery_notice_stays_compact_and_full_diagnostic_is_keyboard_accessible
         for file_open in [false, true] {
             let directory = Directory::new();
             let mut h = crate::ui_test_support::Harness::new(false);
+            h.ctx.enable_accesskit();
             h.resize(width, 560.0);
             if file_open {
                 let source = directory.0.join("source.jsonl");
@@ -1099,11 +1100,20 @@ fn file_recovery_notice_stays_compact_and_full_diagnostic_is_keyboard_accessible
             h.frame(vec![]);
             h.frame(vec![]);
             let bounds = |label: &str| {
-                h.label_bounds
+                // Compare interactive rectangles, not cross-font glyph ink boxes:
+                // proportional × and CJK text have different optical centers.
+                let rect = h
+                    .accessible_nodes
                     .iter()
-                    .find(|(text, _)| text == label)
-                    .unwrap()
-                    .1
+                    .find(|(_, node)| {
+                        node.role() == egui::accesskit::Role::Button && node.label() == Some(label)
+                    })
+                    .and_then(|(_, node)| node.bounds())
+                    .unwrap_or_else(|| panic!("missing button bounds: {label}"));
+                egui::Rect::from_min_max(
+                    egui::pos2(rect.x0 as f32, rect.y0 as f32),
+                    egui::pos2(rect.x1 as f32, rect.y1 as f32),
+                )
             };
             let retry = bounds("修改路径重试…");
             let details = bounds("详情");
@@ -1133,7 +1143,7 @@ fn file_recovery_notice_stays_compact_and_full_diagnostic_is_keyboard_accessible
             let copy = h
                 .labels
                 .iter()
-                .find(|(label, _)| label == "Copy diagnostic")
+                .find(|(label, _)| label == "复制诊断")
                 .unwrap()
                 .1;
             h.pointer(copy, true);

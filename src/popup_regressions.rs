@@ -97,7 +97,7 @@ fn popup_selection_applies_value_and_closes_without_reopening() {
     h.frame(vec![]);
     assert!(!h.app.package_popup_open);
     h.click_input("package_filter");
-    h.click_label("All processes");
+    h.click_label("全部进程");
     assert!(h.app.package.is_empty());
     assert!(!h.app.package_popup_open);
 }
@@ -151,7 +151,7 @@ fn escape_closes_view_menu_then_clears_selection_on_the_next_press() {
     h.app.selected = Some(0);
     h.app.selection.select_all(&h.app.matches);
     h.frame(vec![]);
-    h.click_label("View");
+    h.click_label("视图");
     assert!(egui::Popup::is_any_open(&h.ctx));
     h.key(egui::Key::Escape, egui::Modifiers::NONE);
     assert!(!egui::Popup::is_any_open(&h.ctx));
@@ -217,7 +217,7 @@ fn history_delete_clear_and_keyboard_selection_remain_local_to_popup() {
 #[test]
 fn find_shortcut_replaces_existing_menu_and_package_popup() {
     let mut h = Harness::new(true);
-    h.click_label("View");
+    h.click_label("视图");
     assert!(egui::Popup::is_any_open(&h.ctx));
     h.key(egui::Key::F, egui::Modifiers::COMMAND);
     assert!(!egui::Popup::is_any_open(&h.ctx));

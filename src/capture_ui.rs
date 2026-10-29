@@ -265,6 +265,10 @@ mod tests {
     }
 
     fn exit(app: &mut CiallogcatApp, ctx: &egui::Context, code: i32) {
+        let original = app
+            .capture_controller
+            .active_id()
+            .expect("active test capture");
         app.backend_tx
             .send(BackendEvent::Logcat {
                 session_id: app.capture_session_id,
@@ -275,7 +279,21 @@ mod tests {
                 },
             })
             .unwrap();
-        app.poll_backend(ctx);
+        // A production poll has a 4ms frame budget, not a drain guarantee.
+        // Wait for this queued EOF's observable postcondition under parallel
+        // test load; preserve a hard deadline and all callers' state/data checks.
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while app.capture_controller.active_id() == Some(original) && Instant::now() < deadline {
+            app.poll_backend(ctx);
+            std::thread::yield_now();
+        }
+        assert!(
+            app.capture_controller.active_id().is_none(),
+            "queued test EOF was not processed before deadline: active={:?}, state={}, entries={}",
+            app.capture_controller.active_id(),
+            app.capture_state.label(),
+            app.entries.len(),
+        );
     }
 
     #[test]
@@ -346,7 +364,11 @@ mod tests {
                 event: LogcatEvent::Entry(LogEntry::marker("after resume").into()),
             })
             .unwrap();
-        app.poll_backend(&ctx);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while app.entries.len() < 2 && Instant::now() < deadline {
+            app.poll_backend(&ctx);
+            std::thread::yield_now();
+        }
         assert_eq!(app.live_session.id(), session);
         assert_eq!(app.entries.len(), 2);
         let capture = app.capture_facts.snapshot("running");

@@ -31,7 +31,7 @@ Use the desktop app to browse live logs or offline files, or the CLI to capture 
 
 Ciallogcat focuses on Android app debugging. The desktop app, `ciallogcat`, reads live Logcat through ADB and filters locally. The separate `ciallogcat-cli` executable writes normalized JSONL for scripts and agents without opening a window.
 
-Open JSONL through **File** or drag and drop, without ADB. File views are read-only; saving and filtered export use one native document format. The app does not show devices side by side, and currently mixes English and Chinese labels. See the [file workflow](docs/file-workflow.md).
+Open JSONL through **文件** or drag and drop, without ADB. File views are read-only; saving and filtered export use one native document format. The app does not show devices side by side, and uses Chinese for primary controls, while retaining conventional technical field names. See the [file workflow](docs/file-workflow.md).
 
 ## Install
 
@@ -87,21 +87,21 @@ To build the GUI without launching it, use `cargo build --locked --release --bin
 
 ## Desktop usage
 
-1. Launch `ciallogcat`, connect and authorize a device, then select it in **Device**. Selection is manual; use **刷新** (Refresh) if needed. Selecting an available device starts capture.
-2. Choose or enter a package name, set the minimum level, and enter a keyword. `.*` toggles regex and **Aa** toggles case sensitivity. **Saved filters** stores combinations; keyword history remembers recent searches.
+1. Launch `ciallogcat`, connect and authorize a device, then select it in **设备**. Selection is manual; use **刷新** (Refresh) if needed. Selecting an available device starts capture.
+2. Choose or enter a package name, set the minimum level, and enter a keyword. `.*` toggles regex and **Aa** toggles case sensitivity. **筛选方案** stores combinations; keyword history remembers recent searches.
 3. Click a row for its full message. **Shift+click** selects a range, **Ctrl+click** toggles rows, and **Ctrl+C** copies. **Ctrl+F** or **/** focuses search.
 4. Browsing or selecting pauses live follow without stopping capture. Use **Ctrl+End** or **回到最新** to follow new logs again.
-5. Use **View** for themes, row height, details, and the log memory budget. Budget edits take effect only after **Apply budget**.
-6. **File → 打开日志** / **Ctrl+O** opens JSONL. **另存保留日志** / **Ctrl+Shift+S** saves retained rows, and **导出当前筛选结果** exports a filtered snapshot. File operations currently use path input or drag and drop; save to a new destination.
+5. Use **视图** for themes, row height, details, and the log memory budget. Budget edits take effect only after **应用预算**.
+6. **文件 → 打开日志** / **Ctrl+O** opens JSONL. **另存保留日志** / **Ctrl+Shift+S** saves retained rows, and **导出当前筛选结果** exports a filtered snapshot. File operations currently use path input or drag and drop; save to a new destination.
 
 A few useful details:
 
-- **暂停** (Pause) stops capture but keeps logs; **开启** (Start) resumes without backfilling the paused interval. **关闭** (Close) also deselects the device. Same-device reconnects preserve retained logs; switching devices asks before clearing them.
+- **暂停采集** (Pause) stops capture but keeps logs; **开始采集** (Start) resumes without backfilling the paused interval. **断开** (Close) also deselects the device. Same-device reconnects preserve retained logs; switching devices asks before clearing them.
 - Device-discovery errors retain the last successful device list and your selection. An offline or missing-device snapshot does not stop a stream that is still running; Pause remains available.
 - An exited stream retries at 1, 2 and 4 seconds, up to three times; Pause or Close cancels retries. Restart waits for the old child and both output pipes to finish. A stop acknowledgement taking over five seconds blocks a new start and reports an error.
 - Buffers default to `main + system + crash`. Changes take effect after **应用** (Apply). Starts and restarts use `-T 1`, so they do not backfill history and may leave gaps.
 - Package filtering includes subprocesses such as `com.example.app:sync`. GUI process names are recent `ps` hints, not verified identities; failed or expired samples are discarded, and later samples never fill unknown historical rows. Unknown or short-lived processes can be hidden by that filter; clear the package restriction to inspect their logs. Structural markers and unparsed text can match message-only filters with the default Verbose threshold. Package, tag or stricter level filters exclude these rows because they lack log metadata; they are not counted as unknown processes.
-- Invalid regex shows an error until corrected. **Clear** removes local records after confirmation, never the device's Logcat buffers.
+- Invalid regex shows an error until corrected. **清空视图** removes local records after confirmation, never the device's Logcat buffers.
 
 ### Memory retention
 
