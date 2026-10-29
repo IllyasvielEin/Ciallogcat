@@ -4,7 +4,7 @@ use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::io::Write;
 
-use ciallogcat::model::{LogEntry, LogEntryKind};
+use ciallogcat::model::LogEntry;
 use jiff::{Timestamp, Zoned, tz::TimeZone};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -106,7 +106,7 @@ impl TextOptions {
         self.process_names_truncated.get()
     }
 
-    fn time_prefix(&self, entry: &LogEntry, legacy_received: Option<u64>, device: bool) -> String {
+    fn time_prefix(&self, entry: &LogEntry, device: bool) -> String {
         let source = if device { "device" } else { "received" };
         let time = if device {
             entry.proto.as_ref().and_then(|p| {
@@ -117,8 +117,9 @@ impl TextOptions {
                 })
             })
         } else {
-            legacy_received
-                .or_else(|| entry.provenance.and_then(|p| p.observed_unix_ms))
+            entry
+                .provenance
+                .and_then(|p| p.observed_unix_ms)
                 .map(|ms| ObservedTime {
                     seconds: ms / 1000,
                     nanoseconds: (ms % 1000) as u32 * 1_000_000,
@@ -126,7 +127,10 @@ impl TextOptions {
                 })
         };
         let Some(time) = time else {
-            return format!("[{source}-time-unavailable; device-text={:?}]", entry.time);
+            return entry.log_fields().map_or_else(
+                || format!("[{source}-time-unavailable]"),
+                |fields| format!("[{source}-time-unavailable; device-text={:?}]", fields.time),
+            );
         };
         if self.format == TimeFormat::Epoch {
             return if device {
@@ -162,28 +166,26 @@ impl TextOptions {
         &self,
         writer: &mut dyn Write,
         entry: &LogEntry,
-        kind: &str,
-        legacy_received: Option<u64>,
         device_time: bool,
     ) -> Result<()> {
-        let time = self.time_prefix(entry, legacy_received, device_time);
+        let time = self.time_prefix(entry, device_time);
         let mut truncated = false;
-        if entry.kind == LogEntryKind::Log {
-            let (process, was_truncated) = process_field(entry.process_name(), self.process_width);
+        if let Some(fields) = entry.log_fields() {
+            let (process, was_truncated) = process_field(fields.process_name(), self.process_width);
             truncated = was_truncated;
             write!(
                 writer,
                 "{} {:>5} {:>5} {} {} {}: ",
                 time,
-                entry.pid,
-                entry.tid,
-                entry.level.short(),
+                fields.pid,
+                fields.tid,
+                fields.level.short(),
                 process,
-                entry.tag
+                fields.tag
             )
             .map_err(io_error)?;
         } else {
-            write!(writer, "{time} [{kind}] ").map_err(io_error)?;
+            write!(writer, "{time} [{}] ", entry.kind.label()).map_err(io_error)?;
         }
         writer
             .write_all(entry.message.as_bytes())
@@ -294,6 +296,16 @@ mod tests {
     fn entry(message: &str) -> LogEntry {
         LogEntry::new("10-28 03:43:20.123", 12, 34, "Tag", Level::Info, message)
     }
+    fn received(mut entry: LogEntry, ms: Option<u64>) -> LogEntry {
+        entry.provenance = Some(RecordIdentity {
+            session_id: SessionId::new(),
+            seq: 1,
+            segment: 1,
+            attempt: 1,
+            observed_unix_ms: ms,
+        });
+        entry
+    }
     fn options(format: TimeFormat, zone: TimeZone) -> TextOptions {
         TextOptions {
             format,
@@ -401,28 +413,18 @@ mod tests {
         let mut e = entry("full message and trailing spaces  \n");
         e.process = Some(Arc::from(name));
         let mut bytes = Vec::new();
-        text.write_record(&mut bytes, &e, "entry", Some(0), false)
-            .unwrap();
+        text.write_record(&mut bytes, &e, false).unwrap();
         let output = String::from_utf8(bytes).unwrap();
         assert_eq!(text.process_names_truncated(), 1);
         assert!(output.ends_with("Tag: full message and trailing spaces  \n"));
         assert!(output.contains("   12    34 I "));
         assert_eq!(e.process_name(), name);
-        text.write_record(
-            &mut Vec::new(),
-            &LogEntry::marker("marker"),
-            "event",
-            Some(0),
-            false,
-        )
-        .unwrap();
+        text.write_record(&mut Vec::new(), &LogEntry::marker("marker"), false)
+            .unwrap();
         assert_eq!(text.process_names_truncated(), 1);
         let mut buffer = [];
         let mut unavailable = std::io::Cursor::new(&mut buffer[..]);
-        assert!(
-            text.write_record(&mut unavailable, &e, "entry", Some(0), false)
-                .is_err()
-        );
+        assert!(text.write_record(&mut unavailable, &e, false).is_err());
         assert_eq!(text.process_names_truncated(), 1);
     }
 
@@ -430,27 +432,18 @@ mod tests {
     fn received_time_readable_rfc3339_and_epoch_keep_milliseconds() {
         let e = entry("hi");
         assert_eq!(
-            options(TimeFormat::Readable, TimeZone::UTC).time_prefix(
-                &e,
-                Some(1_700_000_000_123),
-                false
-            ),
+            options(TimeFormat::Readable, TimeZone::UTC)
+                .time_prefix(&received(e.clone(), Some(1_700_000_000_123)), false),
             "2023-11-14 22:13:20.123+00:00"
         );
         assert_eq!(
-            options(TimeFormat::Rfc3339, TimeZone::UTC).time_prefix(
-                &e,
-                Some(1_700_000_000_123),
-                false
-            ),
+            options(TimeFormat::Rfc3339, TimeZone::UTC)
+                .time_prefix(&received(e.clone(), Some(1_700_000_000_123)), false),
             "2023-11-14T22:13:20.123Z"
         );
         assert_eq!(
-            options(TimeFormat::Epoch, TimeZone::UTC).time_prefix(
-                &e,
-                Some(1_700_000_000_123),
-                false
-            ),
+            options(TimeFormat::Epoch, TimeZone::UTC)
+                .time_prefix(&received(e.clone(), Some(1_700_000_000_123)), false),
             "1700000000.123"
         );
     }
@@ -459,20 +452,22 @@ mod tests {
     fn device_nanoseconds_and_extreme_epoch_never_use_floating_point() {
         let e = proto(1_700_000_000, 1);
         assert_eq!(
-            options(TimeFormat::Rfc3339, TimeZone::UTC).time_prefix(&e, Some(99), true),
+            options(TimeFormat::Rfc3339, TimeZone::UTC)
+                .time_prefix(&received(e.clone(), Some(99)), true),
             "2023-11-14T22:13:20.000000001Z [device]"
         );
         let e = proto(u64::MAX, 999_999_999);
         assert_eq!(
-            options(TimeFormat::Epoch, TimeZone::UTC).time_prefix(&e, None, true),
+            options(TimeFormat::Epoch, TimeZone::UTC).time_prefix(&e, true),
             "18446744073709551615.999999999 [device]"
         );
         assert_eq!(
-            options(TimeFormat::Readable, TimeZone::UTC).time_prefix(&e, None, true),
+            options(TimeFormat::Readable, TimeZone::UTC).time_prefix(&e, true),
             "18446744073709551615.999999999 [device; calendar-unavailable]"
         );
         assert_eq!(
-            options(TimeFormat::Epoch, TimeZone::UTC).time_prefix(&e, Some(u64::MAX), false),
+            options(TimeFormat::Epoch, TimeZone::UTC)
+                .time_prefix(&received(e.clone(), Some(u64::MAX)), false),
             "18446744073709551.615"
         );
     }
@@ -484,11 +479,11 @@ mod tests {
             TimeZone::fixed(jiff::tz::Offset::from_seconds(-5 * 3600 - 30 * 60).unwrap());
         let time = Some(1_704_067_199_999); // 2023-12-31T23:59:59.999Z
         assert_eq!(
-            options(TimeFormat::Readable, positive).time_prefix(&entry(""), time, false),
+            options(TimeFormat::Readable, positive).time_prefix(&received(entry(""), time), false),
             "2024-01-01 07:59:59.999+08:00"
         );
         assert_eq!(
-            options(TimeFormat::Rfc3339, negative).time_prefix(&entry(""), time, false),
+            options(TimeFormat::Rfc3339, negative).time_prefix(&received(entry(""), time), false),
             "2023-12-31T18:29:59.999-05:30"
         );
     }
@@ -497,11 +492,12 @@ mod tests {
     fn second_precision_offsets_do_not_get_silently_rounded_for_rfc3339() {
         let zone = TimeZone::fixed(jiff::tz::Offset::from_seconds(30).unwrap());
         assert_eq!(
-            options(TimeFormat::Readable, zone.clone()).time_prefix(&entry(""), Some(0), false),
+            options(TimeFormat::Readable, zone.clone())
+                .time_prefix(&received(entry(""), Some(0)), false),
             "1970-01-01 00:00:30.000+00:00:30"
         );
         assert_eq!(
-            options(TimeFormat::Rfc3339, zone).time_prefix(&entry(""), Some(0), false),
+            options(TimeFormat::Rfc3339, zone).time_prefix(&received(entry(""), Some(0)), false),
             "1970-01-01T00:00:00.000Z [received; local-offset-unrepresentable; shown-in-utc]"
         );
     }
@@ -510,43 +506,39 @@ mod tests {
     fn missing_time_never_borrows_the_other_clock_or_guesses_a_year() {
         let mut e = proto(1_700_000_000, 2);
         assert_eq!(
-            options(TimeFormat::Readable, TimeZone::UTC).time_prefix(&e, None, false),
+            options(TimeFormat::Readable, TimeZone::UTC).time_prefix(&e, false),
             "[received-time-unavailable; device-text=\"10-28 03:43:20.123\"]"
         );
         e.proto = None;
         assert_eq!(
-            options(TimeFormat::Readable, TimeZone::UTC).time_prefix(&e, Some(123), true),
+            options(TimeFormat::Readable, TimeZone::UTC)
+                .time_prefix(&received(e.clone(), Some(123)), true),
             "[device-time-unavailable; device-text=\"10-28 03:43:20.123\"]"
         );
         e.time = "raw\nambiguous\"time".into();
         assert_eq!(
-            options(TimeFormat::Epoch, TimeZone::UTC).time_prefix(&e, None, true),
+            options(TimeFormat::Epoch, TimeZone::UTC).time_prefix(&e, true),
             "[device-time-unavailable; device-text=\"raw\\nambiguous\\\"time\"]"
         );
         let invalid = proto(0, 1_000_000_000);
         assert!(
             options(TimeFormat::Epoch, TimeZone::UTC)
-                .time_prefix(&invalid, None, true)
+                .time_prefix(&invalid, true)
                 .contains("device-time-unavailable")
         );
     }
 
     #[test]
-    fn native_and_legacy_receipt_time_share_the_clock_without_fabricated_identity() {
-        let mut e = entry("");
+    fn native_receipt_time_uses_provenance_without_guessing_missing_clock() {
+        let e = received(entry(""), Some(1234));
         let text = options(TimeFormat::Epoch, TimeZone::UTC);
-        e.provenance = Some(RecordIdentity {
-            session_id: SessionId::new(),
-            seq: 1,
-            segment: 1,
-            attempt: 1,
-            observed_unix_ms: Some(1234),
-        });
-        assert_eq!(text.time_prefix(&e, None, false), "1.234");
-        assert_eq!(text.time_prefix(&e, Some(5678), false), "5.678");
-        e.provenance = None;
-        assert_eq!(text.time_prefix(&e, Some(1234), false), "1.234");
-        assert!(e.provenance.is_none());
+        assert_eq!(text.time_prefix(&e, false), "1.234");
+        let missing = received(e, None);
+        assert!(
+            text.time_prefix(&missing, false)
+                .contains("received-time-unavailable")
+        );
+        assert!(missing.provenance.is_some());
     }
 
     #[test]
@@ -564,8 +556,7 @@ mod tests {
         ] {
             let e = entry(message);
             let mut bytes = Vec::new();
-            text.write_record(&mut bytes, &e, "entry", Some(1000), false)
-                .unwrap();
+            text.write_record(&mut bytes, &e, false).unwrap();
             let rendered = String::from_utf8(bytes).unwrap();
             let payload = rendered.split_once("Tag: ").unwrap().1;
             let expected = if message.ends_with('\n') {
@@ -581,10 +572,9 @@ mod tests {
     #[test]
     fn non_log_records_keep_kind_without_placeholder_fields() {
         let text = options(TimeFormat::Epoch, TimeZone::UTC);
-        let e = LogEntry::marker("boundary\n");
+        let e = received(LogEntry::marker("boundary\n"), Some(0));
         let mut bytes = Vec::new();
-        text.write_record(&mut bytes, &e, "event", Some(0), false)
-            .unwrap();
+        text.write_record(&mut bytes, &e, false).unwrap();
         assert_eq!(
             String::from_utf8(bytes).unwrap(),
             "0.000 [event] boundary\n"
@@ -592,18 +582,42 @@ mod tests {
     }
 
     #[test]
+    fn structural_text_ignores_internal_metadata_and_preserves_full_payload() {
+        for kind in [
+            ciallogcat::model::LogEntryKind::Marker,
+            ciallogcat::model::LogEntryKind::Unparsed,
+        ] {
+            for message in ["", "one\n", "one\r\n\n", "雪\0  "] {
+                let mut row = received(entry(message), Some(0));
+                row.kind = kind;
+                row.process = Some("fake.long.process.identity.that.must.not.display".into());
+                let text = options(TimeFormat::Epoch, TimeZone::UTC);
+                let mut bytes = Vec::new();
+                text.write_record(&mut bytes, &row, false).unwrap();
+                let end = if message.ends_with('\n') { "" } else { "\n" };
+                assert_eq!(
+                    String::from_utf8(bytes).unwrap(),
+                    format!("0.000 [{}] {message}{end}", kind.label())
+                );
+                assert_eq!(text.process_names_truncated(), 0);
+                assert_eq!(row.copy_text(), format!("[{}] {message}", kind.label()));
+            }
+        }
+    }
+
+    #[test]
     fn local_unavailability_is_explicit_and_epoch_ignores_timezone() {
         let mut text = options(TimeFormat::Readable, TimeZone::UTC);
         text.local_unavailable = true;
         assert_eq!(
-            text.time_prefix(&entry(""), Some(0), false),
+            text.time_prefix(&received(entry(""), Some(0)), false),
             "1970-01-01 00:00:00.000+00:00 [received; local-timezone-unavailable; shown-in-utc]"
         );
         let utc = parse(&[("--time-format", "epoch"), ("--timezone", "utc")]).unwrap();
         let local = parse(&[("--time-format", "epoch"), ("--timezone", "local")]).unwrap();
         assert_eq!(
-            utc.time_prefix(&entry(""), Some(u64::MAX), false),
-            local.time_prefix(&entry(""), Some(u64::MAX), false)
+            utc.time_prefix(&received(entry(""), Some(u64::MAX)), false),
+            local.time_prefix(&received(entry(""), Some(u64::MAX)), false)
         );
         assert!(parse(&[("--time-format", "other")]).is_err());
         assert!(parse(&[("--timezone", "+08:00")]).is_err());

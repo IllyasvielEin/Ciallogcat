@@ -183,7 +183,9 @@ fn history_scope_rejects_bad_values_before_creating_output_or_starting_adb() {
             "--max-bytes",
             "8191",
         ],
-        vec!["--record-format", "v1", "--transport", "proto"],
+        vec!["--record-format", "v1"],
+        vec!["--record-format", "v2"],
+        vec!["--max-bytes", "8191"],
         vec!["--tail", "0"],
         vec!["--tail", "+1"],
         vec!["--tail", "2147483648"],
@@ -237,7 +239,7 @@ fn history_scope_rejects_bad_values_before_creating_output_or_starting_adb() {
 #[cfg(target_os = "linux")]
 #[test]
 fn history_snapshot_selects_records_and_completes_once_with_actual_scope_in_header() {
-    for format in ["v1", "v2"] {
+    {
         for (flags, expected, scope_args) in [
             (
                 vec![],
@@ -265,8 +267,6 @@ fn history_snapshot_selects_records_and_completes_once_with_actual_scope_in_head
                 "capture",
                 "--serial",
                 "TEST-USB",
-                "--record-format",
-                format,
                 "--dump",
                 "--buffers",
                 "radio,events",
@@ -283,51 +283,36 @@ fn history_snapshot_selects_records_and_completes_once_with_actual_scope_in_head
             assert_eq!(summary["entries"], expected.len());
             assert_eq!(summary["diagnostics_complete"], true);
             assert_eq!(summary["last_diagnostic"], "snapshot drained");
-            if format == "v2" {
-                let doc = ciallogcat::document::load(
-                    result.stdout.as_bytes(),
-                    4 * 1024 * 1024,
-                    &std::sync::atomic::AtomicBool::new(false),
-                )
-                .unwrap();
-                assert_eq!(
-                    doc.entries
-                        .iter()
-                        .map(|r| r.message.as_ref())
-                        .collect::<Vec<_>>(),
-                    expected
-                );
-                assert_eq!(
-                    doc.header.source.requested_buffers,
-                    Some(vec![
-                        ciallogcat::model::LogBuffer::Events,
-                        ciallogcat::model::LogBuffer::Radio
-                    ])
-                );
-                assert_eq!(doc.header.source.extra["capture_scope"]["mode"], "dump");
-                assert_eq!(
-                    doc.header.source.extra["logcat_scope_args"],
-                    serde_json::json!(scope_args)
-                );
-                assert_eq!(doc.header.source.extra["host_budgets"]["duration_secs"], 10);
-                assert_eq!(doc.end.capture.extra["attempts"], 1);
-                assert!(doc.end.capture.known_gaps.is_empty());
-                assert_eq!(summary["stream_interruptions"], 0);
-                assert_eq!(summary["capture_completeness"], "unknown");
-            } else {
-                let records: Vec<Value> = result
-                    .stdout
-                    .lines()
-                    .map(|line| serde_json::from_str(line).unwrap())
-                    .collect();
-                assert_eq!(
-                    records
-                        .iter()
-                        .map(|r| r["message"].as_str().unwrap())
-                        .collect::<Vec<_>>(),
-                    expected
-                );
-            }
+            let doc = ciallogcat::document::load(
+                result.stdout.as_bytes(),
+                4 * 1024 * 1024,
+                &std::sync::atomic::AtomicBool::new(false),
+            )
+            .unwrap();
+            assert_eq!(
+                doc.entries
+                    .iter()
+                    .map(|r| r.message.as_ref())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            assert_eq!(
+                doc.header.source.requested_buffers,
+                Some(vec![
+                    ciallogcat::model::LogBuffer::Events,
+                    ciallogcat::model::LogBuffer::Radio
+                ])
+            );
+            assert_eq!(doc.header.source.extra["capture_scope"]["mode"], "dump");
+            assert_eq!(
+                doc.header.source.extra["logcat_scope_args"],
+                serde_json::json!(scope_args)
+            );
+            assert_eq!(doc.header.source.extra["host_budgets"]["duration_secs"], 10);
+            assert_eq!(doc.end.capture.extra["attempts"], 1);
+            assert!(doc.end.capture.known_gaps.is_empty());
+            assert_eq!(summary["stream_interruptions"], 0);
+            assert_eq!(summary["capture_completeness"], "unknown");
             let trace = sandbox.trace();
             assert_eq!(trace.len(), 1, "snapshot must not reconnect");
             let mut expected_args = vec!["-s", "TEST-USB", "logcat", "-v", "threadtime"];
@@ -355,15 +340,7 @@ fn history_follow_keeps_live_stream_and_host_record_budget_after_selected_histor
     ] {
         let sandbox = Sandbox::new("history");
         let count = expected.len().to_string();
-        let mut args = vec![
-            "capture",
-            "--serial",
-            "TEST-USB",
-            "--record-format",
-            "v2",
-            "--max-entries",
-            &count,
-        ];
+        let mut args = vec!["capture", "--serial", "TEST-USB", "--max-entries", &count];
         args.extend(flags);
         let output = sandbox.run(&args);
         output.success();
@@ -418,8 +395,6 @@ fn history_proto_snapshot_preserves_calendar_word_and_empty_eof_is_success() {
             "capture",
             "--serial",
             "TEST-USB",
-            "--record-format",
-            "v2",
             "--transport",
             "proto",
             "--dump",
@@ -463,8 +438,6 @@ fn history_snapshot_errors_are_not_mislabeled_successful_eof() {
             "capture",
             "--serial",
             "TEST-USB",
-            "--record-format",
-            "v2",
             "--transport",
             transport,
             "--dump",
@@ -490,16 +463,7 @@ fn history_snapshot_still_obeys_all_host_budgets() {
         ("once_then_idle", "--duration-secs", "1", "duration_limit"),
     ] {
         let sandbox = Sandbox::new(scenario);
-        let output = sandbox.run(&[
-            "capture",
-            "--serial",
-            "TEST-USB",
-            "--record-format",
-            "v2",
-            "--dump",
-            budget,
-            value,
-        ]);
+        let output = sandbox.run(&["capture", "--serial", "TEST-USB", "--dump", budget, value]);
         output.success();
         assert_eq!(output.summary()["reason"], reason);
         if budget == "--max-bytes" {
@@ -531,8 +495,6 @@ fn history_background_snapshot_persists_scope_and_rejects_forged_worker_config()
             "TEST-USB",
             "--session-dir",
             dir.to_str().unwrap(),
-            "--record-format",
-            "v2",
             "--dump",
             "--tail",
             "2",
@@ -594,8 +556,6 @@ fn native_capture_reconnects_without_reusing_identity_and_finalizes_a_shared_doc
         sandbox.adb_path(),
         "--serial",
         "TEST-USB",
-        "--record-format",
-        "v2",
         "--max-entries",
         "3",
         "--duration-secs",
@@ -637,7 +597,7 @@ fn native_capture_reconnects_without_reusing_identity_and_finalizes_a_shared_doc
 #[cfg(target_os = "linux")]
 #[test]
 fn native_footer_keeps_escaped_diagnostics_inside_the_reserved_budget() {
-    for format in ["v2", "v3"] {
+    {
         for serial in ["escaped", "ascii"] {
             let sandbox = Sandbox::new("normal");
             fs::write(&sandbox.adb, r#"#!/usr/bin/env python3
@@ -667,8 +627,6 @@ raise SystemExit(2)
                 sandbox.adb_path(),
                 "--serial",
                 serial,
-                "--record-format",
-                format,
                 "--transport",
                 "proto",
                 "--duration-secs",
@@ -706,7 +664,7 @@ raise SystemExit(2)
             assert_eq!(output.summary()["visible_end"]["offset"], bytes.len());
             assert_eq!(
                 sandbox
-                    .run(&["query-v2", "--file", file.to_str().unwrap()])
+                    .run(&["query", "--file", file.to_str().unwrap()])
                     .success()
                     .json()["artifact_finalized"],
                 true
@@ -726,8 +684,6 @@ fn native_capture_size_budget_includes_metadata_and_publishes_only_complete_reco
         sandbox.adb_path(),
         "--serial",
         "TEST-USB",
-        "--record-format",
-        "v2",
         "--max-bytes",
         "8192",
         "--duration-secs",
@@ -760,8 +716,6 @@ fn native_spawn_failure_cannot_be_reported_as_success_when_duration_expires() {
         sandbox.adb_path(),
         "--serial",
         "TEST-USB",
-        "--record-format",
-        "v2",
         "--duration-secs",
         "1",
     ]);
@@ -791,13 +745,11 @@ fn native_background_capture_queries_and_stops_with_a_finalized_boundary() {
         "TEST-USB",
         "--session-dir",
         dir,
-        "--record-format",
-        "v2",
         "--duration-secs",
         "10",
     ]);
     started.success();
-    assert_eq!(started.json()["record_schema_version"], 2);
+    assert_eq!(started.json()["record_schema_version"], 3);
     // Readiness confirms spawn, while records become visible on the next
     // published writer boundary; an empty first query is legitimate.
     let until = Instant::now() + Duration::from_secs(3);
@@ -810,7 +762,7 @@ fn native_background_capture_queries_and_stops_with_a_finalized_boundary() {
         assert!(Instant::now() < until, "no visible records");
         std::thread::sleep(Duration::from_millis(20));
     }
-    let queried = sandbox.run(&["query-v2", "--session-dir", dir, "--mode", "tail"]);
+    let queried = sandbox.run(&["query", "--session-dir", dir, "--mode", "tail"]);
     queried.success();
     assert!(!queried.json()["records"].as_array().unwrap().is_empty());
     let stopped = sandbox.run(&["stop", "--session-dir", dir]);
@@ -842,8 +794,6 @@ fn native_quiet_writer_failure_is_observed_and_reaps_the_owned_child() {
                 sandbox.adb_path(),
                 "--serial",
                 "TEST-USB",
-                "--record-format",
-                "v2",
                 "--duration-secs",
                 "10",
             ])
@@ -883,7 +833,7 @@ fn native_quiet_writer_failure_is_observed_and_reaps_the_owned_child() {
 #[cfg(target_os = "linux")]
 #[test]
 fn experimental_protobuf_capture_round_trips_evidence_and_rejects_unsupported_streams() {
-    for format in ["v2", "v3"] {
+    {
         let sandbox = Sandbox::new("proto_normal");
         let output = sandbox.run(&[
             "capture",
@@ -891,8 +841,6 @@ fn experimental_protobuf_capture_round_trips_evidence_and_rejects_unsupported_st
             sandbox.adb_path(),
             "--serial",
             "TEST-USB",
-            "--record-format",
-            format,
             "--transport",
             "proto",
             "--max-entries",
@@ -925,8 +873,6 @@ fn experimental_protobuf_capture_round_trips_evidence_and_rejects_unsupported_st
                 sandbox.adb_path(),
                 "--serial",
                 "TEST-USB",
-                "--record-format",
-                format,
                 "--transport",
                 "proto",
                 "--duration-secs",
@@ -955,7 +901,7 @@ fn experimental_protobuf_capture_round_trips_evidence_and_rejects_unsupported_st
 #[cfg(target_os = "linux")]
 #[test]
 fn bounded_protobuf_stop_reports_incomplete_next_frame_as_an_explicit_gap() {
-    for format in ["v2", "v3"] {
+    {
         let sandbox = Sandbox::new("proto_partial_then_idle");
         let output = sandbox.run(&[
             "capture",
@@ -963,8 +909,6 @@ fn bounded_protobuf_stop_reports_incomplete_next_frame_as_an_explicit_gap() {
             sandbox.adb_path(),
             "--serial",
             "TEST-USB",
-            "--record-format",
-            format,
             "--transport",
             "proto",
             "--duration-secs",
@@ -1078,18 +1022,17 @@ fn help_and_version_work_without_adb() {
     let help = s.run(&["--help"]);
     help.success();
     for command in [
-        "devices",
-        "capture",
-        "start",
-        "status",
-        "query",
-        "query-v2",
-        "get-v2",
-        "context-v2",
-        "stop",
+        "devices", "capture", "start", "status", "query", "get", "context", "stop",
     ] {
         assert!(help.stdout.contains(command));
     }
+    assert!(!help.stdout.contains("query-v2"));
+    assert!(!help.stdout.contains("--after-seq"));
+    assert!(!help.stdout.contains("--tag-include"));
+    assert!(!help.stdout.contains("get-v2"));
+    assert!(!help.stdout.contains("context-v2"));
+    assert!(!help.stdout.contains("--record-format"));
+    assert!(help.stdout.contains("--transport text|proto"));
     let version = s.run(&["--version"]);
     version.success();
     assert!(version.stdout.contains(env!("CARGO_PKG_VERSION")));
@@ -1097,31 +1040,46 @@ fn help_and_version_work_without_adb() {
 }
 
 #[test]
-fn v2_help_exposes_budgets_and_continuations_without_opening_a_source() {
+fn query_help_exposes_budgets_and_continuations_without_opening_a_source() {
     let s = Sandbox::new("normal");
-    for command in [None, Some("query-v2"), Some("get-v2"), Some("context-v2")] {
+    for command in [None, Some("query"), Some("get"), Some("context")] {
         for flag in ["--help", "-h"] {
             let args = command.map_or_else(|| vec![flag], |command| vec![command, flag]);
             let help = s.run(&args);
             help.success();
             assert!(help.stderr.is_empty());
+            assert!(!help.stdout.contains("query-v2"));
+            assert!(!help.stdout.contains("--after-seq"));
             for expected in [
                 "--file FILE",
                 "--session-dir DIR",
                 "--max-response-bytes N  Default 65536; range 8192..=1048576",
-                "--preview-bytes N     Default 2048; range 0..=16384",
-                "--max-scan-bytes N    Default 16777216; range 8388609..=67108864",
-                "--max-scan-records N  Default 100000; range 1..=1000000",
-                "accepted but unused by get-v2",
-                "not total file I/O",
             ] {
                 assert!(
                     help.stdout.contains(expected),
                     "{args:?}: missing {expected}"
                 );
             }
+            if command == Some("get") {
+                assert!(!help.stdout.contains("--preview-bytes"));
+                assert!(!help.stdout.contains("--max-scan-bytes"));
+                assert!(!help.stdout.contains("--max-scan-records"));
+            } else {
+                for expected in [
+                    "--preview-bytes N     Default 2048; range 0..=16384",
+                    "--max-scan-bytes N    Default 16777216; range 8388609..=67108864",
+                    "--max-scan-records N  Default 100000; range 1..=1000000",
+                    "rejected by get",
+                    "not total file I/O",
+                ] {
+                    assert!(
+                        help.stdout.contains(expected),
+                        "{args:?}: missing {expected}"
+                    );
+                }
+            }
             let guidance: &[&str] = match command {
-                Some("query-v2") => &[
+                Some("query") => &[
                     "--limit N",
                     "1..=1000",
                     "--query TEXT",
@@ -1135,7 +1093,7 @@ fn v2_help_exposes_budgets_and_continuations_without_opening_a_source() {
                     "even if records\nis empty",
                     "scan.stop_reason",
                 ],
-                Some("get-v2") => &[
+                Some("get") => &[
                     "--ref TOKEN",
                     "--text-offset N",
                     "--view stored|decoded",
@@ -1145,9 +1103,9 @@ fn v2_help_exposes_budgets_and_continuations_without_opening_a_source() {
                     "record_json_chunk",
                     "next_text_offset",
                     "complete=true",
-                    "preview/scan budgets do not apply",
+                    "preview/scan budget flags are rejected",
                 ],
-                Some("context-v2") => &[
+                Some("context") => &[
                     "--ref TOKEN",
                     "--before N",
                     "--after N",
@@ -1156,7 +1114,7 @@ fn v2_help_exposes_budgets_and_continuations_without_opening_a_source() {
                     "partial_before/partial_after",
                     "no context cursor",
                 ],
-                _ => &["query-v2 --help", "get-v2 --help", "context-v2 --help"],
+                _ => &["query --help", "get --help", "context --help"],
             };
             for expected in guidance {
                 assert!(
@@ -1166,20 +1124,196 @@ fn v2_help_exposes_budgets_and_continuations_without_opening_a_source() {
             }
         }
     }
+    let focused = s.run(&["query", "--help"]);
+    focused.success();
+    assert!(
+        focused
+            .stdout
+            .starts_with("query (--file FILE | --session-dir DIR)")
+    );
+    assert!(!focused.stdout.contains("Commands:"));
     // Help must not open paths or create the signing key just to describe usage.
-    s.run(&["query-v2", "--file", "missing.jsonl", "--help"])
+    s.run(&["query", "--file", "missing.jsonl", "--help"])
         .success();
     assert!(!s.root.join("config").exists());
     assert!(s.trace().is_empty());
 }
 
 #[test]
-fn legacy_query_identifies_native_v2_without_masking_invalid_v1_records() {
+fn query_reads_native_sources_and_rejects_invalid_or_unsupported_records() {
     use ciallogcat::document::{CaptureStatus, DocumentHeader, StreamEncoder};
     use ciallogcat::model::{Level, LogBuffer, LogEntry};
-    use ciallogcat::record_io::LegacyRecord;
     use ciallogcat::session::Session;
 
+    for proto in [false, true] {
+        let schema = 3;
+        let s = Sandbox::new("normal");
+        let dir = s.session();
+        fs::create_dir(&dir).unwrap();
+        let logs = dir.join("logs.jsonl");
+        let mut session = Session::new();
+        session.begin_attempt().unwrap();
+        session.stream_started().unwrap();
+        let mut entry = if proto {
+            ciallogcat::protobuf::DecodedEntry::decode_payload(
+                b"\x08\x01\x10\x02\x18\x04\x28\x2a\x30\x2b\x42\x03one".to_vec(),
+            )
+            .unwrap()
+            .project()
+        } else {
+            LogEntry::new(
+                "10-23 12:34:56.789",
+                42,
+                43,
+                "Test",
+                Level::Error,
+                r#"message containing {"schema_version":2,"type":"document"}"#,
+            )
+        };
+        entry.provenance = session.next_record(Some(1));
+        let mut status = serde_json::json!({
+            "schema_version":1,"type":"status","session":dir,"worker_pid":0,
+            "state":"completed","readiness":null,"entries":1,"bytes":0,
+            "reason":"max_entries","error":null,"updated_unix_ms":0,"stale":false,
+            "omitted_by_limit":false,"diagnostic_lines":0,"last_diagnostic":null,
+            "diagnostics_complete":true,"diagnostic_dropped_count":0,"discarded_entries":0
+        });
+        let header = DocumentHeader::live(session.id(), "TEST-USB".into(), vec![LogBuffer::Main]);
+        let mut encoder = StreamEncoder::new(header.clone()).unwrap();
+        let mut bytes = encoder.header_bytes().unwrap();
+        bytes.extend(encoder.record_bytes(&entry).unwrap());
+        bytes.extend(encoder.finish_bytes(CaptureStatus::default()).unwrap());
+        status["record_schema_version"] = schema.into();
+        status["artifact_id"] = header.artifact_id.to_string().into();
+        status["session_id"] = session.id().to_string().into();
+        status["visible_end"] = serde_json::json!({"seq":1,"offset":bytes.len()});
+        status["bytes"] = bytes.len().into();
+        fs::write(&logs, &bytes).unwrap();
+        fs::write(
+            dir.join("status.json"),
+            serde_json::to_vec(&status).unwrap(),
+        )
+        .unwrap();
+        for args in [
+            vec!["query", "--session-dir", dir.to_str().unwrap()],
+            vec!["query", "--file", logs.to_str().unwrap()],
+        ] {
+            let result = s.run(&args);
+            result.success();
+            let value: Value = serde_json::from_str(&result.stdout).unwrap();
+            assert_eq!(value["schema_version"], 2);
+            assert_eq!(value["source_schema_version"], schema);
+            assert_eq!(value["records"].as_array().unwrap().len(), 1);
+            assert_eq!(value["records"][0]["seq"], 1);
+            assert_eq!(
+                value["records"][0]["message_preview"],
+                entry.message.as_ref()
+            );
+            assert!(value["records"][0]["record_ref"].is_string());
+            assert!(value["next_cursor"].is_string());
+            assert_eq!(value["complete"], true);
+            assert!(value.get("entries").is_none());
+            assert!(value.get("next_after_seq").is_none());
+        }
+
+        // Unsupported v1 records and fake native headers must fail rather than
+        // being reinterpreted as a different format or silently skipped.
+        for (malformed, code) in [
+            (
+                b"{\"schema_version\":1,\"type\":\"entry\"}\n".as_slice(),
+                "unsupported_format",
+            ),
+            (
+                b"{\"schema_version\":2,\"type\":\"document\"}\n".as_slice(),
+                "unsupported_format",
+            ),
+            (
+                b"{\"schema_version\":3,\"type\":\"document\"}\n".as_slice(),
+                "invalid_source",
+            ),
+        ] {
+            fs::write(&logs, malformed).unwrap();
+            status["bytes"] = malformed.len().into();
+            status["visible_end"]["offset"] = malformed.len().into();
+            fs::write(
+                dir.join("status.json"),
+                serde_json::to_vec(&status).unwrap(),
+            )
+            .unwrap();
+            for args in [
+                vec!["query", "--session-dir", dir.to_str().unwrap()],
+                vec!["query", "--file", logs.to_str().unwrap()],
+            ] {
+                let error = s.run(&args).error(3);
+                assert_eq!(error["error"]["code"], code);
+            }
+        }
+        assert!(s.trace().is_empty());
+    }
+}
+
+#[test]
+fn query_rejects_v1_files_and_sessions() {
+    let s = Sandbox::new("normal");
+    let dir = s.session();
+    fs::create_dir(&dir).unwrap();
+    let logs = dir.join("logs.jsonl");
+    let bytes = b"{\"schema_version\":1,\"type\":\"entry\",\"seq\":1,\"time\":\"now\",\"pid\":1,\"tid\":1,\"level\":\"I\",\"tag\":\"T\",\"message\":\"old record\"}\n";
+    fs::write(&logs, bytes).unwrap();
+    let mut status = serde_json::json!({
+        "schema_version":1,"type":"status","session":dir,"worker_pid":0,
+        "state":"completed","readiness":null,"entries":1,"bytes":bytes.len(),
+        "reason":"max_entries","error":null,"updated_unix_ms":0,"stale":false,
+        "omitted_by_limit":false,"diagnostic_lines":0,"last_diagnostic":null,
+        "diagnostics_complete":true,"diagnostic_dropped_count":0,"discarded_entries":0,
+        "record_schema_version":1
+    });
+    for explicit_schema in [true, false] {
+        if !explicit_schema {
+            status
+                .as_object_mut()
+                .unwrap()
+                .remove("record_schema_version");
+        }
+        fs::write(
+            dir.join("status.json"),
+            serde_json::to_vec(&status).unwrap(),
+        )
+        .unwrap();
+        let error = s
+            .run(&["query", "--session-dir", dir.to_str().unwrap()])
+            .error(3);
+        assert_eq!(error["error"]["code"], "unsupported_format");
+    }
+    let error = s.run(&["query", "--file", logs.to_str().unwrap()]).error(3);
+    assert_eq!(error["error"]["code"], "unsupported_format");
+    assert_eq!(fs::read(&logs).unwrap(), bytes);
+    assert!(s.trace().is_empty());
+}
+
+#[test]
+fn removed_query_command_and_sequence_pagination_are_rejected() {
+    let s = Sandbox::new("normal");
+    for args in [
+        vec!["query-v2"],
+        vec!["query-v2", "--help"],
+        vec!["query-v2", "--file", "missing.jsonl"],
+        vec!["get-v2", "--help"],
+        vec!["context-v2", "--help"],
+        vec!["query", "--session-dir", "missing", "--after-seq", "0"],
+        vec!["query", "--session-dir", "missing", "--limit", "1001"],
+    ] {
+        let error = s.run(&args).error(2);
+        assert_eq!(error["error"]["code"], "invalid_arguments");
+    }
+    assert!(s.trace().is_empty());
+}
+
+#[test]
+fn native_cli_never_turns_raw_magic_key_objects_into_numbers() {
+    use ciallogcat::document::{CaptureStatus, DocumentHeader, StreamEncoder};
+    use ciallogcat::model::{Level, LogBuffer, LogEntry};
+    use ciallogcat::session::Session;
     let s = Sandbox::new("normal");
     let dir = s.session();
     fs::create_dir(&dir).unwrap();
@@ -1189,132 +1323,55 @@ fn legacy_query_identifies_native_v2_without_masking_invalid_v1_records() {
     session.stream_started().unwrap();
     let header = DocumentHeader::live(session.id(), "TEST-USB".into(), vec![LogBuffer::Main]);
     let mut encoder = StreamEncoder::new(header.clone()).unwrap();
-    let mut entry = LogEntry::new(
-        "10-23 12:34:56.789",
-        42,
-        43,
-        "Test",
-        Level::Error,
-        r#"message containing {"schema_version":2,"type":"document"}"#,
+    let mut row = LogEntry::new(
+        "now",
+        1,
+        1,
+        "T",
+        Level::Info,
+        "literal $serde_json::private::Number",
     );
-    entry.provenance = session.next_record(Some(1));
-    let mut bytes = encoder.header_bytes().unwrap();
-    bytes.extend(encoder.record_bytes(&entry).unwrap());
-    bytes.extend(encoder.finish_bytes(CaptureStatus::default()).unwrap());
-    fs::write(&logs, &bytes).unwrap();
+    row.provenance = session.next_record(Some(1));
+    let header_bytes = encoder.header_bytes().unwrap();
+    let record = String::from_utf8(encoder.record_bytes(&row).unwrap()).unwrap();
+    let footer = encoder.finish_bytes(CaptureStatus::default()).unwrap();
     let mut status = serde_json::json!({
         "schema_version":1,"type":"status","session":dir,"worker_pid":0,
-        "state":"completed","readiness":null,"entries":1,"bytes":bytes.len(),
+        "state":"completed","readiness":null,"entries":1,"bytes":0,
         "reason":"max_entries","error":null,"updated_unix_ms":0,"stale":false,
         "omitted_by_limit":false,"diagnostic_lines":0,"last_diagnostic":null,
         "diagnostics_complete":true,"diagnostic_dropped_count":0,"discarded_entries":0,
-        "record_schema_version":2,"artifact_id":header.artifact_id,"session_id":session.id(),
-        "visible_end":{"seq":1,"offset":bytes.len()}
+        "record_schema_version":3,"artifact_id":header.artifact_id,"session_id":session.id(),
+        "visible_end":{"seq":1,"offset":0}
     });
-    fs::write(
-        dir.join("status.json"),
-        serde_json::to_vec(&status).unwrap(),
-    )
-    .unwrap();
-    let native = s.run(&["query-v2", "--session-dir", dir.to_str().unwrap()]);
-    native.success();
-    let value: Value = serde_json::from_str(&native.stdout).unwrap();
-    assert_eq!(value["source_schema_version"], 2);
-    assert_eq!(value["records"][0]["seq"], 1);
-
-    // Recognize the actual header, including when optional format metadata is absent.
-    for with_format_hint in [true, false] {
-        if !with_format_hint {
-            status
-                .as_object_mut()
-                .unwrap()
-                .remove("record_schema_version");
-            fs::write(
-                dir.join("status.json"),
-                serde_json::to_vec(&status).unwrap(),
-            )
-            .unwrap();
-        }
-        let result = s.run(&["query", "--session-dir", dir.to_str().unwrap()]);
-        let error = result.error(3);
-        assert_eq!(error["error"]["code"], "unsupported_format");
-        let message = error["error"]["message"].as_str().unwrap();
-        assert!(message.contains("native v2"));
-        assert!(message.contains("query-v2 --session-dir"));
-        assert!(!message.contains("missing field"));
-        assert_eq!(result.stderr.lines().count(), 1);
-    }
-
-    let mut legacy = serde_json::to_vec(&LegacyRecord::from_entry(&entry, 1)).unwrap();
-    legacy.push(b'\n');
-    fs::write(&logs, &legacy).unwrap();
-    let result = s.run(&["query", "--session-dir", dir.to_str().unwrap()]);
-    result.success();
-    let value: Value = serde_json::from_str(&result.stdout).unwrap();
-    assert_eq!(value["entries"][0]["message"], entry.message.as_ref());
-    for malformed in [
-        b"{\"schema_version\":1,\"type\":\"entry\"}\n".as_slice(),
-        b"{\"schema_version\":2,\"type\":\"document\"}\n".as_slice(),
-    ] {
-        fs::write(&logs, malformed).unwrap();
-        let error = s
-            .run(&["query", "--session-dir", dir.to_str().unwrap()])
-            .error(3);
-        assert_eq!(error["error"]["code"], "invalid_session");
-        assert!(
-            !error["error"]["message"]
-                .as_str()
-                .unwrap()
-                .contains("query-v2")
-        );
-    }
-    assert!(s.trace().is_empty());
-}
-
-#[test]
-fn legacy_cli_never_turns_raw_magic_key_objects_into_numbers() {
-    let s = Sandbox::new("normal");
-    let dir = s.session();
-    fs::create_dir(&dir).unwrap();
-    let logs = dir.join("logs.jsonl");
-    let base = serde_json::to_string(&ciallogcat::record_io::LegacyRecord::from_entry(
-        &ciallogcat::model::LogEntry::new(
-            "",
-            1,
-            1,
-            "T",
-            ciallogcat::model::Level::Info,
-            "literal $serde_json::private::Number",
-        ),
-        1,
-    ))
-    .unwrap();
     for raw in [
         r#"{"$serde_json::private::Number":"1e-400"}"#,
         r#"{"nested":[{"\u0024serde_json::private::Number":"18446744073709551617"}]}"#,
     ] {
-        let bytes = format!("{},\"future\":{raw}}}\n", base.strip_suffix('}').unwrap());
+        let corrupt = format!(
+            "{},\"future\":{raw}}}\n",
+            record.trim_end().strip_suffix('}').unwrap()
+        );
+        let bytes = [
+            header_bytes.as_slice(),
+            corrupt.as_bytes(),
+            footer.as_slice(),
+        ]
+        .concat();
         fs::write(&logs, &bytes).unwrap();
+        status["bytes"] = bytes.len().into();
+        status["visible_end"]["offset"] = bytes.len().into();
         fs::write(
             dir.join("status.json"),
-            serde_json::to_vec(&serde_json::json!({
-                "schema_version":1,"type":"status","session":dir,"worker_pid":0,
-                "state":"completed","readiness":null,"entries":1,"bytes":bytes.len(),
-                "reason":"max_entries","error":null,"updated_unix_ms":0,"stale":false,
-                "omitted_by_limit":false,"diagnostic_lines":0,"last_diagnostic":null,
-                "diagnostics_complete":true,"diagnostic_dropped_count":0,"discarded_entries":0,
-                "record_schema_version":1
-            }))
-            .unwrap(),
+            serde_json::to_vec(&status).unwrap(),
         )
         .unwrap();
         for args in [
             vec!["query", "--session-dir", dir.to_str().unwrap()],
-            vec!["query-v2", "--file", logs.to_str().unwrap()],
+            vec!["query", "--file", logs.to_str().unwrap()],
         ] {
-            let output = s.run(&args);
-            output.error(3);
-            let error: Value = serde_json::from_str(&output.stderr).unwrap();
+            let error = s.run(&args).error(3);
+            assert_eq!(error["error"]["code"], "invalid_source");
             assert!(
                 error["error"]["message"]
                     .as_str()
@@ -1323,21 +1380,33 @@ fn legacy_cli_never_turns_raw_magic_key_objects_into_numbers() {
             );
         }
     }
-    fs::write(&logs, format!("{base}\n")).unwrap();
-    s.run(&["query-v2", "--file", logs.to_str().unwrap()])
+    let bytes = [
+        header_bytes.as_slice(),
+        record.as_bytes(),
+        footer.as_slice(),
+    ]
+    .concat();
+    fs::write(&logs, &bytes).unwrap();
+    s.run(&["query", "--file", logs.to_str().unwrap()])
         .success();
-    let mut status: Value =
-        serde_json::from_slice(&fs::read(dir.join("status.json")).unwrap()).unwrap();
-    status["bytes"] = (base.len() as u64 + 1).into();
+    status["bytes"] = bytes.len().into();
+    status["visible_end"]["offset"] = bytes.len().into();
     status["entries"] = serde_json::json!({"$serde_json::private::Number":"1"});
     fs::write(
         dir.join("status.json"),
         serde_json::to_vec(&status).unwrap(),
     )
     .unwrap();
-    let output = s.run(&["query-v2", "--session-dir", dir.to_str().unwrap()]);
-    output.error(3);
-    assert!(output.stderr.contains("unsupported JSON object key"));
+    let error = s
+        .run(&["query", "--session-dir", dir.to_str().unwrap()])
+        .error(3);
+    assert_eq!(error["error"]["code"], "invalid_source");
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("unsupported JSON object key")
+    );
     assert!(s.trace().is_empty());
 }
 
@@ -1386,20 +1455,44 @@ mod linux {
     use super::*;
 
     fn entries(text: &str) -> Vec<Value> {
-        text.lines()
-            .map(|line| {
-                let value: Value = serde_json::from_str(line).unwrap();
-                assert_eq!(value["schema_version"], 1);
-                assert_eq!(value["type"], "entry");
-                assert!(value["seq"].is_u64());
-                for key in ["time", "level", "tag", "message"] {
-                    assert!(value[key].is_string(), "missing {key}: {value}");
+        // Validate the complete native document, including its footer, before
+        // inspecting raw record fields; metadata must not count as log entries.
+        let doc = ciallogcat::document::load(
+            text.as_bytes(),
+            64 * 1024 * 1024,
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(doc.header.schema_version, 3);
+        let records: Vec<Value> = text
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .filter(|row| matches!(row["type"].as_str(), Some("entry" | "event" | "unparsed")))
+            .collect();
+        assert_eq!(records.len(), doc.entries.len());
+        for row in &records {
+            assert_eq!(row["schema_version"], 3);
+            assert!(row["seq"].is_u64());
+            assert!(row["message"].is_string());
+            assert_eq!(row["provenance"]["seq"], row["seq"]);
+            assert_eq!(
+                row["provenance"]["session_id"],
+                serde_json::json!(doc.header.session_id)
+            );
+            if row["type"] == "entry" {
+                for key in ["level", "tag"] {
+                    assert!(row[key].is_string(), "missing {key}: {row}");
                 }
-                assert!(value["pid"].is_u64());
-                assert!(value["tid"].is_u64());
-                value
-            })
-            .collect()
+                assert!(row["device_time"]["text"].is_string());
+                assert!(row["pid"].is_u64());
+                assert!(row["tid"].is_u64());
+            } else {
+                for key in ["pid", "tid", "level", "tag"] {
+                    assert!(row[key].is_null(), "fabricated {key}: {row}");
+                }
+            }
+        }
+        records
     }
 
     #[test]
@@ -1442,14 +1535,19 @@ mod linux {
         let rows = entries(&out.success().stdout);
         assert_eq!(rows.len(), 2);
         for row in &rows {
-            let observed = row["observed_unix_ms"].as_u64().unwrap();
+            let observed = row["provenance"]["observed_unix_ms"].as_u64().unwrap();
             assert!((before..=after).contains(&observed));
-            assert!(row.get("provenance").is_none());
-            assert!(row.get("session_id").is_none());
+            assert!(row["provenance"]["session_id"].is_string());
+            assert_eq!(row["provenance"]["attempt"], 1);
+            assert_eq!(row["provenance"]["segment"], 1);
         }
         let summary = out.summary();
         assert_eq!(summary["entries"], rows.len());
         assert_eq!(summary["bytes"], out.stdout.len());
+        assert_eq!(summary["record_schema_version"], 3);
+        assert_eq!(summary["visible_end"]["seq"], 2);
+        assert_eq!(summary["visible_end"]["offset"], out.stdout.len());
+        assert_eq!(rows[0]["type"], "event");
         assert_eq!(rows[1]["message"], "hello from fake adb");
         assert_eq!(rows[1]["level"], "I");
         assert_eq!(rows[1]["pid"], 1234);
@@ -1525,7 +1623,18 @@ mod linux {
     fn failed_logcat_and_missing_executable_are_errors() {
         let s = Sandbox::new("stderr_exit");
         let out = s.run(&["capture", "--serial", "TEST-USB", "--adb", s.adb_path()]);
-        out.error(4);
+        assert_eq!(out.status.code(), Some(4));
+        let document = ciallogcat::document::load(
+            out.stdout.as_bytes(),
+            4 * 1024 * 1024,
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+        .unwrap();
+        assert!(document.entries.is_empty());
+        assert_eq!(document.end.capture.state, "failed");
+        assert_eq!(document.end.capture.completeness, "partial");
+        let error: Value = serde_json::from_str(out.stderr.lines().last().unwrap()).unwrap();
+        assert_eq!(error["error"]["code"], "adb_error");
         assert!(out.stderr.contains("fake adb: logcat failed"));
         assert!(
             out.stderr.len() < 32 * 1024,
@@ -1553,13 +1662,13 @@ mod linux {
             "--output",
             output.to_str().unwrap(),
             "--max-bytes",
-            "1024",
+            "8192",
         ]);
         out.success();
         let text = fs::read_to_string(output).unwrap();
         assert!(!entries(&text).is_empty());
         assert!(text.ends_with('\n'));
-        assert!(text.len() <= 1024, "byte limit exceeded: {}", text.len());
+        assert!(text.len() <= 8192, "byte limit exceeded: {}", text.len());
         assert_eq!(out.summary()["bytes"], text.len());
         assert_eq!(out.summary()["entries"], entries(&text).len());
         assert_eq!(out.summary()["omitted_by_limit"], true);
@@ -1570,7 +1679,7 @@ mod linux {
     fn closed_stdout_with_live_adb_is_failure_and_reaped() {
         let s = Sandbox::new("eof_open");
         let started = Instant::now();
-        s.run(&[
+        let output = s.run(&[
             "capture",
             "--serial",
             "TEST-USB",
@@ -1578,9 +1687,11 @@ mod linux {
             s.adb_path(),
             "--output",
             s.root.join("eof.jsonl").to_str().unwrap(),
-        ])
-        .error(4);
-        assert!(started.elapsed() < Duration::from_secs(4));
+        ]);
+        output.error(4);
+        assert_eq!(output.summary()["stream_interruptions"], 4);
+        assert_eq!(output.summary()["capture_completeness"], "partial");
+        assert!(started.elapsed() < Duration::from_secs(12));
         s.assert_reaped();
     }
 
@@ -1651,7 +1762,12 @@ mod linux {
                 .unwrap(),
         );
         let deadline = Instant::now() + Duration::from_secs(5);
-        while fs::metadata(&output).map_or(true, |metadata| metadata.len() == 0) {
+        while fs::read_to_string(&output).map_or(true, |text| {
+            !text
+                .lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .any(|row| row["type"] == "entry")
+        }) {
             assert!(Instant::now() < deadline, "capture never became ready");
             assert!(
                 process.0.try_wait().unwrap().is_none(),
@@ -1840,23 +1956,24 @@ mod linux {
             .success()
             .json();
         assert_eq!(query["type"], "query");
-        let first = query["entries"].as_array().unwrap();
+        let first = query["records"].as_array().unwrap();
         assert_eq!(first.len(), 2);
         assert_eq!(query["has_more"], true);
-        let cursor = query["next_after_seq"].as_u64().unwrap().to_string();
+        let cursor = query["next_cursor"].as_str().unwrap();
         let next = s
             .run(&[
                 "query",
                 "--session-dir",
                 s.session().to_str().unwrap(),
-                "--after-seq",
-                &cursor,
+                "--cursor",
+                cursor,
                 "--limit",
                 "2",
             ])
             .success()
             .json();
-        assert!(next["entries"][0]["seq"].as_u64().unwrap() > cursor.parse::<u64>().unwrap());
+        assert!(next["records"][0]["seq"].as_u64().unwrap() > first[1]["seq"].as_u64().unwrap());
+        assert_eq!(next["snapshot"], query["snapshot"]);
         for _ in 0..2 {
             let stopped = s
                 .run(&["stop", "--session-dir", s.session().to_str().unwrap()])
@@ -1880,8 +1997,8 @@ mod linux {
             .run(&["query", "--session-dir", s.session().to_str().unwrap()])
             .success()
             .json();
-        assert_eq!(query["entries"].as_array().unwrap().len(), 3);
-        assert_eq!(query["partial"], false);
+        assert_eq!(query["records"].as_array().unwrap().len(), 3);
+        assert_eq!(query["complete"], true);
         let before = fs::read(s.session().join("logs.jsonl")).unwrap();
         let repeat = s.run(&[
             "start",
@@ -1918,12 +2035,15 @@ mod linux {
         assert_eq!(failed["entries"], 0);
         assert_eq!(failed["diagnostics_complete"], true);
         assert_eq!(failed["last_diagnostic"], "fake adb: logcat failed");
-        assert_eq!(failed["diagnostic_lines"], 3);
+        let interruptions = failed["stream_interruptions"].as_u64().unwrap();
+        assert_eq!(interruptions, 4, "initial attempt plus three retries");
+        assert_eq!(failed["diagnostic_lines"], interruptions * 3);
+        assert_eq!(failed["capture_completeness"], "partial");
         let query = s
             .run(&["query", "--session-dir", s.session().to_str().unwrap()])
             .success()
             .json();
-        assert!(query["entries"].as_array().unwrap().is_empty());
+        assert!(query["records"].as_array().unwrap().is_empty());
         s.assert_reaped();
     }
 
@@ -1974,40 +2094,88 @@ mod linux {
     }
 
     #[test]
-    fn query_empty_cursor_partial_tail_and_corrupt_record_are_distinct() {
+    fn query_exhausted_cursor_unpublished_tail_and_corrupt_prefix_are_distinct() {
         let s = Sandbox::new("continuous");
         start(&s, &["--max-entries", "3"]);
-        wait_status(&s, |state| state["state"] == "completed");
+        let completed = wait_status(&s, |state| state["state"] == "completed");
         s.assert_reaped();
         let logs = s.session().join("logs.jsonl");
         let original = fs::read(&logs).unwrap();
+        let footer_start = original[..original.len() - 1]
+            .iter()
+            .rposition(|&b| b == b'\n')
+            .unwrap()
+            + 1;
+        let mut published = completed.clone();
+        published["bytes"] = footer_start.into();
+        published["visible_end"]["offset"] = footer_start.into();
+        fs::write(
+            s.session().join("status.json"),
+            serde_json::to_vec(&published).unwrap(),
+        )
+        .unwrap();
+        let first = s
+            .run(&["query", "--session-dir", s.session().to_str().unwrap()])
+            .success()
+            .json();
+        assert_eq!(first["records"].as_array().unwrap().len(), 3);
+        assert_eq!(first["complete"], true);
         let empty = s
             .run(&[
                 "query",
                 "--session-dir",
                 s.session().to_str().unwrap(),
-                "--after-seq",
-                "999",
+                "--cursor",
+                first["next_cursor"].as_str().unwrap(),
             ])
             .success()
             .json();
-        assert!(empty["entries"].as_array().unwrap().is_empty());
-        assert_eq!(empty["next_after_seq"], 999);
-        assert_eq!(empty["partial"], false);
-        let mut partial = original.clone();
+        assert!(empty["records"].as_array().unwrap().is_empty());
+        assert_eq!(empty["scan"]["last_seq"], 3);
+        assert_eq!(empty["scan"]["records"], 0);
+        assert_eq!(empty["snapshot"], first["snapshot"]);
+        assert_eq!(empty["complete"], true);
+        let mut partial = original[..footer_start].to_vec();
         partial.extend_from_slice(b"{\"seq\":4");
-        fs::write(&logs, &partial).unwrap();
-        let query = s
-            .run(&["query", "--session-dir", s.session().to_str().unwrap()])
-            .success()
-            .json();
-        assert_eq!(query["entries"].as_array().unwrap().len(), 3);
-        assert_eq!(query["partial"], true);
-        partial.push(b'\n');
-        fs::write(&logs, &partial).unwrap();
-        s.run(&["query", "--session-dir", s.session().to_str().unwrap()])
-            .error(3);
+        for terminated in [false, true] {
+            if terminated {
+                partial.push(b'\n');
+            }
+            fs::write(&logs, &partial).unwrap();
+            // Even a complete corrupt line beyond visible_end.offset is not published.
+            let query = s
+                .run(&["query", "--session-dir", s.session().to_str().unwrap()])
+                .success()
+                .json();
+            assert_eq!(query["records"].as_array().unwrap().len(), 3);
+            assert_eq!(query["snapshot"], first["snapshot"]);
+            assert_eq!(query["complete"], true);
+
+            let mut corrupt_status = published.clone();
+            corrupt_status["entries"] = 4.into();
+            corrupt_status["bytes"] = partial.len().into();
+            corrupt_status["visible_end"] = serde_json::json!({"seq":4,"offset":partial.len()});
+            fs::write(
+                s.session().join("status.json"),
+                serde_json::to_vec(&corrupt_status).unwrap(),
+            )
+            .unwrap();
+            let error = s
+                .run(&["query", "--session-dir", s.session().to_str().unwrap()])
+                .error(3);
+            assert_eq!(error["error"]["code"], "invalid_source");
+            fs::write(
+                s.session().join("status.json"),
+                serde_json::to_vec(&published).unwrap(),
+            )
+            .unwrap();
+        }
         fs::write(logs, original).unwrap();
+        fs::write(
+            s.session().join("status.json"),
+            serde_json::to_vec(&completed).unwrap(),
+        )
+        .unwrap();
     }
 
     #[test]
@@ -2033,16 +2201,33 @@ mod linux {
                 .success()
                 .json();
             assert_eq!(
-                query["entries"].as_array().unwrap().len(),
+                query["records"].as_array().unwrap().len(),
                 expected,
                 "needle={needle}"
             );
             assert_eq!(
-                query["next_after_seq"], 3,
+                query["scan"]["last_seq"], 3,
                 "filter must advance over scanned nonmatches"
             );
             assert_eq!(query["has_more"], false);
-            assert_eq!(query["scan_limited"], false);
+            assert_eq!(query["complete"], true);
+            assert_eq!(query["scan"]["records"], 3);
+            assert_eq!(query["scan"]["stop_reason"], "upper_bound");
+            let resumed = s
+                .run(&[
+                    "query",
+                    "--session-dir",
+                    s.session().to_str().unwrap(),
+                    "--query",
+                    needle,
+                    "--cursor",
+                    query["next_cursor"].as_str().unwrap(),
+                ])
+                .success()
+                .json();
+            assert!(resumed["records"].as_array().unwrap().is_empty());
+            assert_eq!(resumed["scan"]["records"], 0);
+            assert_eq!(resumed["scan"]["last_seq"], 3);
         }
         s.assert_reaped();
     }
@@ -2553,7 +2738,7 @@ mod device_diagnostics {
         ] {
             assert!(help.stdout.contains(phrase));
         }
-        assert!(!help.stdout.contains("query-v2"));
+        assert!(!help.stdout.contains("query (--file"));
         for (flag, value) in [
             ("--buffers", "main,all"),
             ("--buffers", "main;reboot"),
@@ -2596,13 +2781,9 @@ mod device_diagnostics {
 }
 
 #[test]
-fn worker_rejects_incompatible_record_formats_and_native_budgets_before_output() {
-    for (schema, transport, budget) in [
-        (3, "text", 8192),
-        (3, "proto", 8191),
-        (1, "proto", 8192),
-        (4, "proto", 8192),
-    ] {
+fn worker_rejects_native_budgets_before_output() {
+    for transport in ["text", "proto"] {
+        let budget = 8191;
         let s = Sandbox::new("normal");
         let dir = s.session();
         fs::create_dir(&dir).unwrap();
@@ -2610,8 +2791,10 @@ fn worker_rejects_incompatible_record_formats_and_native_budgets_before_output()
             dir.join("config.json"),
             serde_json::to_vec(&serde_json::json!({
                 "adb":s.adb.to_str().unwrap(), "serial":"TEST-USB", "duration_secs":1,
-                "max_bytes":budget, "max_entries":1, "record_schema_version":schema,
-                "transport":transport
+                "max_bytes":budget, "max_entries":1,
+                "transport":transport,
+                "scope":ciallogcat::capture_scope::CaptureScope::default(),
+                "buffers":ciallogcat::model::LogBuffer::defaults()
             }))
             .unwrap(),
         )
@@ -2624,4 +2807,62 @@ fn worker_rejects_incompatible_record_formats_and_native_budgets_before_output()
         assert!(!dir.join("logs.jsonl").exists());
         assert!(s.trace().is_empty());
     }
+}
+
+#[test]
+fn worker_rejects_incomplete_config_before_output_or_adb() {
+    for field in ["transport", "scope", "buffers"] {
+        let s = Sandbox::new("normal");
+        let dir = s.session();
+        fs::create_dir(&dir).unwrap();
+        let mut config = serde_json::json!({
+            "adb":s.adb.to_str().unwrap(), "serial":"TEST-USB", "duration_secs":1,
+            "max_bytes":8192, "max_entries":1,
+            "transport":"text", "scope":ciallogcat::capture_scope::CaptureScope::default(),
+            "buffers":ciallogcat::model::LogBuffer::defaults()
+        });
+        config.as_object_mut().unwrap().remove(field);
+        fs::write(
+            dir.join("config.json"),
+            serde_json::to_vec(&config).unwrap(),
+        )
+        .unwrap();
+        let error = s
+            .run(&["__worker", "--session-dir", dir.to_str().unwrap()])
+            .error(3);
+        assert_eq!(error["error"]["code"], "invalid_session");
+        assert!(error["error"]["message"].as_str().unwrap().contains(field));
+        assert!(!dir.join("logs.jsonl").exists());
+        assert!(s.trace().is_empty());
+    }
+}
+
+#[test]
+fn worker_rejects_obsolete_format_field_in_saved_config() {
+    let s = Sandbox::new("normal");
+    let dir = s.session();
+    fs::create_dir(&dir).unwrap();
+    fs::write(
+        dir.join("config.json"),
+        serde_json::json!({
+            "adb":s.adb.to_str().unwrap(), "serial":"TEST-USB", "duration_secs":1,
+            "max_bytes":8192, "max_entries":1, "record_schema_version":3,
+            "transport":"text", "scope":ciallogcat::capture_scope::CaptureScope::default(),
+            "buffers":ciallogcat::model::LogBuffer::defaults()
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let error = s
+        .run(&["__worker", "--session-dir", dir.to_str().unwrap()])
+        .error(3);
+    assert_eq!(error["error"]["code"], "invalid_session");
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("record_schema_version")
+    );
+    assert!(!dir.join("logs.jsonl").exists());
+    assert!(s.trace().is_empty());
 }

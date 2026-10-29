@@ -12,7 +12,7 @@ Use the desktop app to browse live logs or offline files, or the CLI to capture 
 - Multi-row copying, keyboard navigation, and live follow that pauses while you browse
 - Light/dark themes, bundled Chinese/English fonts, and a configurable log memory budget
 - A separate, display-free CLI with JSONL capture and finite local background sessions
-- CLI v1 / native v2 file opening, retained snapshots and filtered exports with source metadata and stable record references
+- Native file opening, retained snapshots and filtered exports with source metadata and stable record references
 
 ## Table of Contents
 
@@ -31,7 +31,7 @@ Use the desktop app to browse live logs or offline files, or the CLI to capture 
 
 Ciallogcat focuses on Android app debugging. The desktop app, `ciallogcat`, reads live Logcat through ADB and filters locally. The separate `ciallogcat-cli` executable writes normalized JSONL for scripts and agents without opening a window.
 
-Open JSONL through **File** or drag and drop, without ADB. File views are read-only; saving and filtered export use native v2. The app does not show devices side by side, and currently mixes English and Chinese labels. See the [file workflow](docs/file-workflow.md).
+Open JSONL through **File** or drag and drop, without ADB. File views are read-only; saving and filtered export use one native document format. The app does not show devices side by side, and currently mixes English and Chinese labels. See the [file workflow](docs/file-workflow.md).
 
 ## Install
 
@@ -100,7 +100,7 @@ A few useful details:
 - Device-discovery errors retain the last successful device list and your selection. An offline or missing-device snapshot does not stop a stream that is still running; Pause remains available.
 - An exited stream retries at 1, 2 and 4 seconds, up to three times; Pause or Close cancels retries. Restart waits for the old child and both output pipes to finish. A stop acknowledgement taking over five seconds blocks a new start and reports an error.
 - Buffers default to `main + system + crash`. Changes take effect after **应用** (Apply). Starts and restarts use `-T 1`, so they do not backfill history and may leave gaps.
-- Package filtering includes subprocesses such as `com.example.app:sync`. GUI process names are recent `ps` hints, not verified identities; failed or expired samples are discarded, and later samples never fill unknown historical rows. Unknown or short-lived processes can be hidden by that filter; clear the package restriction to inspect their logs. Structural Logcat banners remain subject to level and message filters, but bypass the package condition and do not count as unknown processes.
+- Package filtering includes subprocesses such as `com.example.app:sync`. GUI process names are recent `ps` hints, not verified identities; failed or expired samples are discarded, and later samples never fill unknown historical rows. Unknown or short-lived processes can be hidden by that filter; clear the package restriction to inspect their logs. Structural markers and unparsed text can match message-only filters with the default Verbose threshold. Package, tag or stricter level filters exclude these rows because they lack log metadata; they are not counted as unknown processes.
 - Invalid regex shows an error until corrected. **Clear** removes local records after confirmation, never the device's Logcat buffers.
 
 ### Memory retention
@@ -123,17 +123,17 @@ ciallogcat-cli capture --serial DEVICE_SERIAL --output capture.jsonl --duration-
 # A finite local background session, using a new directory
 ciallogcat-cli start --serial DEVICE_SERIAL --session-dir ./capture-session --duration-secs 300
 ciallogcat-cli status --session-dir ./capture-session
-ciallogcat-cli query --session-dir ./capture-session --after-seq 0 --limit 100 --query "timeout"
+ciallogcat-cli query --session-dir ./capture-session --limit 100 --query "timeout"
 ciallogcat-cli stop --session-dir ./capture-session
 ```
 
-- Control responses are JSON. Captured records are **normalized JSONL**, not raw Logcat bytes. `capture --output -` streams records to stdout and sends its summary to stderr.
-- Both time and output-size bounds remain active: defaults are **600 seconds** and **1 GiB**. Use `--duration-secs` and `--max-bytes` to change them. Sessions end on a limit, ADB exit, a stop request, or an error; this is not an indefinite daemon.
+- Control responses are JSON. Capture uses **native JSONL** with text transport by default, including a header, typed records and footer, not raw Logcat bytes. `capture --output -` streams this document to stdout and sends its summary to stderr. V1 capture is no longer supported.
+- Both time and output-size bounds remain active: defaults are **600 seconds** and **1 GiB**. Use `--duration-secs` and `--max-bytes` to change them. Sessions end on a limit, stop request, successful dump, or terminal error; unexpected stream exits have bounded retries. This is not an indefinite daemon.
 - `start` reporting `adb_process_started` means the worker and ADB process started. It does **not** prove device readiness or that logs will arrive. Inspect `status` and query the output.
-- `query --query` matches a case-sensitive literal substring of the message. For another page, pass its `next_after_seq` as `--after-seq`. The CLI does not expose all desktop filters.
+- `query --query` matches a case-sensitive literal substring of the message by default; regex, metadata and time filters are also available. For another preview page, pass `next_cursor` as `--cursor` with the same source, mode and filters. Use `--all --format text` for full readable snapshot output.
 - Output files and session directories must be new. Keep captures private and review them before sharing; device logs can contain sensitive information.
 
-The [CLI guide](docs/cli.md) covers options, paging limits, exit codes, shutdown, and packaging. Run `ciallogcat-cli --help` for a quick reference.
+The [CLI guide](docs/cli.md) covers options, paging limits, exit codes, shutdown, and packaging. Existing scripts should follow the [query migration notes](docs/cli.md#migrating-query-callers). Run `ciallogcat-cli --help` for a quick reference.
 
 ## Configuration
 
@@ -144,7 +144,12 @@ Desktop settings, saved filters, and keyword history are stored locally:
 
 Set `CIALLOGCAT_CONFIG_DIR` to change the desktop configuration directory. Both frontends support `CIALLOGCAT_ADB` for the ADB executable; the CLI also accepts `--adb PATH`. Otherwise, ADB discovery checks SDK environment variables, `PATH`, and common SDK locations. CLI sessions use the directory specified by `--session-dir`.
 
-New Agent integrations can use `capture/start --record-format v2` with `query-v2/get-v2/context-v2`, preserving identities in files the GUI can open. Experimental `--transport proto` is explicit; see the [CLI guide](docs/cli.md).
+The old misspelled `Ciallocat` / `ciallocat` configuration directory is no longer
+imported automatically; its files are left untouched. The query signing key is
+`query.key` in the current configuration directory. Old query tokens must be
+recreated by querying again.
+
+Agent integrations use `capture/start` with `query/get/context`, preserving identities in files the GUI can open. Text transport is the default; `--transport proto` explicitly selects protobuf. Both use the same native document format. The protobuf transport remains experimental; see the [CLI guide](docs/cli.md).
 
 ## Documentation
 
@@ -154,7 +159,7 @@ Detailed guides are in English or Chinese:
 - [Desktop behavior and diagnostics](docs/ui-review.md)
 - [CLI commands and sessions](docs/cli.md)
 - [Shared Rust core](docs/headless-core.md)
-- [Agent v2 queries, full records and context](docs/agent-query.md)
+- [Agent queries, full records and context](docs/agent-query.md)
 - [Development direction and implementation progress (Chinese)](docs/development-plan.md)
 - [Open tasks and Agent handoff (Chinese)](TODO.md)
 - [Validation status and limits (Chinese)](docs/validation.md)

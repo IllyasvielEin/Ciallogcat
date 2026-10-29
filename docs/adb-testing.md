@@ -17,8 +17,8 @@ cargo test --locked --no-default-features --lib adb::integration_tests -- --noca
 # Linux / Windows 原生子进程、二进制通道和生命周期回归
 cargo test --locked --no-default-features --test native_adb_integration
 
-# Agent cursor/read budget 和 native/v1 查询（无需 ADB）
-cargo test --locked --no-default-features --test query_v2_integration
+# Agent cursor/read budget 和 native 查询（无需 ADB）
+cargo test --locked --no-default-features --test query_integration
 
 # 公共核心 API 回归：解析、过滤一致性、快照及通知顺序
 cargo test --locked --no-default-features --test headless_core
@@ -43,7 +43,7 @@ cargo build --locked --release
 - `tests/fixtures/test_fake_adb.py`：mock 自测，确认异常命令、退出码和 watchdog 等行为。
 - `tests/fixtures/native_fake_adb.rs`：无第三方依赖的原生 executable fixture；严格匹配命令，不执行 shell。独立 12 秒 watchdog；包含原始二进制、非法 UTF-8、静默与 burst 场景。
 - `tests/native_adb_integration.rs`：Linux/Windows 实际 CLI 回归。测试临时编译并复制独有 fixture 路径，通过子进程环境隔离场景，Windows 用只读 process wait handle 确认停止，Linux 检查 /proc 回收。生成文件与输出保留在 `target/native-adb-integration/`。
-- `tests/query_v2_integration.rs`：真实 CLI 查询、文件代际/游标验证和确定性读取字节计数；工件在 `target/query-v2-integration/`。
+- `tests/query_integration.rs`：真实 CLI 查询、文件代际/游标验证和确定性读取字节计数；工件在 `target/query-integration/`。
 - `tests/support/adb_integration.rs`：由核心库的 `src/adb.rs` 在 Linux 测试构建中引入，直接测试生产后端，使用默认无操作 `WakeSignal`，不依赖 egui。应用运行时不包含这些测试。
 - `tests/headless_core.rs`：通过公共库 API 验证 threadtime / marker 解析、字面量与正则过滤、大小写、包名及级别规则、同步 / 异步结果一致性、快照隔离，以及过滤 / 高亮 / 后端事件发布后才调用通知。
 - `tests/support/config_integration.rs`：仅在默认 GUI 的 Linux 测试中由 `src/config.rs` 引入，独立验证配置目录覆盖与文件保存 / 读回。

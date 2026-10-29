@@ -101,6 +101,37 @@ pub enum LogEntryKind {
     Unparsed,
 }
 
+impl LogEntryKind {
+    /// Stable presentation label, shared by UI, text export and CLI rendering.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Log => "log",
+            Self::Marker => "event",
+            Self::Unparsed => "unparsed",
+        }
+    }
+}
+
+/// Log metadata exists only for successfully parsed log records. The internal
+/// slots on `LogEntry` are not evidence for event/unparsed rows; consumers must
+/// use this projection instead of exposing or filtering their placeholder values.
+#[derive(Clone, Copy, Debug)]
+pub struct LogFields<'a> {
+    pub time: &'a str,
+    pub pid: u32,
+    pub tid: u32,
+    pub level: Level,
+    pub tag: &'a str,
+    pub process: Option<&'a str>,
+    pub process_source: Option<ProcessSource>,
+}
+
+impl<'a> LogFields<'a> {
+    pub fn process_name(self) -> &'a str {
+        self.process.unwrap_or("—")
+    }
+}
+
 /// A sampled process name is a hint, not proof of a log's process instance.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -187,6 +218,18 @@ pub struct LogEntry {
 }
 
 impl LogEntry {
+    pub fn log_fields(&self) -> Option<LogFields<'_>> {
+        (self.kind == LogEntryKind::Log).then_some(LogFields {
+            time: &self.time,
+            pid: self.pid,
+            tid: self.tid,
+            level: self.level,
+            tag: &self.tag,
+            process: self.process.as_deref(),
+            process_source: self.process_source,
+        })
+    }
+
     /// Conservative owned-text and per-row index/accounting cost. LogStore
     /// separately accounts for the capacity of its entry allocations.
     pub fn payload_bytes(&self) -> usize {
@@ -238,21 +281,19 @@ impl LogEntry {
 
     /// Counts only successfully parsed logs whose process name is unknown.
     pub fn is_unresolved_process(&self) -> bool {
-        self.kind == LogEntryKind::Log && self.process.is_none()
+        self.log_fields()
+            .is_some_and(|fields| fields.process.is_none())
     }
 
     pub fn process_name(&self) -> &str {
-        self.process.as_deref().unwrap_or("—")
+        self.log_fields().map_or("—", LogFields::process_name)
     }
 
     pub fn matches_package(&self, package: &str) -> bool {
-        if package.is_empty() || self.kind == LogEntryKind::Marker {
+        if package.is_empty() {
             return true;
         }
-        if self.kind == LogEntryKind::Unparsed {
-            return false;
-        }
-        let Some(process) = self.process.as_deref() else {
+        let Some(process) = self.log_fields().and_then(|fields| fields.process) else {
             return false;
         };
         process == package
@@ -279,15 +320,23 @@ impl LogEntry {
             }
             count
         }
-        let process = self.process_name();
+        let Some(fields) = self.log_fields() else {
+            return self
+                .kind
+                .label()
+                .len()
+                .checked_add(3)?
+                .checked_add(self.message.len());
+        };
+        let process = fields.process_name();
         [
-            self.time.len(),
-            digits(self.pid).max(5),
-            digits(self.tid).max(5),
-            self.level.short().len(),
+            fields.time.len(),
+            digits(fields.pid).max(5),
+            digits(fields.tid).max(5),
+            fields.level.short().len(),
             process.len(),
             24usize.saturating_sub(process.chars().take(24).count()),
-            self.tag.len(),
+            fields.tag.len(),
             self.message.len(),
             7, // Fixed spaces and the tag's colon-space separator.
         ]
@@ -297,16 +346,21 @@ impl LogEntry {
 
     pub fn append_copy_text(&self, text: &mut String) {
         use std::fmt::Write;
-        let process = self.process_name();
+        let Some(fields) = self.log_fields() else {
+            write!(text, "[{}] {}", self.kind.label(), self.message)
+                .expect("writing to a String cannot fail");
+            return;
+        };
+        let process = fields.process_name();
         write!(
             text,
             "{} {:>5} {:>5} {} {:<24} {}: {}",
-            self.time,
-            self.pid,
-            self.tid,
-            self.level.short(),
+            fields.time,
+            fields.pid,
+            fields.tid,
+            fields.level.short(),
             process,
-            self.tag,
+            fields.tag,
             self.message
         )
         .expect("writing to a String cannot fail");
@@ -351,6 +405,33 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn structural_projection_and_copy_never_expose_placeholder_metadata() {
+        for kind in [LogEntryKind::Marker, LogEntryKind::Unparsed] {
+            for message in ["", "boundary", "雪\0\r\nnext\n\n", "tail  "] {
+                let mut row = LogEntry::new("fake-time", 42, 43, "fake-tag", Level::Fatal, message);
+                row.kind = kind;
+                row.process = Some("fake.process".into());
+                row.process_source = Some(ProcessSource::PsSnapshot);
+                assert!(row.log_fields().is_none());
+                assert_eq!(row.process_name(), "—");
+                assert!(!row.is_unresolved_process());
+                assert!(row.matches_package(""));
+                assert!(!row.matches_package("fake.process"));
+                assert_eq!(row.copy_text(), format!("[{}] {message}", kind.label()));
+                assert_eq!(row.copy_text_bytes(), Some(row.copy_text().len()));
+                assert_eq!(row.message.as_ref(), message);
+            }
+        }
+        let row = LogEntry::new("real-time", 0, 0, "logcat", Level::Info, "real log");
+        let fields = row.log_fields().unwrap();
+        assert_eq!(
+            (fields.pid, fields.tid, fields.level, fields.tag),
+            (0, 0, Level::Info, "logcat")
+        );
+        assert!(row.copy_text().contains("    0     0 I"));
     }
 
     #[test]

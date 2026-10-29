@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use ciallogcat::filter::{FilterSpec, compile_matcher, entry_matches};
-use ciallogcat::model::{Level, LogEntry, LogEntryKind};
+use ciallogcat::model::{Level, LogEntry};
 use regex::Regex;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -20,7 +20,6 @@ pub(super) struct QueryFilter {
     device_time: bool,
     since_input: Option<String>,
     until_input: Option<String>,
-    fields_required: bool,
 }
 
 impl QueryFilter {
@@ -36,14 +35,7 @@ impl QueryFilter {
                 "--ignore-case and --case-sensitive are mutually exclusive",
             ));
         }
-        let tag = flags.remove("--tag");
-        let tag_include = flags.remove("--tag-include");
-        if tag.is_some() && tag_include.is_some() {
-            return Err(usage(
-                "--tag and --tag-include are aliases; provide only one",
-            ));
-        }
-        let tag_include = bounded(tag.or(tag_include).unwrap_or_default(), "--tag")?;
+        let tag_include = string(flags, "--tag")?;
         let tag_exclude = string(flags, "--tag-exclude")?;
         let package = string(flags, "--package")?;
         let level = flags.remove("--min-level");
@@ -89,12 +81,6 @@ impl QueryFilter {
             "device" => true,
             _ => return Err(usage("--time-basis must be received or device")),
         };
-        let fields_required = !tag_include.is_empty()
-            || !tag_exclude.is_empty()
-            || !package.trim().is_empty()
-            || pid.is_some()
-            || tid.is_some()
-            || level.is_some();
         let spec = FilterSpec {
             package,
             tag_include,
@@ -113,7 +99,6 @@ impl QueryFilter {
             since,
             until,
             device_time,
-            fields_required,
             since_input,
             until_input,
         })
@@ -154,42 +139,27 @@ impl QueryFilter {
     }
 
     pub(super) fn fingerprint(&self) -> String {
-        // Keep pre-upgrade literal-only cursors valid. Extended filters use a
-        // versioned canonical encoding so every effective predicate is bound.
-        let bytes = if !self.spec.regex
-            && self.spec.case_sensitive
-            && !self.fields_required
-            && self.since.is_none()
-            && self.until.is_none()
-        {
-            self.spec.query.as_bytes().to_vec()
-        } else {
-            let canonical = json!({"query_filter_version":1,"query":self.spec.query,
-                "regex":self.spec.regex,"case_sensitive":self.spec.case_sensitive,
-                "tag_include":self.spec.tag_include,"tag_exclude":self.spec.tag_exclude,
-                "package":self.spec.package.trim(),"min_level":self.spec.min_level.short(),
-                "pid":self.pid,"tid":self.tid,"since_ns":self.since,"until_ns":self.until,
-                "since_input":self.since_input,"until_input":self.until_input,
-                "device_time":self.device_time && (self.since.is_some() || self.until.is_some()),
-                "fields_required":self.fields_required})
-            .to_string();
-            // NUL cannot occur in an argv query: separate extended hashes from
-            // legacy arbitrary literal queries.
-            let mut bytes = b"\0ciallogcat-query-filter-v1\0".to_vec();
-            bytes.extend_from_slice(canonical.as_bytes());
-            bytes
-        };
+        // One canonical encoding binds every effective predicate, including
+        // plain literal queries. No older hash-only cursor format is accepted.
+        let bytes = serde_json::to_vec(&json!({"query_filter_version":1,"query":self.spec.query,
+            "regex":self.spec.regex,"case_sensitive":self.spec.case_sensitive,
+            "tag_include":self.spec.tag_include,"tag_exclude":self.spec.tag_exclude,
+            "package":self.spec.package.trim(),"min_level":self.spec.min_level.short(),
+            "pid":self.pid,"tid":self.tid,"since_ns":self.since,"until_ns":self.until,
+            "since_input":self.since_input,"until_input":self.until_input,
+            "device_time":self.device_time && (self.since.is_some() || self.until.is_some())}))
+        .expect("filter fields serialize");
         format!("{:x}", Sha256::digest(bytes))
     }
 
-    pub(super) fn matches(
-        &self,
-        entry: &LogEntry,
-        legacy_received_unix_ms: Option<u64>,
-    ) -> Result<bool> {
-        if (self.fields_required && entry.kind != LogEntryKind::Log)
-            || self.pid.is_some_and(|pid| entry.pid != pid)
-            || self.tid.is_some_and(|tid| entry.tid != tid)
+    pub(super) fn matches(&self, entry: &LogEntry) -> Result<bool> {
+        let fields = entry.log_fields();
+        if self
+            .pid
+            .is_some_and(|pid| fields.is_none_or(|fields| fields.pid != pid))
+            || self
+                .tid
+                .is_some_and(|tid| fields.is_none_or(|fields| fields.tid != tid))
             || !entry_matches(entry, &self.spec, self.matcher.as_ref())
         {
             return Ok(false);
@@ -198,11 +168,11 @@ impl QueryFilter {
             let time = if self.device_time {
                 entry.proto.as_ref().map(|p| i128::from(p.time_sec) * 1_000_000_000 + i128::from(p.time_nsec))
             } else {
-                entry.provenance.and_then(|p| p.observed_unix_ms).or(legacy_received_unix_ms).map(|ms| i128::from(ms) * 1_000_000)
+                entry.provenance.and_then(|p| p.observed_unix_ms).map(|ms| i128::from(ms) * 1_000_000)
             }.ok_or_else(|| error("time_unavailable", if self.device_time {
                 "device time filtering requires an exact protobuf epoch on every otherwise matching record; yearless/text timestamps are not inferred"
             } else {
-                "received time filtering requires observed_unix_ms on every otherwise matching record; older legacy records may not contain it"
+                "received time filtering requires observed_unix_ms on every otherwise matching record"
             }, 3))?;
             if self.since.is_some_and(|start| time < start)
                 || self.until.is_some_and(|end| time >= end)
@@ -397,20 +367,26 @@ mod tests {
     }
 
     #[test]
-    fn preserves_legacy_literal_case_sensitive_hash_and_matches() {
+    fn literal_queries_use_canonical_hashes_and_case_sensitive_matches() {
         let f = parse(&[("--query", "Hello")]).unwrap();
-        assert_eq!(f.fingerprint(), format!("{:x}", Sha256::digest(b"Hello")));
-        assert!(f.matches(&entry(), None).unwrap());
+        assert_ne!(f.fingerprint(), format!("{:x}", Sha256::digest(b"Hello")));
+        assert_eq!(
+            f.fingerprint(),
+            parse(&[("--query", "Hello"), ("--case-sensitive", "")])
+                .unwrap()
+                .fingerprint()
+        );
+        assert!(f.matches(&entry()).unwrap());
         assert!(
             !parse(&[("--query", "hello")])
                 .unwrap()
-                .matches(&entry(), None)
+                .matches(&entry())
                 .unwrap()
         );
         assert!(
             !parse(&[("--query", ".*")])
                 .unwrap()
-                .matches(&entry(), None)
+                .matches(&entry())
                 .unwrap()
         );
         assert!(!f.has_time_filter());
@@ -429,7 +405,7 @@ mod tests {
             ("--tid", "43"),
         ])
         .unwrap();
-        assert!(f.matches(&entry(), None).unwrap());
+        assert!(f.matches(&entry()).unwrap());
         for flags in [
             vec![("--tag", "net")],
             vec![("--tag-exclude", "Worker")],
@@ -438,11 +414,10 @@ mod tests {
             vec![("--min-level", "E")],
             vec![("--package", "com.other")],
         ] {
-            assert!(!parse(&flags).unwrap().matches(&entry(), None).unwrap());
+            assert!(!parse(&flags).unwrap().matches(&entry()).unwrap());
         }
         assert!(parse(&[("--query", "["), ("--regex", "")]).is_err());
         assert!(parse(&[("--ignore-case", ""), ("--case-sensitive", "")]).is_err());
-        assert!(parse(&[("--tag", "a"), ("--tag-include", "b")]).is_err());
         assert!(parse(&[("--pid", "4294967296")]).is_err());
         assert!(parse(&[("--pid", "+1")]).is_err());
         assert!(parse(&[("--min-level", "X")]).is_err());
@@ -450,15 +425,56 @@ mod tests {
     #[test]
     fn structural_rows_do_not_match_placeholder_pid_or_level() {
         let e = LogEntry::marker("banner");
-        assert!(parse(&[]).unwrap().matches(&e, None).unwrap());
-        assert!(!parse(&[("--pid", "0")]).unwrap().matches(&e, None).unwrap());
-        assert!(
-            !parse(&[("--min-level", "V")])
-                .unwrap()
-                .matches(&e, None)
-                .unwrap()
+        assert!(parse(&[]).unwrap().matches(&e).unwrap());
+        assert!(!parse(&[("--pid", "0")]).unwrap().matches(&e).unwrap());
+        assert!(parse(&[("--min-level", "V")]).unwrap().matches(&e).unwrap());
+        assert!(!parse(&[("--min-level", "D")]).unwrap().matches(&e).unwrap());
+        assert_eq!(
+            parse(&[]).unwrap().fingerprint(),
+            parse(&[("--min-level", "V")]).unwrap().fingerprint()
         );
     }
+    #[test]
+    fn cli_metadata_predicates_match_shared_gui_policy_for_every_kind() {
+        for kind in [
+            ciallogcat::model::LogEntryKind::Log,
+            ciallogcat::model::LogEntryKind::Marker,
+            ciallogcat::model::LogEntryKind::Unparsed,
+        ] {
+            let mut row = entry();
+            row.kind = kind;
+            for flags in [
+                vec![],
+                vec![("--min-level", "D")],
+                vec![("--min-level", "verbose")],
+                vec![("--min-level", "D")],
+                vec![("--tag", "Net")],
+                vec![("--tag-exclude", "Absent")],
+                vec![("--package", "com.example.app")],
+                vec![("--query", "Hello")],
+                vec![("--query", "missing")],
+            ] {
+                let filter = parse(&flags).unwrap();
+                assert_eq!(
+                    filter.matches(&row).unwrap(),
+                    entry_matches(&row, &filter.spec, filter.matcher.as_ref()),
+                    "{kind:?} {flags:?}"
+                );
+            }
+            for flag in ["--pid", "--tid"] {
+                let value = if flag == "--pid" { "42" } else { "43" };
+                assert_eq!(
+                    parse(&[(flag, value)]).unwrap().matches(&row).unwrap(),
+                    kind == ciallogcat::model::LogEntryKind::Log
+                );
+            }
+        }
+        assert_eq!(
+            parse(&[]).unwrap().fingerprint(),
+            parse(&[("--min-level", "verbose")]).unwrap().fingerprint()
+        );
+    }
+
     #[test]
     fn absolute_time_offset_fraction_day_and_year_crossings() {
         assert_eq!(parse_time("1970-01-01T00:00:00Z", 0).unwrap(), 0);
@@ -516,18 +532,8 @@ mod tests {
         assert_eq!(parse_time("2h", 7_200_000).unwrap(), 0);
         assert_eq!(parse_time("1d", 86_400_000).unwrap(), 0);
         let e = entry();
-        assert!(
-            parse(&[("--since", "0s")])
-                .unwrap()
-                .matches(&e, None)
-                .unwrap()
-        );
-        assert!(
-            !parse(&[("--until", "0s")])
-                .unwrap()
-                .matches(&e, None)
-                .unwrap()
-        );
+        assert!(parse(&[("--since", "0s")]).unwrap().matches(&e).unwrap());
+        assert!(!parse(&[("--until", "0s")]).unwrap().matches(&e).unwrap());
         assert!(parse(&[("--since", "1s"), ("--until", "0s")]).is_ok());
         assert!(parse(&[("--since", "0s"), ("--until", "1s")]).is_err());
         assert!(parse(&[("--since", "0s"), ("--until", "0s")]).is_err());
@@ -545,7 +551,7 @@ mod tests {
         assert_eq!(
             parse(&[("--since", "1h")])
                 .unwrap()
-                .matches(&e, None)
+                .matches(&e)
                 .unwrap_err()
                 .code,
             "time_unavailable"
@@ -553,7 +559,7 @@ mod tests {
         assert_eq!(
             parse(&[("--since", "1h"), ("--time-basis", "device")])
                 .unwrap()
-                .matches(&e, None)
+                .matches(&e)
                 .unwrap_err()
                 .code,
             "time_unavailable"
@@ -561,7 +567,7 @@ mod tests {
         assert!(
             !parse(&[("--since", "1h"), ("--query", "absent")])
                 .unwrap()
-                .matches(&e, None)
+                .matches(&e)
                 .unwrap()
         );
     }
@@ -576,7 +582,7 @@ mod tests {
             vec![("--package", "com.example")],
             vec![("--pid", "42")],
             vec![("--tid", "43")],
-            vec![("--min-level", "V")],
+            vec![("--min-level", "D")],
             vec![("--since", "1h")],
         ] {
             assert_ne!(parse(&flags).unwrap().fingerprint(), baseline);
@@ -604,7 +610,7 @@ mod tests {
                 ("--until", "1970-01-01T00:00:00.123456790Z")
             ])
             .unwrap()
-            .matches(&e, None)
+            .matches(&e)
             .unwrap()
         );
         assert!(
@@ -613,41 +619,38 @@ mod tests {
                 ("--until", "1970-01-01T00:00:00.123456789Z")
             ])
             .unwrap()
-            .matches(&e, None)
+            .matches(&e)
             .unwrap()
         );
         assert!(
             !parse(&[("--until", "1970-01-01T00:00:00.123456790Z")])
                 .unwrap()
-                .matches(&e, None)
+                .matches(&e)
                 .unwrap()
         );
     }
     #[test]
-    fn optional_legacy_received_time_does_not_require_fabricated_identity() {
+    fn missing_native_receive_time_is_not_guessed() {
         let mut e = entry();
-        e.provenance = None;
+        e.provenance.as_mut().unwrap().observed_unix_ms = None;
         let filter = parse(&[
             ("--since", "1970-01-01T00:00:00.123Z"),
             ("--until", "1970-01-01T00:00:00.124Z"),
         ])
         .unwrap();
-        assert!(filter.matches(&e, Some(123)).unwrap());
-        assert!(!filter.matches(&e, Some(122)).unwrap());
-        assert!(!filter.matches(&e, Some(124)).unwrap());
-        assert_eq!(
-            filter.matches(&e, None).unwrap_err().code,
-            "time_unavailable"
-        );
+        assert_eq!(filter.matches(&e).unwrap_err().code, "time_unavailable");
+        for (ms, expected) in [(122, false), (123, true), (124, false)] {
+            e.provenance.as_mut().unwrap().observed_unix_ms = Some(ms);
+            assert_eq!(filter.matches(&e).unwrap(), expected);
+        }
         assert_eq!(
             parse(&[("--since", "0s"), ("--time-basis", "device")])
                 .unwrap()
-                .matches(&e, Some(123))
+                .matches(&e)
                 .unwrap_err()
                 .code,
             "time_unavailable"
         );
-        assert!(e.provenance.is_none());
     }
     #[test]
     fn resolved_window_is_exact_and_not_data_coverage() {

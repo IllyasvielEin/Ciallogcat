@@ -1,19 +1,19 @@
 //! CLI-only presentation contracts. Files/JSONL retain evidence; display clocks
 //! and line terminators must not modify archives or invent timestamp provenance.
 use std::fs::{self, File};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, atomic::AtomicBool};
 use std::time::{Duration, Instant};
 
-use ciallogcat::document::{
-    self, CaptureStatus, Document, DocumentHeader, ExportScope, NativeFormat,
-};
+use ciallogcat::document::{self, CaptureStatus, Document, DocumentHeader, ExportScope};
 use ciallogcat::log_store::LogStore;
 use ciallogcat::model::{LogBuffer, LogEntry};
 use ciallogcat::session::Session;
-use serde_json::{Value, json};
+use serde_json::Value;
+
+#[path = "support/native_fixture.rs"]
+mod native_fixture;
 
 struct ChildGuard(Child);
 impl Drop for ChildGuard {
@@ -58,15 +58,12 @@ impl Sandbox {
             .unwrap()
             .to_owned()
     }
-    fn legacy(&self, records: &[Value]) -> String {
+    fn records(&self, records: &[Value]) -> String {
         let path = self.filename();
-        let mut file = File::create(&path).unwrap();
-        for row in records {
-            writeln!(file, "{row}").unwrap();
-        }
+        fs::write(&path, native_fixture::bytes(records, true)).unwrap();
         path
     }
-    fn native(&self, format: NativeFormat, entries: Vec<(LogEntry, Option<u64>)>) -> String {
+    fn native(&self, entries: Vec<(LogEntry, Option<u64>)>) -> String {
         let mut session = Session::new();
         session.begin_attempt().unwrap();
         session.stream_started().unwrap();
@@ -77,7 +74,6 @@ impl Sandbox {
         }
         let mut header = DocumentHeader::live(session.id(), "TEST".into(), vec![LogBuffer::Main]);
         header.source.transport_format = Some("logcat_proto_experimental".into());
-        header.set_format(format).unwrap();
         let document = Document::from_snapshot(
             header,
             Arc::new(store),
@@ -124,20 +120,19 @@ impl Sandbox {
         }
     }
     fn text(&self, file: &str, flags: &[&str]) -> Output {
-        let mut args = vec!["query-v2", "--file", file, "--all", "--format", "text"];
+        let mut args = vec!["query", "--file", file, "--all", "--format", "text"];
         args.extend_from_slice(flags);
         let output = self.run(&args, None);
         assert_eq!(output.summary()["complete"], true);
         output
     }
 }
-fn legacy(seq: u64, message: &str, received: Option<u64>) -> Value {
-    let mut value = json!({"schema_version":1,"type":"entry","seq":seq,"time":"10-28 00:00:00.000","pid":42,"tid":43,"level":"I","tag":"Tag","message":message});
-    if let Some(time) = received {
-        value["observed_unix_ms"] = time.into();
-    }
+fn row(seq: u64, message: &str, received: Option<u64>) -> Value {
+    let mut value = native_fixture::row(seq, message, received);
+    value["tag"] = "Tag".into();
     value
 }
+
 fn varint(mut value: u64, out: &mut Vec<u8>) {
     while value >= 128 {
         out.push((value as u8 & 127) | 128);
@@ -172,7 +167,7 @@ fn proto_named(message: &str, seconds: u64, nanos: u64, process: Option<&str>) -
 #[test]
 fn default_readable_and_explicit_formats_use_received_milliseconds() {
     let s = Sandbox::new();
-    let file = s.legacy(&[legacy(1, "payload", Some(1_767_225_600_123))]);
+    let file = s.records(&[row(1, "payload", Some(1_767_225_600_123))]);
     for (format, prefix) in [
         (None, "2026-01-01 00:00:00.123+00:00"),
         (Some("readable"), "2026-01-01 00:00:00.123+00:00"),
@@ -192,58 +187,56 @@ fn default_readable_and_explicit_formats_use_received_milliseconds() {
 }
 
 #[test]
-fn received_and_device_display_follow_the_same_basis_as_time_filters_in_v2_v3() {
-    for format in [NativeFormat::V2, NativeFormat::CompactV3] {
-        let s = Sandbox::new();
-        let file = s.native(format, vec![(proto("chosen", 1, 123), Some(99_321))]);
-        for (basis, since, until, prefix) in [
-            (
-                "received",
-                "1970-01-01T00:01:39Z",
-                "1970-01-01T00:01:40Z",
-                "99.321",
-            ),
-            (
-                "device",
-                "1970-01-01T00:00:01.000000123Z",
-                "1970-01-01T00:00:01.000000124Z",
-                "1.000000123 [device]",
-            ),
-        ] {
-            let text = s.text(
-                &file,
-                &[
-                    "--time-format",
-                    "epoch",
-                    "--time-basis",
-                    basis,
-                    "--since",
-                    since,
-                    "--until",
-                    until,
-                ],
-            );
-            assert!(text.stdout.starts_with(prefix), "{}", text.stdout);
-            assert_eq!(text.summary()["records_returned"], 1);
-            assert_eq!(text.summary()["time_window"]["basis"], basis);
-        }
-        let device = s.text(
+fn received_and_device_display_follow_the_same_basis_as_time_filters_in_native_records() {
+    let s = Sandbox::new();
+    let file = s.native(vec![(proto("chosen", 1, 123), Some(99_321))]);
+    for (basis, since, until, prefix) in [
+        (
+            "received",
+            "1970-01-01T00:01:39Z",
+            "1970-01-01T00:01:40Z",
+            "99.321",
+        ),
+        (
+            "device",
+            "1970-01-01T00:00:01.000000123Z",
+            "1970-01-01T00:00:01.000000124Z",
+            "1.000000123 [device]",
+        ),
+    ] {
+        let text = s.text(
             &file,
             &[
-                "--time-basis",
-                "device",
-                "--timezone",
-                "utc",
                 "--time-format",
-                "rfc3339",
+                "epoch",
+                "--time-basis",
+                basis,
+                "--since",
+                since,
+                "--until",
+                until,
             ],
         );
-        assert!(
-            device
-                .stdout
-                .starts_with("1970-01-01T00:00:01.000000123Z [device]")
-        );
+        assert!(text.stdout.starts_with(prefix), "{}", text.stdout);
+        assert_eq!(text.summary()["records_returned"], 1);
+        assert_eq!(text.summary()["time_window"]["basis"], basis);
     }
+    let device = s.text(
+        &file,
+        &[
+            "--time-basis",
+            "device",
+            "--timezone",
+            "utc",
+            "--time-format",
+            "rfc3339",
+        ],
+    );
+    assert!(
+        device
+            .stdout
+            .starts_with("1970-01-01T00:00:01.000000123Z [device]")
+    );
 }
 
 #[test]
@@ -259,9 +252,9 @@ fn message_terminators_are_preserved_without_an_extra_blank_line_across_all_sche
         "payload\r",
     ] {
         let s = Sandbox::new();
-        let mut files = vec![s.legacy(&[legacy(1, message, Some(0))])];
-        for format in [NativeFormat::V2, NativeFormat::CompactV3] {
-            files.push(s.native(format, vec![(proto(message, 1, 0), Some(0))]));
+        let mut files = vec![s.records(&[row(1, message, Some(0))])];
+        {
+            files.push(s.native(vec![(proto(message, 1, 0), Some(0))]));
         }
         let expected = if message.ends_with('\n') {
             message.to_owned()
@@ -273,7 +266,7 @@ fn message_terminators_are_preserved_without_an_extra_blank_line_across_all_sche
             let rendered = text.stdout.split_once("Tag: ").unwrap().1;
             assert_eq!(rendered, expected, "file {file}");
             let jsonl = s.run(
-                &["query-v2", "--file", &file, "--all", "--format", "jsonl"],
+                &["query", "--file", &file, "--all", "--format", "jsonl"],
                 None,
             );
             assert_eq!(jsonl.summary()["records_returned"], 1);
@@ -285,31 +278,29 @@ fn message_terminators_are_preserved_without_an_extra_blank_line_across_all_sche
 
 #[test]
 fn event_and_unparsed_text_do_not_expose_log_placeholders_or_add_terminators() {
-    for format in [NativeFormat::V2, NativeFormat::CompactV3] {
-        for (entry, marker, expected) in [
-            (LogEntry::marker("event\n"), "[event]", "event\n"),
-            (
-                LogEntry::unparsed("unknown\r\n"),
-                "[unparsed]",
-                "unknown\r\n",
-            ),
-        ] {
-            let s = Sandbox::new();
-            let file = s.native(format, vec![(entry, Some(1000))]);
-            let text = s.text(&file, &["--timezone", "utc"]);
-            assert!(text.stdout.contains(marker), "{}", text.stdout);
-            assert!(text.stdout.ends_with(expected));
-            assert!(!text.stdout.ends_with(&format!("{expected}\n")));
-            assert!(!text.stdout.contains("logcat:"));
-            assert!(!text.stdout.contains("    0     0 I"));
-        }
+    for (entry, marker, expected) in [
+        (LogEntry::marker("event\n"), "[event]", "event\n"),
+        (
+            LogEntry::unparsed("unknown\r\n"),
+            "[unparsed]",
+            "unknown\r\n",
+        ),
+    ] {
+        let s = Sandbox::new();
+        let file = s.native(vec![(entry, Some(1000))]);
+        let text = s.text(&file, &["--timezone", "utc"]);
+        assert!(text.stdout.contains(marker), "{}", text.stdout);
+        assert!(text.stdout.ends_with(expected));
+        assert!(!text.stdout.ends_with(&format!("{expected}\n")));
+        assert!(!text.stdout.contains("logcat:"));
+        assert!(!text.stdout.contains("    0     0 I"));
     }
 }
 
 #[test]
-fn missing_legacy_time_and_calendar_overflow_are_explicit_without_false_epoch() {
+fn missing_native_receipt_time_and_calendar_overflow_are_explicit_without_false_epoch() {
     let s = Sandbox::new();
-    let old = s.legacy(&[legacy(1, "old", None)]);
+    let old = s.records(&[row(1, "old", None)]);
     for format in ["readable", "rfc3339", "epoch"] {
         let text = s.text(&old, &["--time-format", format, "--timezone", "utc"]);
         assert!(
@@ -325,36 +316,34 @@ fn missing_legacy_time_and_calendar_overflow_are_explicit_without_false_epoch() 
         text.stdout
             .starts_with("[device-time-unavailable; device-text=")
     );
-    for format in [NativeFormat::V2, NativeFormat::CompactV3] {
-        let huge = s.native(format, vec![(proto("huge", u64::MAX, 1), Some(u64::MAX))]);
-        let epoch = s.text(&huge, &["--time-basis", "device", "--time-format", "epoch"]);
-        assert!(
-            epoch
-                .stdout
-                .starts_with("18446744073709551615.000000001 [device]")
+    let huge = s.native(vec![(proto("huge", u64::MAX, 1), Some(u64::MAX))]);
+    let epoch = s.text(&huge, &["--time-basis", "device", "--time-format", "epoch"]);
+    assert!(
+        epoch
+            .stdout
+            .starts_with("18446744073709551615.000000001 [device]")
+    );
+    let received = s.text(&huge, &["--time-format", "epoch"]);
+    assert!(received.stdout.starts_with("18446744073709551.615"));
+    for calendar in ["readable", "rfc3339"] {
+        let fallback = s.text(
+            &huge,
+            &[
+                "--time-basis",
+                "device",
+                "--time-format",
+                calendar,
+                "--timezone",
+                "utc",
+            ],
         );
-        let received = s.text(&huge, &["--time-format", "epoch"]);
-        assert!(received.stdout.starts_with("18446744073709551.615"));
-        for calendar in ["readable", "rfc3339"] {
-            let fallback = s.text(
-                &huge,
-                &[
-                    "--time-basis",
-                    "device",
-                    "--time-format",
-                    calendar,
-                    "--timezone",
-                    "utc",
-                ],
-            );
-            assert!(
-                fallback
-                    .stdout
-                    .starts_with("18446744073709551615.000000001 [device; calendar-unavailable]"),
-                "{}",
-                fallback.stdout
-            );
-        }
+        assert!(
+            fallback
+                .stdout
+                .starts_with("18446744073709551615.000000001 [device; calendar-unavailable]"),
+            "{}",
+            fallback.stdout
+        );
     }
 }
 
@@ -362,11 +351,11 @@ fn missing_legacy_time_and_calendar_overflow_are_explicit_without_false_epoch() 
 #[test]
 fn local_default_observes_dst_and_utc_override_and_epoch_ignore_local_zone() {
     let s = Sandbox::new();
-    let file = s.legacy(&[
-        legacy(1, "before", Some(1_772_953_199_999)),
-        legacy(2, "after", Some(1_772_953_200_000)),
+    let file = s.records(&[
+        row(1, "before", Some(1_772_953_199_999)),
+        row(2, "after", Some(1_772_953_200_000)),
     ]);
-    let base = ["query-v2", "--file", &file, "--all", "--format", "text"];
+    let base = ["query", "--file", &file, "--all", "--format", "text"];
     let local = s.run(&base, Some("America/New_York"));
     assert!(local.success, "{}", local.stderr);
     let lines: Vec<_> = local.stdout.lines().collect();
@@ -397,14 +386,14 @@ fn local_default_observes_dst_and_utc_override_and_epoch_ignore_local_zone() {
 fn display_options_do_not_change_cursor_filters_or_archived_jsonl() {
     let s = Sandbox::new();
     let original = [
-        legacy(1, "first\n", Some(1000)),
-        legacy(2, "second\r\n", Some(2000)),
+        row(1, "first\n", Some(1000)),
+        row(2, "second\r\n", Some(2000)),
     ];
-    let file = s.legacy(&original);
+    let file = s.records(&original);
     let bytes_before = fs::read(&file).unwrap();
     let first = s.run(
         &[
-            "query-v2",
+            "query",
             "--file",
             &file,
             "--format",
@@ -420,7 +409,7 @@ fn display_options_do_not_change_cursor_filters_or_archived_jsonl() {
     assert_eq!(summary["complete"], false);
     let second = s.run(
         &[
-            "query-v2",
+            "query",
             "--file",
             &file,
             "--format",
@@ -439,7 +428,7 @@ fn display_options_do_not_change_cursor_filters_or_archived_jsonl() {
     assert_eq!(second.summary()["complete"], true);
     assert!(second.stdout.starts_with("1970-01-01T00:00:02.000Z"));
     let jsonl = s.run(
-        &["query-v2", "--file", &file, "--all", "--format", "jsonl"],
+        &["query", "--file", &file, "--all", "--format", "jsonl"],
         None,
     );
     let records: Vec<Value> = jsonl
@@ -449,14 +438,14 @@ fn display_options_do_not_change_cursor_filters_or_archived_jsonl() {
         .collect();
     assert_eq!(records, original);
     assert_eq!(fs::read(&file).unwrap(), bytes_before);
-    let page = s.run(&["query-v2", "--file", &file], None).page();
+    let page = s.run(&["query", "--file", &file], None).page();
     assert_eq!(page["records"][0]["time"], "10-28 00:00:00.000");
 }
 
 #[test]
 fn invalid_and_non_text_presentation_options_fail_without_stdout() {
     let s = Sandbox::new();
-    let file = s.legacy(&[legacy(1, "payload", Some(0))]);
+    let file = s.records(&[row(1, "payload", Some(0))]);
     for options in [
         vec!["--format", "text", "--time-format", "unknown"],
         vec!["--format", "text", "--timezone", "America/New_York"],
@@ -466,7 +455,7 @@ fn invalid_and_non_text_presentation_options_fail_without_stdout() {
         vec!["--format", "text", "--process-width", "-1"],
         vec!["--format", "text", "--process-width", "4097"],
     ] {
-        let mut args = vec!["query-v2", "--file", &file];
+        let mut args = vec!["query", "--file", &file];
         args.extend(options);
         let output = s.run(&args, None);
         assert!(!output.success, "unexpected success: {}", output.stdout);
@@ -480,44 +469,42 @@ fn invalid_and_non_text_presentation_options_fail_without_stdout() {
 fn chromium_process_fixture_is_compact_in_redirected_text_but_lossless_in_jsonl() {
     // Synthetic Chromium-style sandbox name, not a claim of real-device capture.
     let name = "com.example.browser:org.chromium.content.app.SandboxedProcessService0:renderer42";
-    for format in [NativeFormat::V2, NativeFormat::CompactV3] {
-        let s = Sandbox::new();
-        let entry = proto_named("entire message must remain visible\n", 1, 0, Some(name));
-        let file = s.native(format, vec![(entry, Some(1000))]);
-        let before = fs::read(&file).unwrap();
-        let compact = s.text(&file, &["--time-format", "epoch"]);
-        assert!(!compact.stdout.contains(name));
-        assert!(compact.stdout.contains('…'));
-        assert!(compact.stdout.contains("renderer42"));
-        assert!(compact.stdout.contains("   42    43 I "));
-        assert!(
-            compact
-                .stdout
-                .ends_with("Tag: entire message must remain visible\n")
-        );
-        assert_eq!(compact.summary()["text_presentation"]["process_width"], 32);
-        assert_eq!(
-            compact.summary()["text_presentation"]["process_names_truncated"],
-            1
-        );
-        let full = s.text(&file, &["--process-width", "0"]);
-        assert!(full.stdout.contains(name));
-        assert_eq!(full.summary()["text_presentation"]["process_width"], 0);
-        assert_eq!(
-            full.summary()["text_presentation"]["process_names_truncated"],
-            0
-        );
-        let jsonl = s.run(
-            &["query-v2", "--file", &file, "--all", "--format", "jsonl"],
-            None,
-        );
-        assert_eq!(jsonl.summary()["records_returned"], 1);
-        assert!(jsonl.summary().get("text_presentation").is_none());
-        let row: Value = serde_json::from_str(&jsonl.stdout).unwrap();
-        assert_eq!(row["process"]["name"], name);
-        assert_eq!(row["message"], "entire message must remain visible\n");
-        assert_eq!(fs::read(&file).unwrap(), before);
-    }
+    let s = Sandbox::new();
+    let entry = proto_named("entire message must remain visible\n", 1, 0, Some(name));
+    let file = s.native(vec![(entry, Some(1000))]);
+    let before = fs::read(&file).unwrap();
+    let compact = s.text(&file, &["--time-format", "epoch"]);
+    assert!(!compact.stdout.contains(name));
+    assert!(compact.stdout.contains('…'));
+    assert!(compact.stdout.contains("renderer42"));
+    assert!(compact.stdout.contains("   42    43 I "));
+    assert!(
+        compact
+            .stdout
+            .ends_with("Tag: entire message must remain visible\n")
+    );
+    assert_eq!(compact.summary()["text_presentation"]["process_width"], 32);
+    assert_eq!(
+        compact.summary()["text_presentation"]["process_names_truncated"],
+        1
+    );
+    let full = s.text(&file, &["--process-width", "0"]);
+    assert!(full.stdout.contains(name));
+    assert_eq!(full.summary()["text_presentation"]["process_width"], 0);
+    assert_eq!(
+        full.summary()["text_presentation"]["process_names_truncated"],
+        0
+    );
+    let jsonl = s.run(
+        &["query", "--file", &file, "--all", "--format", "jsonl"],
+        None,
+    );
+    assert_eq!(jsonl.summary()["records_returned"], 1);
+    assert!(jsonl.summary().get("text_presentation").is_none());
+    let row: Value = serde_json::from_str(&jsonl.stdout).unwrap();
+    assert_eq!(row["process"]["name"], name);
+    assert_eq!(row["message"], "entire message must remain visible\n");
+    assert_eq!(fs::read(&file).unwrap(), before);
 }
 
 #[test]
@@ -527,7 +514,7 @@ fn process_width_is_display_columns_and_preserves_unicode_graphemes() {
     let s = Sandbox::new();
     let name = "界界e\u{301}👩‍💻进程renderer末尾e\u{301}👩‍💻";
     let entry = proto_named("payload", 1, 0, Some(name));
-    let file = s.native(NativeFormat::CompactV3, vec![(entry, Some(1000))]);
+    let file = s.native(vec![(entry, Some(1000))]);
     for width in [1usize, 2, 7, 12, 20] {
         let output = s.text(&file, &["--process-width", &width.to_string()]);
         let field = output

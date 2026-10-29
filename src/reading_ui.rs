@@ -28,13 +28,7 @@ impl CiallogcatApp {
                 serde_json::json!({"identity_scope":"capture_session","session_id":identity.session_id,"seq":identity.seq}).to_string(),
             ));
         }
-        let document = self.files.document.as_ref()?;
-        let metadata = document.record_metadata.get(index)?;
-        Some((
-            format!("artifact-local seq #{}", metadata.seq),
-            format!("artifact_local\nartifact_id: {}\nseq: {}\n无来源会话身份；此引用只属于当前文档。点击复制。", document.header.artifact_id, metadata.seq),
-            serde_json::json!({"identity_scope":"artifact_local","artifact_id":document.header.artifact_id,"seq":metadata.seq}).to_string(),
-        ))
+        None
     }
 
     fn record_ref(&self, index: usize) -> RecordRef {

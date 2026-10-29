@@ -87,23 +87,25 @@ fn proto_native_roundtrip_preserves_raw_bytes_unknown_fields_and_attribution() {
 fn proto_native_checks_every_projection_and_rejects_forged_display_fields() {
     let doc = sample(PAYLOAD.to_vec());
     let original = wire(&doc);
+    // Full derived projections are not an alternate archive representation.
+    assert!(decode_record(&serde_json::to_vec(&original).unwrap(), &doc.header, 0).is_err());
+    let rejects = |value: Value| {
+        let decoded = serde_json::from_value::<WireRecord>(value)
+            .map_err(DocumentError::invalid)
+            .and_then(WireRecord::into_row);
+        decoded
+            .and_then(|(entry, meta)| validate_row(&doc.header, &entry, &meta, 0))
+            .is_err()
+    };
     for field in ["time_sec", "time_nsec", "uid", "pid", "tid", "priority"] {
         let mut changed = original.clone();
         changed["proto"][field] = 99.into();
-        let error =
-            decode_record(&serde_json::to_vec(&changed).unwrap(), &doc.header, 0).unwrap_err();
-        assert!(
-            error.message.contains("explicit fields disagree"),
-            "{field}: {error}"
-        );
+        assert!(rejects(changed), "{field}");
     }
     for field in ["tag_bytes", "message_bytes", "raw_payload", "process_name"] {
         let mut changed = original.clone();
         changed["proto"][field] = "".into();
-        assert!(
-            decode_record(&serde_json::to_vec(&changed).unwrap(), &doc.header, 0).is_err(),
-            "{field}"
-        );
+        assert!(rejects(changed), "{field}");
     }
     for (field, value) in [
         ("pid", Value::from(8)),
@@ -114,21 +116,11 @@ fn proto_native_checks_every_projection_and_rejects_forged_display_fields() {
     ] {
         let mut changed = original.clone();
         changed[field] = value;
-        assert!(
-            decode_record(&serde_json::to_vec(&changed).unwrap(), &doc.header, 0).is_err(),
-            "{field}"
-        );
+        assert!(rejects(changed), "{field}");
     }
-    let mut changed = original.clone();
+    let mut changed = original;
     changed["process"]["source"] = "ps_snapshot".into();
-    assert!(decode_record(&serde_json::to_vec(&changed).unwrap(), &doc.header, 0).is_err());
-    changed = original;
-    changed["proto"]["raw_payload"] = "not base64!".into();
-    assert!(decode_record(&serde_json::to_vec(&changed).unwrap(), &doc.header, 0).is_err());
-    let duplicate = serde_json::to_string(&wire(&doc))
-        .unwrap()
-        .replace("\"uid\":42", "\"uid\":42,\"uid\":43");
-    assert!(decode_record(duplicate.as_bytes(), &doc.header, 0).is_err());
+    assert!(rejects(changed));
 }
 
 #[test]
@@ -269,11 +261,10 @@ fn proto_snapshot_selection_load_and_save_cancel_between_records_without_publica
         })
     ));
 
-    // Header + records + footer + EOF + post-loop + validation entry, then
-    // cancel on validation's third proto record. No elapsed-time assumption.
+    // Cancel during the third record read. No elapsed-time assumption.
     let bytes = encode(&document);
     cancel.store(false, Ordering::Release);
-    CANCEL_AFTER_CHECKS.set(Some(count + 8));
+    CANCEL_AFTER_CHECKS.set(Some(4));
     let result = load(Cursor::new(bytes), 256 * 1024 * 1024, &cancel);
     assert!(matches!(
         result,
@@ -300,11 +291,10 @@ fn proto_snapshot_selection_load_and_save_cancel_between_records_without_publica
     std::fs::remove_dir(directory).unwrap();
 }
 
-fn compact(doc: &Document) -> Document {
-    doc.convert_format(
-        NativeFormat::CompactV3,
+fn reopen(doc: &Document) -> Document {
+    load(
+        Cursor::new(encode(doc)),
         usize::MAX,
-        u64::MAX,
         &AtomicBool::new(false),
     )
     .unwrap()
@@ -350,9 +340,9 @@ fn compact_wire_goldens_project_exact_bytes_and_classification_without_loss_inve
         (vec![], LogEntryKind::Unparsed, ""),
         (vec![0x98, 6, 1], LogEntryKind::Unparsed, ""),
     ] {
-        let v2 = sample(payload.clone());
-        let v3 = compact(&v2);
-        let value = compact_wire(&v3);
+        let source = sample(payload.clone());
+        let stored = reopen(&source);
+        let value = compact_wire(&stored);
         for key in [
             "device_time",
             "pid",
@@ -365,24 +355,27 @@ fn compact_wire_goldens_project_exact_bytes_and_classification_without_loss_inve
             assert!(value.get(key).is_none(), "{key}");
         }
         assert_eq!(value["proto"].as_object().unwrap().len(), 1);
-        let loaded = load(Cursor::new(encode(&v3)), BUDGET, &AtomicBool::new(false)).unwrap();
-        assert_eq!(loaded.origin, DocumentOrigin::NativeV3);
+        let loaded = load(
+            Cursor::new(encode(&stored)),
+            BUDGET,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(loaded.header.schema_version, SCHEMA_VERSION);
         assert_eq!(loaded.entries[0].kind, kind);
         assert_eq!(loaded.entries[0].message.as_ref(), message);
         assert_eq!(
             loaded.entries[0].proto.as_ref().unwrap().raw_payload,
             payload
         );
-        let back = loaded
-            .convert_format(NativeFormat::V2, BUDGET, u64::MAX, &AtomicBool::new(false))
-            .unwrap();
-        assert_eq!(wire(&back), wire(&v2));
+        let back = reopen(&loaded);
+        assert_eq!(wire(&back), wire(&source));
         let reloaded = load(Cursor::new(encode(&back)), BUDGET, &AtomicBool::new(false)).unwrap();
-        assert_eq!(wire(&reloaded), wire(&v2));
+        assert_eq!(wire(&reloaded), wire(&source));
     }
-    let mut value = compact_wire(&compact(&sample(PAYLOAD.to_vec())));
+    let mut value = compact_wire(&reopen(&sample(PAYLOAD.to_vec())));
     value["text_loss"] = Value::Null;
-    let header = compact(&sample(PAYLOAD.to_vec())).header;
+    let header = reopen(&sample(PAYLOAD.to_vec())).header;
     // Use the matching session identity, without fabricating a no-loss fact.
     value["provenance"]["session_id"] = serde_json::to_value(header.session_id).unwrap();
     let (row, _) = decode_record(&serde_json::to_vec(&value).unwrap(), &header, 0).unwrap();
@@ -390,19 +383,19 @@ fn compact_wire_goldens_project_exact_bytes_and_classification_without_loss_inve
 }
 
 #[test]
-fn compact_conversion_preserves_nested_extensions_scope_gaps_and_original_identity() {
-    let mut v2 = sample(PAYLOAD.to_vec());
+fn selection_preserves_nested_extensions_scope_gaps_and_original_identity() {
+    let mut source = sample(PAYLOAD.to_vec());
     for extensions in [
-        &mut v2.header.extra,
-        &mut v2.header.source.extra,
-        &mut v2.header.normalization,
-        &mut v2.end.extra,
-        &mut v2.end.scope.extra,
-        &mut v2.end.capture.extra,
+        &mut source.header.extra,
+        &mut source.header.source.extra,
+        &mut source.header.normalization,
+        &mut source.end.extra,
+        &mut source.end.scope.extra,
+        &mut source.end.capture.extra,
     ] {
         extensions.insert("future".into(), serde_json::json!({"list":[1,"未知"]}));
     }
-    let meta = &mut v2.record_metadata[0];
+    let meta = &mut source.record_metadata[0];
     for extensions in [
         &mut meta.extra,
         &mut meta.device_time_extra,
@@ -416,25 +409,33 @@ fn compact_conversion_preserves_nested_extensions_scope_gaps_and_original_identi
             serde_json::json!({"type":"extension","values":[true,null]}),
         );
     }
-    v2.end
+    source
+        .end
         .capture
         .known_gaps
         .push(serde_json::json!({"kind":"interruption","after_seq":0}));
-    v2.end.capture.completeness = "partial".into();
-    v2.end.scope.omitted_before = Some(42);
-    let selected = v2.select(&[0], serde_json::json!({"tag":"Tag"})).unwrap();
-    let v3 = compact(&selected);
+    source.end.capture.completeness = "partial".into();
+    source.end.scope.omitted_before = Some(42);
+    let selected = source
+        .select(&[0], serde_json::json!({"tag":"Tag"}))
+        .unwrap();
+    let stored = reopen(&selected);
     assert_eq!(
-        v3.header.derived_from_artifact,
-        Some(selected.header.artifact_id)
+        stored.header.derived_from_artifact,
+        Some(source.header.artifact_id)
     );
-    assert_ne!(v3.header.artifact_id, selected.header.artifact_id);
-    let value = compact_wire(&v3);
+    assert_eq!(stored.header.artifact_id, selected.header.artifact_id);
+    let value = compact_wire(&stored);
     assert_eq!(
         value["projection_extensions"]["device_time"]["future"],
-        wire(&v2)["device_time"]["future"]
+        wire(&source)["device_time"]["future"]
     );
-    let loaded = load(Cursor::new(encode(&v3)), BUDGET, &AtomicBool::new(false)).unwrap();
+    let loaded = load(
+        Cursor::new(encode(&stored)),
+        BUDGET,
+        &AtomicBool::new(false),
+    )
+    .unwrap();
     let filtered = loaded
         .select(&[0], serde_json::json!({"query":"m"}))
         .unwrap();
@@ -444,10 +445,8 @@ fn compact_conversion_preserves_nested_extensions_scope_gaps_and_original_identi
         filtered.end.scope.filter,
         Some(serde_json::json!({"all_of":[{"tag":"Tag"},{"query":"m"}]}))
     );
-    let back = loaded
-        .convert_format(NativeFormat::V2, BUDGET, u64::MAX, &AtomicBool::new(false))
-        .unwrap();
-    assert_eq!(wire(&back), wire(&v2));
+    let back = reopen(&loaded);
+    assert_eq!(wire(&back), wire(&source));
     assert_eq!(
         serde_json::to_value(&back.end.scope).unwrap(),
         serde_json::to_value(&selected.end.scope).unwrap()
@@ -456,15 +455,15 @@ fn compact_conversion_preserves_nested_extensions_scope_gaps_and_original_identi
         serde_json::to_value(&back.end.capture).unwrap(),
         serde_json::to_value(&selected.end.capture).unwrap()
     );
-    assert_eq!(back.header.extra, v2.header.extra);
-    assert_eq!(back.header.source.extra, v2.header.source.extra);
-    assert_eq!(back.header.normalization, v2.header.normalization);
-    assert_eq!(back.end.extra, v2.end.extra);
+    assert_eq!(back.header.extra, source.header.extra);
+    assert_eq!(back.header.source.extra, source.header.source.extra);
+    assert_eq!(back.header.normalization, source.header.normalization);
+    assert_eq!(back.end.extra, source.end.extra);
 }
 
 #[test]
 fn compact_rejects_redundant_fields_even_null_unknown_profiles_and_duplicate_core_keys() {
-    let doc = compact(&sample(PAYLOAD.to_vec()));
+    let doc = reopen(&sample(PAYLOAD.to_vec()));
     let original = compact_wire(&doc);
     for key in [
         "device_time",
@@ -563,18 +562,10 @@ fn parent_remove_key(header: &mut Value, key: &str) {
 }
 
 #[test]
-fn compact_conversion_validates_v2_before_dropping_fields_and_never_overwrites_extensions() {
+fn native_writer_rejects_mutated_evidence_and_reserved_extension_collisions() {
     let seed = sample(PAYLOAD.to_vec());
     let check = |doc: &Document| {
-        assert!(
-            doc.convert_format(
-                NativeFormat::CompactV3,
-                BUDGET,
-                u64::MAX,
-                &AtomicBool::new(false)
-            )
-            .is_err()
-        )
+        assert!(write_snapshot(Vec::new(), doc, &AtomicBool::new(false)).is_err());
     };
     let mut invalid = seed.clone();
     let mut row = invalid.entries[0].clone();
@@ -594,39 +585,35 @@ fn compact_conversion_validates_v2_before_dropping_fields_and_never_overwrites_e
             "proto_projection" => &mut conflicting.header.normalization,
             _ => &mut conflicting.record_metadata[0].extra,
         }
-        .insert(key.into(), serde_json::json!({"old_unknown":true}));
-        // Remains a valid v2 extension, but conversion may not overwrite it.
-        load(
-            Cursor::new(encode(&conflicting)),
-            BUDGET,
-            &AtomicBool::new(false),
-        )
-        .unwrap();
+        .insert(key.into(), serde_json::json!({"unsupported":true}));
         check(&conflicting);
     }
-    let mut v3 = compact(&seed);
-    v3.record_metadata[0]
+    let mut doc = seed.clone();
+    doc.record_metadata[0]
         .projection_extra
         .insert("future_namespace".into(), serde_json::json!({"x":1}));
-    let loaded = load(Cursor::new(encode(&v3)), BUDGET, &AtomicBool::new(false)).unwrap();
+    let loaded = reopen(&doc);
     assert_eq!(
         loaded.record_metadata[0].projection_extra,
-        v3.record_metadata[0].projection_extra
+        doc.record_metadata[0].projection_extra
     );
-    let back = loaded
-        .convert_format(NativeFormat::V2, BUDGET, u64::MAX, &AtomicBool::new(false))
-        .unwrap();
-    assert_eq!(
-        wire(&back)["projection_extensions"]["future_namespace"]["x"],
-        1
-    );
-    check(&back); // Same-name v2 extension remains opaque; no silent guessing.
+    let decoded: Value = serde_json::from_slice(
+        &encode_record_projection(
+            &loaded.header,
+            &loaded.entries[0],
+            &loaded.record_metadata[0],
+            BUDGET,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(decoded["projection_extensions"]["future_namespace"]["x"], 1);
 }
 
 #[test]
 fn compact_bad_payloads_classifications_and_bounded_base64_fail_with_location() {
     use base64::{Engine, engine::general_purpose::STANDARD};
-    let doc = compact(&sample(PAYLOAD.to_vec()));
+    let doc = reopen(&sample(PAYLOAD.to_vec()));
     let original = compact_wire(&doc);
     for raw in [
         Value::Null,
@@ -673,7 +660,7 @@ fn compact_bad_payloads_classifications_and_bounded_base64_fail_with_location() 
     value = original;
     value["text_loss"]["invalid_utf8_replaced"] = false.into();
     assert!(decode_record(&serde_json::to_vec(&value).unwrap(), &doc.header, 0).is_err());
-    let unparsed = compact(&sample(vec![]));
+    let unparsed = reopen(&sample(vec![]));
     for parent in ["process", "device_time"] {
         let mut value = compact_wire(&unparsed);
         value["projection_extensions"] = serde_json::json!({parent:{}});
@@ -682,7 +669,7 @@ fn compact_bad_payloads_classifications_and_bounded_base64_fail_with_location() 
 }
 
 #[test]
-fn compact_large_nul_payload_fits_v3_but_v2_export_fails_instead_of_truncating() {
+fn compact_large_nul_payload_has_a_separately_bounded_decoded_view() {
     let length = crate::protobuf::MAX_FRAME_BYTES as usize - 6;
     let mut payload = vec![
         0x18,
@@ -693,8 +680,8 @@ fn compact_large_nul_payload_fits_v3_but_v2_export_fails_instead_of_truncating()
         (length >> 14) as u8,
     ];
     payload.resize(crate::protobuf::MAX_FRAME_BYTES as usize, 0);
-    let v3 = compact(&sample(payload.clone()));
-    let bytes = encode(&v3);
+    let doc = sample(payload.clone());
+    let bytes = encode(&doc);
     assert!(bytes.len() < 2 * 1024 * 1024);
     let loaded = load(
         Cursor::new(&bytes),
@@ -708,47 +695,113 @@ fn compact_large_nul_payload_fits_v3_but_v2_export_fails_instead_of_truncating()
         payload
     );
     assert!(loaded.memory_bytes() > bytes.len() * 2);
-    let error = loaded
-        .convert_format(
-            NativeFormat::V2,
-            usize::MAX,
-            u64::MAX,
-            &AtomicBool::new(false),
-        )
-        .err()
-        .unwrap();
-    assert!(error.message.contains("8 MiB"), "{error}");
-    let error = loaded
-        .convert_format(
-            NativeFormat::CompactV3,
-            loaded.memory_bytes() - 1,
-            u64::MAX,
-            &AtomicBool::new(false),
-        )
-        .err()
-        .unwrap();
-    assert_eq!(error.kind, DocumentErrorKind::MemoryBudget);
     assert!(
         load(
-            Cursor::new(bytes),
+            Cursor::new(&bytes),
             loaded.memory_bytes() - 1,
             &AtomicBool::new(false)
         )
         .is_err()
     );
-    let small = compact(&sample(PAYLOAD.to_vec()));
-    let back = small
-        .convert_format(NativeFormat::V2, BUDGET, u64::MAX, &AtomicBool::new(false))
-        .unwrap();
-    let exact = encode(&back).len() as u64;
+    let decoded = encode_record_projection(
+        &loaded.header,
+        &loaded.entries[0],
+        &loaded.record_metadata[0],
+        64 * 1024 * 1024,
+    )
+    .unwrap();
+    assert!(decoded.len() > MAX_RECORD_BYTES as usize);
+    let value: Value = serde_json::from_slice(&decoded).unwrap();
+    assert_eq!(value["message"].as_str().unwrap().len(), length);
     assert!(
-        small
-            .convert_format(NativeFormat::V2, BUDGET, exact, &AtomicBool::new(false))
-            .is_ok()
+        encode_record_projection(
+            &loaded.header,
+            &loaded.entries[0],
+            &loaded.record_metadata[0],
+            decoded.len()
+        )
+        .is_ok()
     );
     assert!(
-        small
-            .convert_format(NativeFormat::V2, BUDGET, exact - 1, &AtomicBool::new(false))
-            .is_err()
+        encode_record_projection(
+            &loaded.header,
+            &loaded.entries[0],
+            &loaded.record_metadata[0],
+            decoded.len() - 1
+        )
+        .is_err()
     );
+    assert_eq!(encode(&loaded), bytes);
+}
+
+#[test]
+fn every_public_writer_rejects_mutated_proto_models_without_advancing_stream() {
+    let mut payload = PAYLOAD.to_vec();
+    payload[5] = 4; // Info, so all normal-log projection fields are meaningful.
+    let seed = sample(payload);
+    for mutation in 0..8 {
+        let mut row = seed.entries[0].clone();
+        match mutation {
+            0 => Arc::make_mut(row.proto.as_mut().unwrap())
+                .raw_payload
+                .clear(),
+            1 => Arc::make_mut(row.proto.as_mut().unwrap()).uid += 1,
+            2 => row.message = "forged".into(),
+            3 => row.pid += 1,
+            4 => row.level = Level::Error,
+            5 => {
+                row.text_loss = Some(crate::model::TextLoss {
+                    truncated: true,
+                    invalid_utf8_replaced: false,
+                });
+            }
+            6 => row.kind = LogEntryKind::Unparsed,
+            7 => row.process_source = Some(ProcessSource::PsSnapshot),
+            _ => unreachable!(),
+        }
+        let mut store = LogStore::default();
+        store.push(row.clone());
+        let entries = Arc::new(store);
+        assert!(
+            Document::from_snapshot(
+                seed.header.clone(),
+                entries.clone(),
+                ExportScope::default(),
+                CaptureStatus::default(),
+            )
+            .is_err(),
+            "snapshot mutation {mutation}",
+        );
+        let mut invalid = seed.clone();
+        invalid.entries = entries;
+        assert!(
+            invalid
+                .select(&[0], serde_json::json!({"all":true}))
+                .is_err(),
+            "selection mutation {mutation}",
+        );
+        assert!(
+            write_snapshot(Vec::new(), &invalid, &AtomicBool::new(false)).is_err(),
+            "write mutation {mutation}",
+        );
+        assert!(
+            encode_record_projection(&seed.header, &row, &seed.record_metadata[0], BUDGET).is_err(),
+            "projection mutation {mutation}",
+        );
+        let mut stream = StreamEncoder::new(seed.header.clone()).unwrap();
+        let initial = stream.finish_bytes(CaptureStatus::default()).unwrap();
+        assert!(
+            stream.record_bytes(&row).is_err(),
+            "stream mutation {mutation}"
+        );
+        assert_eq!(
+            stream.finish_bytes(CaptureStatus::default()).unwrap(),
+            initial
+        );
+        // A failed candidate must not consume sequence or change later valid bytes.
+        assert_eq!(
+            stream.record_bytes(&seed.entries[0]).unwrap(),
+            encode_record(&seed.header, &seed.entries[0], &seed.record_metadata[0]).unwrap(),
+        );
+    }
 }

@@ -22,10 +22,9 @@ The library exposes:
 - `filter`: matching, background filtering and highlighting, cancellation and
   latest-result mailboxes
 - `log_store`: chunked copy-on-write snapshots and byte-accounted retention
-- `record_io`: bounded CLI v1 JSONL decoding and compatible record serialization
 - `session`: stable capture-session UUIDs, sequences, segments and attempts
-- `document`: validated native v2/v3 snapshots, compact protobuf conversion,
-  incremental encoding/decoding and legacy v1 import
+- `document`: validated native snapshots, compact protobuf evidence,
+  incremental encoding/decoding and the shared encoded-line limit
 - `capture_controller`: shared capture intent, stop acknowledgement and bounded reconnect policy
 - `capture_scope`: validated device history starts, finite dumps and buffer arguments
 - `capture_facts`: bounded host observations, pauses, interruptions and export facts
@@ -60,15 +59,17 @@ active-device reconciliation, event polling, filtering catch-up, configuration,
 selection and clipboard policy. The
 library itself does not start a GUI or configure an event loop. The separate
 [`ciallogcat-cli` frontend](cli.md) consumes this library and owns its command
-responses, capture bounds, and local background-session protocol. The v1 log
-record codec is shared; those orchestration policies are not part of the core
-API. `LogEntry::copy_text` and
-`append_copy_text` preserve the existing complete-record text format.
+responses, capture bounds, and local background-session protocol. The native
+document codec is shared; those orchestration policies are not part of the core
+API. `LogEntry::copy_text` and `append_copy_text` preserve complete messages.
+Parsed logs keep their full-record text format; structural rows use explicit
+`[event]` / `[unparsed]` labels rather than invented log metadata.
 
 `LogEntryKind` separates parsed logs, structural markers and unparsed text.
 Only parsed logs without a name contribute to `is_unresolved_process()`.
-Markers pass the package condition, while level/message conditions still apply;
-unparsed text cannot match a nonempty package condition. A `PsSnapshot` process
+Markers and unparsed rows have no log metadata: nonempty package/Tag filters or
+a level stricter than Verbose exclude them. Default Verbose and message-only
+filters still include matching structural rows; explicit Verbose is equivalent. A `PsSnapshot` process
 source is an observation hint, not an exact historical application identity.
 `BackendEvent::Processes` supplies the host observation window;
 `QueuedLogEntry::received_at()` is captured before queue backpressure. Neither
@@ -89,16 +90,15 @@ treat a stop request itself as confirmation that output has finished.
 The `session` module allocates stable UUID/sequence references separately from
 the numeric transport attempt used by `BackendEvent`. The GUI owns this
 allocator across Clear, retention and reconnect. `document` implements bounded
-[native v2/v3 files](native-format.md), preserving source, identity, process hints,
+[native files](native-format.md), preserving source, identity, process hints,
 text-loss observations and export scope. `file_io::write_new_file` publishes a
 synced snapshot at a new path without overwriting an existing destination.
 
-Native v3 stores one raw protobuf payload and derives its display through a
-fixed projection profile. V2 remains supported for reading and explicit output.
-`Document::convert_format` creates a new artifact with cancellation and memory/
-output budgets; it preserves session/sequence identity and fails rather than
-truncating evidence. GUI file operations and the CLI queries consume this same
-codec. See the [format contract](native-format.md) and
+Native documents store one raw protobuf payload and derive its display through
+a fixed projection profile. Text, event and unparsed rows use the same document
+layout. There is no format selector, version-conversion API or separate origin
+variant. GUI file operations and CLI queries consume this same codec, with
+cancellation and budgets that fail rather than truncate evidence. See the [format contract](native-format.md) and
 [Agent query contract](agent-query.md) for stored versus decoded views.
 
 `capture_scope::CaptureScope` validates history requests for GUI and CLI. A
@@ -107,23 +107,24 @@ budgets. `capture_facts::CaptureFacts` records bounded host observations without
 claiming an exact device-time boundary or an unknown loss count. Read-only
 diagnostics use a separate on-demand API and budgets; see
 [device diagnostics](device-diagnostics.md).
-These modules remain available with GUI features disabled. The CLI preserves
-its v1 output/query protocol and explicitly offers native v2 recording and
-[bounded Agent queries](agent-query.md). `start_logcat_with_options` also permits
+These modules remain available with GUI features disabled. The CLI uses
+text transport by default, offers explicit experimental protobuf transport, retains
+schema-1 control responses, and uses [bounded queries](agent-query.md)
+for all supported archive formats
+through the single `query` command. `start_logcat_with_options` also permits
 a startup deadline and cancellation callback for the optional protobuf capability
 probe; cancellation reaps that query before returning. An `Exited` event with
 `incomplete_proto_frame: true` identifies an incomplete frame and no other reader
 or process error; if observed during an intentional stop, callers can record an
 explicit partial-capture gap without inventing whether the stop caused it.
 
-`LegacyReader` accepts a `BufRead` and an explicit `InputMode`. `Offline` accepts
-a valid final JSON value without a newline; `Active` reports that tail as
-`Incomplete`. This is a bounded reader for one input snapshot, not a file-tail
-service. The 8 MiB per-record bound counts JSON-encoded bytes. Invalid schemas,
-non-increasing sequences, malformed JSON and oversized records produce an error
-with line and byte location; sequence gaps are allowed. Unknown optional fields
-are preserved on reserialization without being interpreted. V1 has no process provenance, record-kind identity or completeness
-footer, so importing it cannot reconstruct those facts.
+`document::MAX_RECORD_BYTES` supplies the shared 8 MiB encoded-line bound for
+native header/data/footer readers and writers. Completed files require a header
+and consistent footer; a valid footer may omit its trailing newline. Active
+session queries instead read complete records within the published boundary.
+Storage-v1 decoding, its `record_io` module, and legacy-import metadata are
+removed rather than silently upgraded. Empty byte streams are rejected; valid
+zero-record native documents remain supported.
 
 The ADB fake-process scenarios run headlessly on Linux; see
 [ADB testing](adb-testing.md). Automated tests do not establish real-device,

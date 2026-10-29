@@ -293,12 +293,27 @@ pub fn compile_query(
         .map_err(|error| format!("Invalid regex: {error}"))
 }
 
+impl FilterSpec {
+    /// A default Verbose threshold means no level restriction. Any real
+    /// metadata predicate (including Tag exclusion) requires an actual log row.
+    pub fn requires_log_fields(&self) -> bool {
+        !self.package.trim().is_empty()
+            || !self.tag_include.is_empty()
+            || !self.tag_exclude.is_empty()
+            || self.min_level != Level::Verbose
+    }
+}
+
 pub fn entry_matches(entry: &LogEntry, spec: &FilterSpec, matcher: Option<&Regex>) -> bool {
-    entry.matches_package(spec.package.trim())
-        && (spec.tag_include.is_empty() || entry.tag.contains(&spec.tag_include))
-        && (spec.tag_exclude.is_empty() || !entry.tag.contains(&spec.tag_exclude))
-        && entry.level >= spec.min_level
-        && matcher.is_none_or(|matcher| matcher.is_match(&entry.message))
+    let metadata_matches = if let Some(fields) = entry.log_fields() {
+        entry.matches_package(spec.package.trim())
+            && (spec.tag_include.is_empty() || fields.tag.contains(&spec.tag_include))
+            && (spec.tag_exclude.is_empty() || !fields.tag.contains(&spec.tag_exclude))
+            && fields.level >= spec.min_level
+    } else {
+        !spec.requires_log_fields()
+    };
+    metadata_matches && matcher.is_none_or(|matcher| matcher.is_match(&entry.message))
 }
 
 #[cfg(test)]
@@ -355,6 +370,48 @@ mod tests {
         spec.tag_include.clear();
         spec.tag_exclude.clear();
         assert!(entry_matches(&entry("REQUEST"), &spec, matcher.as_ref()));
+    }
+
+    #[test]
+    fn metadata_filters_require_log_fields_but_message_and_default_level_do_not() {
+        let base = FilterSpec {
+            package: String::new(),
+            tag_include: String::new(),
+            tag_exclude: String::new(),
+            min_level: Level::Verbose,
+            query: "banner".into(),
+            regex: false,
+            case_sensitive: true,
+        };
+        let matcher = compile_matcher(&base).unwrap();
+        for kind in [
+            crate::model::LogEntryKind::Marker,
+            crate::model::LogEntryKind::Unparsed,
+        ] {
+            let mut row = entry("banner");
+            row.kind = kind;
+            // Deliberately populated internal slots must never become observations.
+            assert!(entry_matches(&row, &base, matcher.as_ref()));
+            assert!(!entry_matches(
+                &row,
+                &base,
+                compile_query("missing", false, true).unwrap().as_ref()
+            ));
+            for variant in 0..4 {
+                let mut spec = base.clone();
+                match variant {
+                    0 => spec.package = "com.example.app".into(),
+                    1 => spec.tag_include = "Tag".into(),
+                    2 => spec.tag_exclude = "Absent".into(),
+                    _ => spec.min_level = Level::Debug,
+                }
+                assert!(!entry_matches(&row, &spec, matcher.as_ref()));
+                assert!(entry_matches(&entry("banner"), &spec, matcher.as_ref()));
+            }
+            let mut whitespace_package = base.clone();
+            whitespace_package.package = "  ".into();
+            assert!(entry_matches(&row, &whitespace_package, matcher.as_ref()));
+        }
     }
 
     #[test]

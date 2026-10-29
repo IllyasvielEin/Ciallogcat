@@ -5,10 +5,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use ciallogcat::document::{DocumentHeader, NativeFormat, StreamEncoder};
+use ciallogcat::document::{DocumentHeader, StreamEncoder};
 use ciallogcat::model::{Level, LogBuffer, LogEntry};
 use ciallogcat::session::Session;
 use serde_json::{Value, json};
+
+#[path = "support/native_fixture.rs"]
+mod native_fixture;
 
 struct Sandbox(PathBuf);
 struct Running {
@@ -88,10 +91,12 @@ impl Sandbox {
         v
     }
     fn status(&self, entries: u64, bytes: u64) -> Value {
-        json!({"schema_version":1,"type":"status","session":self.directory(),"worker_pid":std::process::id(),
+        let mut status = json!({"schema_version":1,"type":"status","session":self.directory(),"worker_pid":std::process::id(),
         "state":"running","readiness":"adb_process_started","entries":entries,"bytes":bytes,"reason":null,"error":null,
         "updated_unix_ms":1,"stale":false,"omitted_by_limit":false,"diagnostic_lines":0,"last_diagnostic":null,
-        "diagnostics_complete":false,"discarded_entries":0,"diagnostic_dropped_count":0})
+        "diagnostics_complete":false,"discarded_entries":0,"diagnostic_dropped_count":0});
+        native_fixture::set_status(&mut status, entries, bytes);
+        status
     }
     fn publish(&self, status: &Value) {
         let temporary = self.path(&format!("status-fixture-{}.tmp", uuid::Uuid::new_v4()));
@@ -110,8 +115,8 @@ impl Sandbox {
             }
         }
     }
-    fn legacy(&self) -> (Value, Vec<u8>) {
-        let one = line(1);
+    fn native_prefix(&self) -> (Value, Vec<u8>) {
+        let one = [native_fixture::header_bytes(), line(1)].concat();
         let status = self.status(1, one.len() as u64);
         self.publish(&status);
         fs::write(
@@ -132,14 +137,13 @@ impl Sandbox {
         ])
     }
     fn query(&self) -> Value {
-        self.ok(&["query-v2", "--session-dir", self.directory()])
+        self.ok(&["query", "--session-dir", self.directory()])
     }
 }
 fn line(seq: u64) -> Vec<u8> {
-    let mut bytes=serde_json::to_vec(&json!({"schema_version":1,"type":"entry","seq":seq,"time":"01-01 00:00:00.000","pid":7,"tid":8,"level":"I","tag":"Tag","message":format!("row-{seq}")})).unwrap();
-    bytes.push(b'\n');
-    bytes
+    native_fixture::line(&native_fixture::row(seq, &format!("row-{seq}"), Some(1234)))
 }
+
 fn wait_marker(s: &Sandbox) {
     let deadline = Instant::now() + Duration::from_secs(5);
     while !s.path("stop").exists() {
@@ -159,7 +163,7 @@ fn seqs(v: &Value) -> Vec<u64> {
 #[test]
 fn stale_stop_requests_cooperative_exit_then_times_out_without_pid_signal() {
     let s = Sandbox::new();
-    let (status, _) = s.legacy();
+    let (status, _) = s.native_prefix();
     let before = fs::read(s.path("status.json")).unwrap();
     let (ok, result) = s.run(&["stop", "--session-dir", s.directory(), "--wait-secs", "1"]);
     assert!(!ok);
@@ -174,7 +178,7 @@ fn stale_stop_requests_cooperative_exit_then_times_out_without_pid_signal() {
 fn stale_worker_can_acknowledge_normal_stop_and_force_preserves_real_completion() {
     for force in [false, true] {
         let s = Sandbox::new();
-        let (mut status, _) = s.legacy();
+        let (mut status, _) = s.native_prefix();
         let mut args = vec!["stop", "--session-dir", s.directory(), "--wait-secs", "2"];
         if force {
             args.push("--force");
@@ -193,10 +197,10 @@ fn stale_worker_can_acknowledge_normal_stop_and_force_preserves_real_completion(
 }
 
 #[test]
-fn forced_closure_freezes_published_legacy_prefix_and_preserves_worker_files() {
+fn forced_closure_freezes_published_native_prefix_and_preserves_worker_files() {
     let s = Sandbox::new();
-    let (mut status, one) = s.legacy();
-    fs::write(s.path("worker.lock"), b"legacy lock is not liveness proof").unwrap();
+    let (mut status, one) = s.native_prefix();
+    fs::write(s.path("worker.lock"), b"stale lock is not liveness proof").unwrap();
     fs::write(s.path("status.next"), b"crashed unfinished publication").unwrap();
     let status_bytes = fs::read(s.path("status.json")).unwrap();
     let log_bytes = fs::read(s.path("logs.jsonl")).unwrap();
@@ -214,7 +218,7 @@ fn forced_closure_freezes_published_legacy_prefix_and_preserves_worker_files() {
     );
     assert_eq!(
         fs::read(s.path("worker.lock")).unwrap(),
-        b"legacy lock is not liveness proof"
+        b"stale lock is not liveness proof"
     );
     let closure = fs::read(s.path("management-closure.json")).unwrap();
     assert_eq!(s.force(), closed);
@@ -222,12 +226,14 @@ fn forced_closure_freezes_published_legacy_prefix_and_preserves_worker_files() {
         fs::read(s.path("management-closure.json")).unwrap(),
         closure
     );
-    // A delayed legacy worker may write a newer status and more records. Its
+    // A delayed worker may write a newer status and more records. Its
     // files remain intact, while every management reader keeps the frozen view.
     let bytes = [one, line(2), line(3)].concat();
     fs::write(s.path("logs.jsonl"), &bytes).unwrap();
     status["entries"] = 3.into();
+    status["visible_end"]["seq"] = 3.into();
     status["bytes"] = bytes.len().into();
+    status["visible_end"]["offset"] = bytes.len().into();
     status["updated_unix_ms"] = u64::MAX.into();
     s.publish(&status);
     let shown = s.ok(&["status", "--session-dir", s.directory()]);
@@ -236,16 +242,12 @@ fn forced_closure_freezes_published_legacy_prefix_and_preserves_worker_files() {
     assert_eq!(seqs(&page), [1]);
     assert_eq!(page["complete"], true);
     assert_eq!(page["source_status"]["worker_exit_confirmed"], false);
-    let legacy = s.ok(&["query", "--session-dir", s.directory()]);
-    assert_eq!(legacy["entries"].as_array().unwrap().len(), 1);
-    assert_eq!(legacy["entries"][0]["seq"], 1);
-    assert_eq!(legacy["complete"], true);
 }
 
 #[test]
 fn concurrent_force_is_first_writer_wins_and_corrupt_sidecar_fails_closed() {
     let s = Sandbox::new();
-    s.legacy();
+    s.native_prefix();
     let args = [
         "stop",
         "--session-dir",
@@ -268,7 +270,7 @@ fn concurrent_force_is_first_writer_wins_and_corrupt_sidecar_fails_closed() {
             .starts_with(".management-closure-")
     }));
     fs::write(s.path("management-closure.json"), b"{truncated").unwrap();
-    for command in ["status", "query-v2", "stop"] {
+    for command in ["status", "query", "stop"] {
         let (ok, v) = s.run(&[command, "--session-dir", s.directory()]);
         assert!(!ok, "{v}");
         assert_eq!(v["error"]["code"], "invalid_session");
@@ -278,29 +280,25 @@ fn concurrent_force_is_first_writer_wins_and_corrupt_sidecar_fails_closed() {
 #[test]
 fn old_cursors_beyond_closed_boundary_are_rejected_while_within_prefix_references_work() {
     let s = Sandbox::new();
-    let one = line(1);
+    let one = [native_fixture::header_bytes(), line(1)].concat();
     let bytes = [one.clone(), line(2)].concat();
     fs::write(s.path("logs.jsonl"), &bytes).unwrap();
     let mut status = s.status(2, bytes.len() as u64);
     s.publish(&status);
-    let old = s.ok(&["query-v2", "--session-dir", s.directory(), "--limit", "1"]);
+    let old = s.ok(&["query", "--session-dir", s.directory(), "--limit", "1"]);
     status["entries"] = 1.into();
+    status["visible_end"]["seq"] = 1.into();
     status["bytes"] = one.len().into();
+    status["visible_end"]["offset"] = one.len().into();
     s.publish(&status);
     s.force();
     let token = old["next_cursor"].as_str().unwrap();
     let reference = old["records"][0]["record_ref"].as_str().unwrap();
     for args in [
+        vec!["query", "--session-dir", s.directory(), "--cursor", token],
+        vec!["get", "--session-dir", s.directory(), "--ref", reference],
         vec![
-            "query-v2",
-            "--session-dir",
-            s.directory(),
-            "--cursor",
-            token,
-        ],
-        vec!["get-v2", "--session-dir", s.directory(), "--ref", reference],
-        vec![
-            "context-v2",
+            "context",
             "--session-dir",
             s.directory(),
             "--ref",
@@ -314,12 +312,12 @@ fn old_cursors_beyond_closed_boundary_are_rejected_while_within_prefix_reference
     let page = s.query();
     let reference = page["records"][0]["record_ref"].as_str().unwrap();
     assert_eq!(
-        s.ok(&["get-v2", "--session-dir", s.directory(), "--ref", reference])["complete"],
+        s.ok(&["get", "--session-dir", s.directory(), "--ref", reference])["complete"],
         true
     );
     assert_eq!(
         seqs(&s.ok(&[
-            "context-v2",
+            "context",
             "--session-dir",
             s.directory(),
             "--ref",
@@ -331,24 +329,15 @@ fn old_cursors_beyond_closed_boundary_are_rejected_while_within_prefix_reference
 
 #[test]
 fn native_closed_sessions_remain_prefix_queries_without_fabricated_footer() {
-    for format in [NativeFormat::V2, NativeFormat::CompactV3] {
+    {
         let s = Sandbox::new();
         let mut session = Session::new();
         session.begin_attempt().unwrap();
         session.stream_started().unwrap();
-        let mut header = DocumentHeader::live(session.id(), "TEST".into(), vec![LogBuffer::Main]);
-        header.set_format(format).unwrap();
+        let header = DocumentHeader::live(session.id(), "TEST".into(), vec![LogBuffer::Main]);
         let mut encoder = StreamEncoder::new(header.clone()).unwrap();
         let mut bytes = encoder.header_bytes().unwrap();
-        let mut entry = if format == NativeFormat::CompactV3 {
-            ciallogcat::protobuf::DecodedEntry::decode_payload(
-                b"\x08\x01\x10\x02\x18\x04\x28\x2a\x30\x2b\x42\x03one".to_vec(),
-            )
-            .unwrap()
-            .project()
-        } else {
-            LogEntry::new("now", 42, 43, "Tag", Level::Info, "one")
-        };
+        let mut entry = LogEntry::new("now", 42, 43, "Tag", Level::Info, "one");
         entry.provenance = Some(session.next_record(Some(1234)).unwrap());
         bytes.extend(encoder.record_bytes(&entry).unwrap());
         let published = bytes.len();
@@ -370,12 +359,12 @@ fn native_closed_sessions_remain_prefix_queries_without_fabricated_footer() {
         assert_eq!(page["source_status"]["terminal"], true);
         let reference = page["records"][0]["record_ref"].as_str().unwrap();
         assert_eq!(
-            s.ok(&["get-v2", "--session-dir", s.directory(), "--ref", reference])["complete"],
+            s.ok(&["get", "--session-dir", s.directory(), "--ref", reference])["complete"],
             true
         );
         assert_eq!(
             seqs(&s.ok(&[
-                "context-v2",
+                "context",
                 "--session-dir",
                 s.directory(),
                 "--ref",
@@ -385,7 +374,7 @@ fn native_closed_sessions_remain_prefix_queries_without_fabricated_footer() {
             ])),
             [1]
         );
-        let (ok, v) = s.run(&["query-v2", "--file", s.path("logs.jsonl").to_str().unwrap()]);
+        let (ok, v) = s.run(&["query", "--file", s.path("logs.jsonl").to_str().unwrap()]);
         assert!(!ok, "{v}");
         assert_eq!(fs::read(s.path("logs.jsonl")).unwrap(), bytes);
     }
@@ -395,7 +384,7 @@ fn native_closed_sessions_remain_prefix_queries_without_fabricated_footer() {
 fn already_terminal_force_is_noop_and_frozen_partial_boundaries_fail_queries() {
     for state in ["completed", "failed"] {
         let s = Sandbox::new();
-        let (mut status, _) = s.legacy();
+        let (mut status, _) = s.native_prefix();
         status["state"] = state.into();
         s.publish(&status);
         let before = fs::read(s.path("status.json")).unwrap();
@@ -405,47 +394,30 @@ fn already_terminal_force_is_noop_and_frozen_partial_boundaries_fail_queries() {
         assert_eq!(fs::read(s.path("status.json")).unwrap(), before);
     }
     let s = Sandbox::new();
-    let (mut status, one) = s.legacy();
+    let (mut status, one) = s.native_prefix();
     status["bytes"] = (one.len() - 1).into();
+    status["visible_end"]["offset"] = (one.len() - 1).into();
     s.publish(&status);
     s.force();
-    for command in ["query", "query-v2"] {
-        let (ok, v) = s.run(&[command, "--session-dir", s.directory()]);
-        assert!(!ok, "{v}");
-    }
+    let (ok, v) = s.run(&["query", "--session-dir", s.directory()]);
+    assert!(!ok, "{v}");
 }
 
 #[test]
 fn administrative_closure_enforces_sequence_fence_even_when_published_bytes_disagree() {
-    for schema in [1, 2, 3] {
+    {
         let s = Sandbox::new();
         let mut status = s.status(1, 0);
-        let bytes = if schema == 1 {
-            [line(1), line(2), line(3)].concat()
-        } else {
+        let bytes = {
             let mut session = Session::new();
             session.begin_attempt().unwrap();
             session.stream_started().unwrap();
-            let mut header =
-                DocumentHeader::live(session.id(), "TEST".into(), vec![LogBuffer::Main]);
-            header
-                .set_format(if schema == 2 {
-                    NativeFormat::V2
-                } else {
-                    NativeFormat::CompactV3
-                })
-                .unwrap();
+            let header = DocumentHeader::live(session.id(), "TEST".into(), vec![LogBuffer::Main]);
             let mut encoder = StreamEncoder::new(header.clone()).unwrap();
             let mut bytes = encoder.header_bytes().unwrap();
             for index in 1..=3 {
                 let mut entry = if index == 2 {
                     LogEntry::marker("structural event also has a sequence")
-                } else if schema == 3 {
-                    ciallogcat::protobuf::DecodedEntry::decode_payload(
-                        b"\x08\x01\x10\x02\x18\x04\x28\x2a\x30\x2b\x42\x03one".to_vec(),
-                    )
-                    .unwrap()
-                    .project()
                 } else {
                     LogEntry::new("now", 42, 43, "Tag", Level::Info, "one")
                 };
@@ -459,14 +431,15 @@ fn administrative_closure_enforces_sequence_fence_even_when_published_bytes_disa
             bytes
         };
         status["bytes"] = bytes.len().into();
+        status["visible_end"]["offset"] = bytes.len().into();
         fs::write(s.path("logs.jsonl"), &bytes).unwrap();
         s.publish(&status);
-        let page = s.ok(&["query-v2", "--session-dir", s.directory(), "--limit", "1"]);
+        let page = s.ok(&["query", "--session-dir", s.directory(), "--limit", "1"]);
         let first = page["records"][0]["record_ref"].as_str().unwrap();
-        // Known pre-existing X28 can issue this reference before administrative
-        // closure. The new frozen management view must not inherit that hole.
-        let prior = s.ok(&[
-            "context-v2",
+        // Context must reject records outside the signed sequence fence even
+        // before administrative closure; a later closure cannot relax it.
+        let (ok, error) = s.run(&[
+            "context",
             "--session-dir",
             s.directory(),
             "--ref",
@@ -474,16 +447,17 @@ fn administrative_closure_enforces_sequence_fence_even_when_published_bytes_disa
             "--after",
             "2",
         ]);
-        let outside = prior["records"][1]["record_ref"].as_str().unwrap();
+        assert!(!ok);
+        assert_eq!(error["error"]["code"], "invalid_source");
         s.force();
         assert_eq!(
-            s.ok(&["get-v2", "--session-dir", s.directory(), "--ref", first])["seq"],
+            s.ok(&["get", "--session-dir", s.directory(), "--ref", first])["seq"],
             1
         );
         for args in [
-            vec!["query-v2", "--session-dir", s.directory()],
+            vec!["query", "--session-dir", s.directory()],
             vec![
-                "context-v2",
+                "context",
                 "--session-dir",
                 s.directory(),
                 "--ref",
@@ -491,10 +465,9 @@ fn administrative_closure_enforces_sequence_fence_even_when_published_bytes_disa
                 "--after",
                 "2",
             ],
-            vec!["get-v2", "--session-dir", s.directory(), "--ref", outside],
         ] {
             let (ok, value) = s.run(&args);
-            assert!(!ok, "{schema}: {value}");
+            assert!(!ok, "{value}");
             assert_eq!(value["error"]["code"], "invalid_source");
         }
         assert_eq!(fs::read(s.path("logs.jsonl")).unwrap(), bytes);

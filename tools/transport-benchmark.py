@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Synthetic Linux host capture comparison using pre-encoded replay.
 
-Defaults to v2/text and v2/proto; --include-compact adds v3/proto. No real ADB,
+Measures current text/proto; --baseline-cli adds an explicit old-build comparison. No real ADB,
 device encoder, USB, GPU, or fsync/durable-storage throughput is measured.
 """
 import argparse
@@ -95,13 +95,13 @@ def decode_bytes(value):
     return decoded
 
 
-def validate(path, count, size, transport, record_format, source):
+def validate(path, count, size, transport, version, source):
     """Check this synthetic fixture, including exact on-disk replay bytes.
 
-    This is deliberately not a general native-file/protobuf reader. For v3 the
-    original payload is the evidence; absent display fields are required.
+    This is deliberately not a general native-file/protobuf reader. Compact proto
+    retains original payload evidence; expanded fields are permitted only for
+    an explicitly selected historical baseline schema.
     """
-    version = int(record_format[1:])
     verified = 0
     capture = None
     try:
@@ -121,8 +121,9 @@ def validate(path, count, size, transport, record_format, source):
                 require(header["normalization"]["protobuf_raw_payload"] == "preserved_base64",
                         "missing raw payload declaration")
             if version == 3:
-                require(transport == "proto" and header["record_encoding"] == "proto_raw_v1"
-                        and header["normalization"]["proto_projection"] == "aosp_logcat_16r1_host_v1",
+                require(header["record_encoding"] == "proto_raw_v1"
+                        and header["normalization"]["proto_projection"] == "aosp_logcat_16r1_host_v1"
+                        and header["normalization"]["protobuf_raw_payload"] == "preserved_base64",
                         "invalid compact encoding declarations")
             for index in range(count):
                 row = json.loads(next(stream))
@@ -162,18 +163,18 @@ def validate(path, count, size, transport, record_format, source):
                     else:
                         require(not set(evidence).intersection({"time_sec", "time_nsec", "priority",
                                 "uid", "pid", "tid", "tag_bytes", "message_bytes", "process_name"}),
-                                "redundant v3 proto fields")
+                                "redundant compact proto fields")
                         require(not set(row).intersection({"device_time", "pid", "tid", "level",
                                                           "tag", "message", "process"}),
-                                "redundant v3 display fields")
+                                "redundant compact display fields")
                 else:
                     require(wire.readline() == b"10-23 20:53:20.123  1234  1235 I Perf: " + body + b"\n",
                             "text replay differs from synthetic fixture")
                     require(row.get("proto") is None, "unexpected proto evidence on text path")
-                if version == 2:
+                if version == 2 or transport == "text":
                     require(row["message"].encode() == body and row["pid"] == 1234
                             and row["tid"] == 1235 and row["tag"] == "Perf" and row["level"] == "I",
-                            "v2 display mismatch")
+                            "display mismatch")
                 loss = row.get("text_loss")
                 require(loss is None or (loss["truncated"] is False
                         and loss["invalid_utf8_replaced"] is False), "unexpected text loss")
@@ -264,19 +265,29 @@ def read_status(path):
     return status
 
 
+def capture_command(cli, replay, output, count, transport, baseline=False, compact_baseline=False):
+    command = [str(cli), "capture", "--adb", str(replay), "--serial", "PERF-MOCK",
+               "--transport", transport, "--max-entries", str(count),
+               "--duration-secs", "60", "--max-bytes", "536870912", "--output", str(output)]
+    # Only the separately supplied historical binary receives its historical flags.
+    if baseline:
+        command += ["--record-format", "v3" if compact_baseline else "v2"]
+    return command
+
+
 def run_capture(cli, replay, root, source, count, size, trial, combo):
-    record_format, transport = combo.split("/")
-    label = f"{source.name}-{trial}-{record_format}-{transport}"
+    build, transport = combo.split("/")
+    baseline = build.startswith("baseline")
+    compact_baseline = build == "baseline-compact"
+    version = 2 if baseline and not compact_baseline else 3
+    label = f"{source.name}-{trial}-{build}-{transport}"
     output = root / (label + ".jsonl")
     stdout, stderr = root / (label + ".stdout"), root / (label + ".stderr")
-    command = [str(cli), "capture", "--adb", str(replay), "--serial", "PERF-MOCK",
-               "--record-format", record_format, "--transport", transport,
-               "--max-entries", str(count), "--duration-secs", "60", "--max-bytes", "536870912",
-               "--output", str(output)]
+    command = capture_command(cli, replay, output, count, transport, baseline, compact_baseline)
     env = dict(os.environ, CIALLOGCAT_CONFIG_DIR=str(root / "config"),
                CIALLOGCAT_PERF_INPUT=str(source))
     run = {"trial": trial, "warmup": trial == 0, "combination": combo,
-           "transport": transport, "record_format": record_format, "success": False,
+           "transport": transport, "build": build, "record_schema_version": version, "success": False,
            "argv": command, "artifact": output.name, "stdout": stdout.name, "stderr": stderr.name,
            "records_per_s": None, "message_mib_per_s": None, "exit_reason": "runner_error"}
     try:
@@ -285,7 +296,7 @@ def run_capture(cli, replay, root, source, count, size, trial, combo):
         status = read_status(stderr)
         run["cli_status"] = status
         run["cli_exit_reason"] = status.get("reason") if status else None
-        verified = validate(output, count, size, transport, record_format, source)
+        verified = validate(output, count, size, transport, version, source)
         run["verification"] = verified
         run["exit_reason"] = ("host_deadline" if run["timed_out"] else
                               "cli_nonzero_exit" if run["returncode"] else "integrity_failure")
@@ -296,7 +307,7 @@ def run_capture(cli, replay, root, source, count, size, trial, combo):
                 and status["error"] is None and status["entries"] == count
                 and status["bytes"] == run["artifact_bytes"] and status["discarded_entries"] == 0
                 and status["stream_interruptions"] == 0 and status["diagnostics_complete"] is True
-                and status["record_schema_version"] == int(record_format[1:])
+                and status["record_schema_version"] == version
                 and status["artifact_id"] == verified["artifact_id"]
                 and status["session_id"] == verified["session_id"]
                 and status["visible_end"] == {"seq": count, "offset": run["artifact_bytes"]},
@@ -347,7 +358,8 @@ def main():
     parser.add_argument("--cli", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--trials", type=int, help="measured rounds (default 5; 1 with --smoke)")
-    parser.add_argument("--include-compact", action="store_true", help="also compare explicit v3/proto")
+    parser.add_argument("--baseline-cli", type=Path, help="separate historical CLI with explicit v2/text and v2/proto support")
+    parser.add_argument("--baseline-compact", action="store_true", help="also measure the old baseline compact/proto path (requires --baseline-cli)")
     parser.add_argument("--smoke", action="store_true", help="64 short / 32 long records; tool validation only")
     args = parser.parse_args()
     if args.trials is None:
@@ -357,16 +369,28 @@ def main():
     cli = args.cli.resolve()
     if not cli.is_file() or not os.access(cli, os.X_OK):
         parser.error("--cli must name an executable file")
+    baseline = args.baseline_cli.resolve() if args.baseline_cli else None
+    if baseline and (not baseline.is_file() or not os.access(baseline, os.X_OK) or baseline == cli):
+        parser.error("--baseline-cli must name a distinct executable historical binary")
+    if args.baseline_compact and not baseline:
+        parser.error("--baseline-compact requires --baseline-cli")
     root = args.output_dir.resolve()
     root.mkdir(parents=True, exist_ok=False)
     (root / "replay.rs").write_text(REPLAY)
     replay = root / "replay-adb"
     subprocess.run(["rustc", "--edition=2024", "-O", str(root / "replay.rs"),
                     "-o", str(replay)], check=True, timeout=60)
-    combinations = ["v2/text", "v2/proto"] + (["v3/proto"] if args.include_compact else [])
-    report = {"report_schema_version": 2, "scope": "synthetic Linux host pipeline; no device/USB/GPU measurement",
+    combinations = ["current/text", "current/proto"]
+    if baseline:
+        combinations += ["baseline/text", "baseline/proto"]
+        if args.baseline_compact:
+            combinations.append("baseline-compact/proto")
+    report = {"report_schema_version": 3, "scope": "synthetic Linux host pipeline; no device/USB/GPU measurement",
               "started_utc": datetime.now(timezone.utc).isoformat(), "state": "running", "smoke": args.smoke,
-              "cli": str(cli), "cli_sha256": sha256(cli), "tool_sha256": sha256(Path(__file__)),
+              "cli": str(cli), "cli_sha256": sha256(cli),
+              "baseline_cli": str(baseline) if baseline else None,
+              "baseline_cli_sha256": sha256(baseline) if baseline else None,
+              "tool_sha256": sha256(Path(__file__)),
               "replay_sha256": sha256(replay), "combinations": combinations,
               "platform": platform.platform(), "trials": args.trials,
               "warmup_rounds": 1, "order_policy": "left-rotate combination list by round index (warmup=0); two combinations alternate",
@@ -394,7 +418,8 @@ def main():
             order = combinations[offset:] + combinations[:offset]
             case["round_order"].append({"trial": trial, "warmup": trial == 0, "combinations": order})
             for position, combo in enumerate(order, 1):
-                run = run_capture(cli, replay, root, source, count, size, trial, combo)
+                executable = baseline if combo.startswith("baseline") else cli
+                run = run_capture(executable, replay, root, source, count, size, trial, combo)
                 run.update(order_position=position, case_run_index=len(case["runs"]) + 1)
                 # Keep every failure and successful final-round artifact;
                 # stdout/stderr and per-run measurements always survive.
@@ -412,7 +437,9 @@ def main():
                 print(json.dumps({"case": name, **run}), flush=True)
     report["cli_sha256_after"] = sha256(cli)
     report["cli_unchanged"] = report["cli_sha256_after"] == report["cli_sha256"]
-    report["success"] = report["cli_unchanged"] and all(r["success"] for c in report["cases"] for r in c["runs"])
+    report["baseline_cli_sha256_after"] = sha256(baseline) if baseline else None
+    report["baseline_cli_unchanged"] = report["baseline_cli_sha256_after"] == report["baseline_cli_sha256"]
+    report["success"] = report["cli_unchanged"] and report["baseline_cli_unchanged"] and all(r["success"] for c in report["cases"] for r in c["runs"])
     report["state"] = "completed" if report["success"] else "failed"
     report["finished_utc"] = datetime.now(timezone.utc).isoformat()
     save_report(root, report)

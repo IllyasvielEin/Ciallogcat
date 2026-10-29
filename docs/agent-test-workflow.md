@@ -1,16 +1,16 @@
 # 围绕外部测试失败收集日志
 
-`examples/agent_capture.py` 把一个现有测试命令与有限的 CLI v2 会话组合起来。
+`examples/agent_capture.py` 把一个现有测试命令与有限的 CLI 会话组合起来。
 它不执行设备点击、安装、重置或测试调度。完整可运行的 mock 和 Maestro 示例见
 [examples/README.md](../examples/README.md)；Python 3.10+ 即可运行组合层自测。
 
 ## 执行过程
 
-1. `start --record-format v2` 同时设置时长、记录数和文件字节预算。会话目录必须不存在，
+1. `start` 同时设置时长、记录数和文件字节预算。会话目录必须不存在，
    且调用方应独占其父目录（推荐 `mktemp -d`）。这避免多个调用方争用同一路径；
    路径存在本身不证明某个 worker 属于本次运行。
 2. 在 `ready-timeout` 内确认非 stale 的 `running / adb_process_started`，并通过
-   `query-v2 --mode tail --start-at end` 一次定位当前已发布水位，不扫描启动前缀。
+   `query --mode tail --start-at end` 一次定位当前已发布水位，不扫描启动前缀。
    保存空页的 `{seq, offset}`、
    session/artifact 身份、source_status 和 tail cursor，然后才启动外部命令。
    `starting/reconnecting` 有限等待；terminal、stopping、unknown/stale 阻止动作。
@@ -44,7 +44,7 @@ header/footer 可以只推进 offset 而不推进 seq。
 所有 deadline 使用 monotonic 时钟，主机墙上时间回拨不会延长等待。
 
 - 采集：`--duration-secs 150`、`--max-entries 100000`、`--max-bytes 67108864`。
-  v2 header/footer 计入字节；所有重连共享这些预算。
+  native header/footer 计入字节；所有重连共享这些预算。
 - 动作：`--action-timeout 90` 秒。启动/基线共享 `--ready-timeout 15` 秒；
   普通 CLI 调用各受 `--command-timeout 15` 秒限制。动作进程清理最多再等 3 秒。
 - 失败宽限：`--failure-tail-secs 2` 秒，可设为 0。采集时长必须严格大于
@@ -63,7 +63,7 @@ header/footer 可以只推进 offset 而不推进 seq。
   整个报告还含固定数量的状态、边界、cursor、错误与预算信息，不以此参数声明报告总长。
   执行器输出直接流向 stderr，不保存在报告内；调用方若重定向到文件，应另设输出配额。
 
-本例通过 CLI 的 native v2 end 起点建立位置，不根据任意 `{seq, offset}` 伪造 token。
+本例通过 CLI 的 native end 起点建立位置，不根据任意 `{seq, offset}` 伪造 token。
 启动历史再大也无需先用有限页数追上；基线未能在就绪期限内建立仍会阻止动作。
 最终扫描到期或页数耗尽则保留已有证据、标明未完成和续查 cursor。此时记录只是**已扫描前缀
 内最近的匹配**，不能称为整个失败区间最新的 N 条。空页也可能有 `has_more=true`。
@@ -71,7 +71,7 @@ header/footer 可以只推进 offset 而不推进 seq。
 ## 报告与后续取证
 
 本例的 stdout 报告使用 `schema_version: 2`。CLI 查询响应仍为 schema_version=2；
-end 起点的 cursor 内部版本为 3，调用方不应解析 token。
+所有起点的 cursor 内部版本统一为 4，旧版 token 需重新查询取得；调用方不应解析 token。
 旧示例的单一 `evidence_page/error` 改为有界的 `evidence/errors`：
 
 - `action` 保留执行器退出、timeout/interrupted、主机时刻、耗时和 `reaped`。
@@ -96,14 +96,14 @@ end 起点的 cursor 内部版本为 3，调用方不应解析 token。
 传入，不解析 token，也不要把 snapshot cursor 改成 tail 使用：
 
 ```sh
-ciallogcat-cli query-v2 --session-dir /path/to/session --mode tail \
+ciallogcat-cli query --session-dir /path/to/session --mode tail \
   --query 'same query as the wrapper' --cursor '<evidence.next_cursor>' \
   --limit 20 --max-response-bytes 32768
-ciallogcat-cli get-v2 --session-dir /path/to/session --ref '<record_ref>'
-ciallogcat-cli context-v2 --session-dir /path/to/session --ref '<record_ref>' --before 5 --after 5
+ciallogcat-cli get --session-dir /path/to/session --ref '<record_ref>'
+ciallogcat-cli context --session-dir /path/to/session --ref '<record_ref>' --before 5 --after 5
 ```
 
-`get-v2` 用 `next_text_offset` 有界续取完整 JSON；`context-v2` 固定在该 reference 创建时的
+`get` 用 `next_text_offset` 有界续取完整 JSON；`context` 固定在该 reference 创建时的
 snapshot，不能用旧引用索取未来尾部。跨机器交接使用 `logs.jsonl` 和 `session_id/seq`，
 复制工件或换密钥后重新查询 token。仅成功终结的原生文件适合 GUI 完整导入；停止失败时
 session 查询可能仍能取得已发布前缀，但无 footer 的文件不会被冒充完整工件。

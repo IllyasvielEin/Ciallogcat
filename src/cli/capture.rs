@@ -1,10 +1,16 @@
 //! Bounded native documents. Reconnects share one identity and one total budget.
 use super::*;
+use ciallogcat::adb::LogcatEvent;
 use ciallogcat::capture_controller::{
     Command as Action, Controller, Intent, Status as Phase, Target,
 };
-use ciallogcat::document::{CaptureStatus, DocumentHeader, NativeFormat, StreamEncoder};
+use ciallogcat::document::{CaptureStatus, DocumentHeader, StreamEncoder};
 use ciallogcat::session::Session;
+use std::sync::mpsc::TrySendError;
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 
 // Header/footer count toward the file budget. Reserve enough for our fixed,
 // aggregate footer (never unbounded stderr or a list of every reconnect).
@@ -32,7 +38,7 @@ fn footer_diagnostic(message: &str) -> (&str, bool) {
 }
 
 #[cfg(test)]
-#[path = "capture_v2_tests.rs"]
+#[path = "capture_tests.rs"]
 mod tests;
 
 struct Packet {
@@ -75,7 +81,7 @@ fn progress(status: &mut Status, visible: &Mutex<Progress>) {
     });
 }
 
-pub(super) fn capture(
+pub(super) fn run(
     config: Config,
     dir: Option<&Path>,
     writer: Box<dyn Write + Send>,
@@ -102,11 +108,6 @@ pub(super) fn capture(
         header
             .normalization
             .insert("protobuf_raw_payload".into(), json!("preserved_base64"));
-    }
-    if config.record_schema_version == 3 {
-        header
-            .set_format(NativeFormat::CompactV3)
-            .map_err(io_error)?;
     }
     let mut encoder = StreamEncoder::new(header.clone()).map_err(io_error)?;
     let header_bytes = encoder.header_bytes().map_err(io_error)?;

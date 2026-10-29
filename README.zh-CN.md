@@ -12,7 +12,7 @@
 - 多行复制、键盘导航，以及浏览时暂停的自动跟随
 - 深色/浅色主题、内置中英文字体和可调日志内存预算
 - 独立的无界面 CLI，支持 JSONL 采集与有截止条件的本地后台会话
-- 打开 CLI v1 / 原生 v2 文件，另存保留日志或导出筛选快照，保留来源与稳定记录引用
+- 打开原生文件，另存保留日志或导出筛选快照，保留来源与稳定记录引用
 
 ## 目录
 
@@ -31,7 +31,7 @@
 
 Ciallogcat 专注于 Android 应用调试。桌面应用 `ciallogcat` 通过 ADB 读取实时 Logcat，并在本地筛选。独立的 `ciallogcat-cli` 为脚本和 Agent 输出规范化 JSONL，无需打开窗口。
 
-桌面应用可通过 **File** 菜单或拖放打开 JSONL 文件，无需 ADB。文件视图只读；另存和筛选导出使用原生 v2 格式。当前不支持多设备并排显示，界面混用中文和英文标签。文件功能见[使用说明](docs/file-workflow.md)。
+桌面应用可通过 **File** 菜单或拖放打开 JSONL 文件，无需 ADB。文件视图只读；另存和筛选导出使用同一种原生文档格式。当前不支持多设备并排显示，界面混用中文和英文标签。文件功能见[使用说明](docs/file-workflow.md)。
 
 ## 安装
 
@@ -100,7 +100,7 @@ cargo build --locked --release --no-default-features --bin ciallogcat-cli
 - 设备发现失败时保留上次成功列表与当前选择。快照中的离线或设备缺失不会单独停止仍在运行的日志流，“暂停”仍可使用。
 - 实际日志流退出后按 1、2、4 秒最多重连三次；暂停或关闭会取消重连。重新采集须等待旧进程与输出排空确认，超过 5 秒未确认则报错并阻止新启动。
 - 缓冲区默认 `main + system + crash`，修改后点击“**应用**”生效。启动与重启使用 `-T 1`，不会回补历史，期间可能有缺口。
-- 包名筛选包含 `com.example.app:sync` 等子进程。GUI 进程名来自近期 `ps` 推定，并非已核实的身份；查询失败或过期后不再使用，也不会用后来的快照回填历史未知行。未识别或短命进程可能被该筛选隐藏，清除包名限制即可检查它们的日志。Logcat 结构分隔行仍受级别与消息条件筛选，但不受包名条件限制，也不计入未知进程数量。
+- 包名筛选包含 `com.example.app:sync` 等子进程。GUI 进程名来自近期 `ps` 推定，并非已核实的身份；查询失败或过期后不再使用，也不会用后来的快照回填历史未知行。未识别或短命进程可能被该筛选隐藏，清除包名限制即可检查它们的日志。结构分隔行与未解析文本可在默认 Verbose 阈值下匹配消息条件；包名、Tag 或更严格的级别条件会排除这些没有日志元字段的记录，不将其计为未知进程。
 - 正则无效时显示错误，修正后恢复结果。**Clear** 确认后仅清除本地记录，不清除设备上的 Logcat 缓冲区。
 
 ### 内存保留
@@ -123,17 +123,17 @@ ciallogcat-cli capture --serial DEVICE_SERIAL --output capture.jsonl --duration-
 # 使用新目录启动有截止条件的本地后台会话
 ciallogcat-cli start --serial DEVICE_SERIAL --session-dir ./capture-session --duration-secs 300
 ciallogcat-cli status --session-dir ./capture-session
-ciallogcat-cli query --session-dir ./capture-session --after-seq 0 --limit 100 --query "timeout"
+ciallogcat-cli query --session-dir ./capture-session --limit 100 --query "timeout"
 ciallogcat-cli stop --session-dir ./capture-session
 ```
 
-- 控制命令返回 JSON，日志记录采用**规范化 JSONL**，并非原始 Logcat 字节。`capture --output -` 将日志写入 stdout，采集摘要写入 stderr。
-- 时长与输出大小限制始终同时生效，默认分别为 **600 秒**与 **1 GiB**。使用 `--duration-secs` 和 `--max-bytes` 调整。达到限制、ADB 退出、收到停止请求或发生错误时会结束，不会无限驻留。
+- 控制命令返回 JSON，采集使用统一的**原生 JSONL**，默认文本传输，包括文档头、分类记录与 footer，并非原始 Logcat 字节。`capture --output -` 将整份文档写入 stdout，采集摘要写入 stderr；不再支持 v1 采集。
+- 时长与输出大小限制始终同时生效，默认分别为 **600 秒**与 **1 GiB**。使用 `--duration-secs` 和 `--max-bytes` 调整。达到限制、收到停止请求、dump 成功完成或遇到终止错误时结束；意外流退出会有限重试，不会无限驻留。
 - `start` 返回 `adb_process_started` 仅表示 worker 与 ADB 进程已启动，**不代表设备已就绪或一定会产生日志**。请检查 `status` 并查询输出。
-- `query --query` 对消息进行区分大小写的字面子串匹配。翻页时将返回的 `next_after_seq` 传给 `--after-seq`。CLI 尚未提供全部桌面筛选功能。
+- `query --query` 默认对消息进行区分大小写的字面子串匹配，也支持正则、元数据和时间筛选。预览翻页时将 `next_cursor` 传给 `--cursor`，保持来源、模式和筛选不变；`--all --format text` 可输出快照内的完整可读记录。
 - 输出文件与会话目录必须是新路径。设备日志可能含敏感信息，请存放在私人目录，并在分享前检查内容。
 
-选项、分页限制、退出码、停止行为和打包说明见 [CLI 指南](docs/cli.md)。快速参考可运行 `ciallogcat-cli --help`。
+选项、分页限制、退出码、停止行为和打包说明见 [CLI 指南](docs/cli.md)；已有脚本请先查看 [query 迁移说明](docs/cli.md#migrating-query-callers)。快速参考可运行 `ciallogcat-cli --help`。
 
 ## 配置
 
@@ -144,7 +144,9 @@ ciallogcat-cli stop --session-dir ./capture-session
 
 使用 `CIALLOGCAT_CONFIG_DIR` 更改桌面配置目录。两个前端均支持用 `CIALLOGCAT_ADB` 指定 ADB 可执行文件，CLI 还支持 `--adb PATH`。否则会从 SDK 环境变量、`PATH` 和常见 SDK 目录查找 ADB。CLI 会话使用 `--session-dir` 指定的目录。
 
-Agent 新集成可使用 `capture/start --record-format v2` 和 `query-v2/get-v2/context-v2`，沿用 GUI 可打开的记录身份。实验性 `--transport proto` 显式选择；详见 [CLI](docs/cli.md)。
+不再自动导入旧拼写 `Ciallocat` / `ciallocat` 配置目录，其文件保持不动。当前配置目录中的查询签名密钥为 `query.key`；旧查询 token 必须通过重新查询取得。
+
+Agent 集成可使用 `capture/start` 和 `query/get/context`，沿用 GUI 可打开的记录身份。默认文本传输，`--transport proto` 显式选择 protobuf，两者使用同一种原生文档格式；protobuf 传输仍属实验功能；详见 [CLI](docs/cli.md)。
 
 ## 文档
 
@@ -154,7 +156,7 @@ Agent 新集成可使用 `capture/start --record-format v2` 和 `query-v2/get-v2
 - [桌面交互与诊断](docs/ui-review.md)
 - [CLI 命令与会话](docs/cli.md)
 - [共享 Rust 核心](docs/headless-core.md)
-- [Agent v2 查询、全文与上下文](docs/agent-query.md)
+- [Agent 查询、全文与上下文](docs/agent-query.md)
 - [开发方向与实施进度](docs/development-plan.md)
 - [后续任务与 Agent 交接](TODO.md)
 - [验证状态与边界](docs/validation.md)

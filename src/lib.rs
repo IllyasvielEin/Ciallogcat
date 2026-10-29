@@ -21,7 +21,6 @@ pub mod json_input;
 pub mod log_store;
 pub mod model;
 pub mod protobuf;
-pub mod record_io;
 pub mod session;
 mod wake_signal;
 

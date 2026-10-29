@@ -58,7 +58,7 @@ cargo build --locked --release --no-default-features --bin ciallogcat-cli
 
 随后按 [贡献指南](../CONTRIBUTING.md) 完成默认 GUI、Clippy、Python 和生成代码检查。Linux 原生体验需要 Xvfb、X11/XTest/XRes、bubblewrap、用户命名空间及系统 Python GTK；按 [体验工具](../tools/experience-lab/README.md) 在新主机重新准备，不复制旧主机下载的运行库。命名空间不可用时如实记录受阻，仍可运行无设备核心测试。
 
-没有设备时继续使用 [fake ADB](adb-testing.md) 与 [Agent 示例](../examples/README.md)。不要复用旧主机的配置绝对路径、签名密钥或活动 session cursor；迁移文件可在新环境重新查询取得引用。需要旧 session 状态/游标时必须另行明确其绑定路径及配置，不能假设可移植。
+没有设备时继续使用 [fake ADB](adb-testing.md) 与 [Agent 示例](../examples/README.md)。不要复用旧主机的配置绝对路径、签名密钥或活动 session cursor；迁移文件可在新环境重新查询取得引用。当前源码只读取当前原生格式，旧布局或旧签名 token 不再兼容；保留旧证据时同时保留能够读取它的旧工具，不将旧 session 状态/游标当作可移植接口。当前命令和格式迁移见 [CLI 迁移说明](cli.md#migrating-query-callers)。
 
 ## 可选证据
 

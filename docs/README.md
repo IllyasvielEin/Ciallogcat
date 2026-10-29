@@ -17,7 +17,7 @@
 ## 设计依据与性能
 
 - [Logcat 选项与生态](logcat-options-and-ecosystem.md)、[protobuf 研究与设备矩阵](logcat-protobuf.md)
-- [compact v3 设计](protobuf-storage-plan.md)、[固定 schema 与许可](../proto/README.md)
+- [原生紧凑存档设计](protobuf-storage-plan.md)、[固定 schema 与许可](../proto/README.md)
 - [三组合性能实测](transport-performance-2026-10-24.md)、[基准复现工具](../tools/transport-benchmark.md)
 
 保留的性能报告对应明确的旧构建和合成负载，不代表当前源码已最终验收。原始 target 工件只在旧主机可用；后续任务及构建不依赖它们。

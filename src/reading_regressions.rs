@@ -451,7 +451,7 @@ fn context_anchor_stays_fully_visible_after_notice_reduces_table_height() {
 }
 
 #[test]
-fn detail_identity_copies_session_or_artifact_scope_and_cancels_prepared_logs() {
+fn detail_identity_survives_native_reopen_and_cancels_prepared_logs() {
     let mut h = Harness::new(false);
     h.resize(900.0, 560.0);
     let mut session = Session::new();
@@ -490,15 +490,30 @@ fn detail_identity_copies_session_or_artifact_scope_and_cancels_prepared_logs() 
             && tooltip.contains("123456")
     );
 
-    let legacy = ciallogcat::record_io::LegacyRecord::from_entry(&LogEntry::marker("legacy"), 7);
+    let native = ciallogcat::document::Document::from_snapshot(
+        ciallogcat::document::DocumentHeader::live(
+            session.id(),
+            "fixture".into(),
+            vec![LogBuffer::Main],
+        ),
+        Arc::clone(&h.app.entries),
+        ciallogcat::document::ExportScope::default(),
+        ciallogcat::document::CaptureStatus::default(),
+    )
+    .unwrap();
+    let mut bytes = Vec::new();
+    ciallogcat::document::write_snapshot(
+        &mut bytes,
+        &native,
+        &std::sync::atomic::AtomicBool::new(false),
+    )
+    .unwrap();
     let document = ciallogcat::document::load(
-        std::io::Cursor::new(serde_json::to_vec(&legacy).unwrap()),
+        std::io::Cursor::new(bytes),
         16 * MIB,
         &std::sync::atomic::AtomicBool::new(false),
     )
     .unwrap();
-    let artifact = document.header.artifact_id;
-    let seq = document.record_metadata[0].seq;
     h.app.clear_logs();
     h.app.entries = Arc::clone(&document.entries);
     h.app.files.document = Some(Arc::new(document));
@@ -513,10 +528,11 @@ fn detail_identity_copies_session_or_artifact_scope_and_cancels_prepared_logs() 
     assert_eq!(h.copied.len(), 1);
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&h.copied[0]).unwrap(),
-        serde_json::json!({"identity_scope":"artifact_local","artifact_id":artifact,"seq":seq})
+        serde_json::json!({"identity_scope":"capture_session","session_id":identity.session_id,"seq":identity.seq})
     );
-    assert!(!h.copied[0].contains("session_id"));
     h.app.files.document = None;
+    h.app.clear_logs();
+    h.app.append_entry(LogEntry::marker("unowned"));
     assert!(h.app.evidence_reference(0).is_none());
 }
 
@@ -551,4 +567,213 @@ fn diagnostics_menu_renders_without_a_file_modal() {
             .iter()
             .any(|(label, _)| label.contains("请选择设备并配置 ADB"))
     );
+}
+
+#[test]
+fn native_structural_rows_share_kind_aware_table_details_accessibility_and_copy() {
+    use ciallogcat::document;
+    use egui::accesskit::Role;
+
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    let mut app = CiallogcatApp::with_config(&ctx, AppConfig::default(), None);
+    app.follow_logs = false;
+    app.show_details = false;
+    let mut session = Session::new();
+    session.begin_attempt().unwrap();
+    session.stream_started().unwrap();
+    let messages = ["boundary 雪\nsecond line\n", "raw\0 bytes  "];
+    for mut entry in [
+        LogEntry::marker(messages[0]),
+        LogEntry::unparsed(messages[1]),
+        LogEntry::new("device-time", 0, 0, "logcat", Level::Info, "real zero IDs"),
+    ] {
+        entry.provenance = Some(session.next_record(Some(123456)).unwrap());
+        app.append_entry(entry);
+    }
+    let native = document::Document::from_snapshot(
+        document::DocumentHeader::live(session.id(), "fixture".into(), vec![LogBuffer::Main]),
+        Arc::clone(&app.entries),
+        document::ExportScope::default(),
+        document::CaptureStatus::default(),
+    )
+    .unwrap();
+    let cancel = std::sync::atomic::AtomicBool::new(false);
+    let mut bytes = Vec::new();
+    document::write_snapshot(&mut bytes, &native, &cancel).unwrap();
+    let document = document::load(std::io::Cursor::new(bytes), 16 * MIB, &cancel).unwrap();
+    app.entries = Arc::clone(&document.entries);
+    app.files.document = Some(Arc::new(document));
+    app.schedule_filter();
+    settle(&mut app);
+    assert_eq!(app.matches, [0, 1, 2]);
+    let mut h = Harness::from_app(ctx, app, egui::vec2(1280.0, 820.0));
+    for (index, kind) in ["event", "unparsed"].into_iter().enumerate() {
+        let row = &h
+            .accessible_nodes
+            .iter()
+            .find(|(_, node)| node.role() == Role::Row && node.row_index() == Some(index + 1))
+            .unwrap()
+            .1;
+        let summary = row.label().unwrap();
+        assert!(summary.starts_with(&format!("{kind} row {}. Message ", index + 1)));
+        for fake in ["Time ", "Level ", "PID / TID", "Process ", "Tag ", "logcat"] {
+            assert!(!summary.contains(fake), "{summary}");
+        }
+        assert_eq!(row.children().len(), 6);
+        for (column, child) in row.children().iter().enumerate() {
+            let cell = &h
+                .accessible_nodes
+                .iter()
+                .find(|(id, _)| id == child)
+                .unwrap()
+                .1;
+            if column < 5 {
+                assert_eq!(cell.label().unwrap_or_default(), "");
+            } else {
+                assert_eq!(
+                    cell.label().unwrap(),
+                    format!("[{kind}] {}", preview_first_line(messages[index]))
+                );
+            }
+        }
+    }
+    let log = &h
+        .accessible_nodes
+        .iter()
+        .find(|(_, node)| node.role() == Role::Row && node.row_index() == Some(3))
+        .unwrap()
+        .1;
+    assert!(log.label().unwrap().contains("Level Info. PID / TID 0 / 0"));
+    assert!(log.label().unwrap().contains("Tag logcat"));
+    for (index, kind) in ["event", "unparsed"].into_iter().enumerate() {
+        h.app.show_details = true;
+        h.app.selected = Some(index);
+        h.app.selection.select(&h.app.matches, index, false, false);
+        h.frame(vec![]);
+        assert!(
+            h.labels
+                .iter()
+                .any(|(label, _)| label == &format!("[{kind}] · 非日志记录；无日志元字段"))
+        );
+        h.frame(vec![egui::Event::Copy]);
+        assert_eq!(h.copied, [format!("[{kind}] {}", messages[index])]);
+        assert_eq!(h.app.entries[index].message.as_ref(), messages[index]);
+    }
+}
+
+#[test]
+fn gui_filter_worker_does_not_treat_structural_placeholders_as_metadata() {
+    let mut h = Harness::new(false);
+    h.app.append_entry(LogEntry::marker("matching body"));
+    h.app.append_entry(LogEntry::unparsed("matching body"));
+    let mut log = LogEntry::new("", 0, 0, "logcat", Level::Info, "matching body");
+    log.process = Some("com.example.app".into());
+    h.app.append_entry(log);
+    for (package, tag_include, tag_exclude, min_level, expected) in [
+        ("", "", "", Level::Verbose, vec![0, 1, 2]),
+        ("", "", "", Level::Debug, vec![2]),
+        ("", "logcat", "", Level::Verbose, vec![2]),
+        ("", "", "Absent", Level::Verbose, vec![2]),
+        ("com.example.app", "", "", Level::Verbose, vec![2]),
+        ("", "", "", Level::Verbose, vec![0, 1, 2]),
+    ] {
+        h.app.package = package.into();
+        h.app.tag_include = tag_include.into();
+        h.app.tag_exclude = tag_exclude.into();
+        h.app.min_level = min_level;
+        h.app.query = "matching".into();
+        h.app.schedule_filter();
+        settle(&mut h.app);
+        assert_eq!(h.app.matches, expected);
+    }
+}
+
+#[test]
+fn structural_kind_label_does_not_create_or_shift_message_highlights() {
+    for pattern in ["event", "^raw"] {
+        let matcher = Regex::new(pattern).unwrap();
+        let job = highlighted_message("[event] ", "raw body", Some(&matcher), Color32::WHITE, true);
+        assert_eq!(job.text, "[event] raw body");
+        let hits: Vec<_> = job
+            .sections
+            .iter()
+            .filter(|section| section.format.background != Color32::TRANSPARENT)
+            .map(|section| &job.text[section.byte_range.start.0..section.byte_range.end.0])
+            .collect();
+        assert_eq!(
+            hits,
+            if pattern == "event" {
+                vec![]
+            } else {
+                vec!["raw"]
+            }
+        );
+    }
+}
+
+#[test]
+fn tag_only_empty_results_name_the_active_filter_at_small_window_size() {
+    let mut h = Harness::new(false);
+    h.resize(900.0, 560.0);
+    h.app.append_entry(LogEntry::new(
+        "",
+        1,
+        1,
+        "Network",
+        Level::Info,
+        "still retained",
+    ));
+    for (include, exclude) in [("Other", ""), ("", "Network")] {
+        h.app.tag_include = include.into();
+        h.app.tag_exclude = exclude.into();
+        h.app.schedule_filter();
+        settle(&mut h.app);
+        h.frame(vec![]);
+        assert!(h.app.matches.is_empty());
+        let (_, bounds) = h
+            .label_bounds
+            .iter()
+            .find(|(label, _)| {
+                label.starts_with("No matching logs.") && label.contains("Tag include/exclude")
+            })
+            .expect("empty-result guidance must name both Tag conditions");
+        assert!(bounds.min.x >= 0.0 && bounds.max.x <= 900.0);
+        assert!(bounds.min.y >= 88.0 && bounds.max.y <= 560.0);
+        assert_eq!(
+            h.app.entries.len(),
+            1,
+            "guidance must not clear retained records"
+        );
+    }
+}
+
+#[test]
+fn no_device_empty_guidance_exposes_the_working_offline_open_shortcut() {
+    for state in [CaptureState::NoAdb, CaptureState::WaitingForDevice] {
+        let mut h = Harness::new(false);
+        h.resize(900.0, 560.0);
+        h.app.capture_state = state;
+        h.frame(vec![]);
+        let (_, bounds) = h
+            .label_bounds
+            .iter()
+            .find(|(label, _)| {
+                label.contains("native JSONL")
+                    && label.contains("File / Ctrl+O")
+                    && label.contains("no device required")
+            })
+            .expect("empty-state guidance must expose offline file reading");
+        assert!(bounds.min.x >= 0.0 && bounds.max.x <= 900.0);
+        assert!(bounds.min.y >= 88.0 && bounds.max.y <= 560.0);
+        h.key(egui::Key::O, egui::Modifiers::COMMAND);
+        assert!(
+            h.app.files.is_modal(),
+            "advertised shortcut opens the path dialog without ADB"
+        );
+        assert!(h.labels.iter().any(|(label, _)| label == "打开日志文件"));
+        h.key(egui::Key::Escape, egui::Modifiers::NONE);
+        assert!(!h.app.files.is_modal());
+        assert!(h.app.entries.is_empty());
+    }
 }

@@ -1,36 +1,27 @@
 //! Standalone CLI orchestration. Session files are local capabilities; PIDs are
 //! descriptive only. The worker alone owns and stops its ADB child.
-mod capture_v2;
+mod capture;
+mod query;
 mod query_filter;
-mod query_v2;
 mod session_management;
 mod text_output;
-mod writer;
 
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufRead, BufReader, Read, Seek, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::mpsc::{self, TrySendError};
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
-};
+use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ciallogcat::WakeSignal;
-use ciallogcat::adb::{self, BackendEvent, LogcatEvent};
+use ciallogcat::adb::{self, BackendEvent};
 use ciallogcat::capture_scope::{CaptureScope, parse_buffers};
-use ciallogcat::model::{LogBuffer, LogEntry};
-use ciallogcat::record_io::{
-    InputMode, LegacyReader, LegacyRecord, MAX_RECORD_BYTES, ReadOutcome, RecordErrorKind,
-};
+use ciallogcat::model::LogBuffer;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 const SCHEMA: u8 = 1;
-const MAX_RECORD: u64 = MAX_RECORD_BYTES;
 const HELP: &str = "ciallogcat-cli: bounded local Android log capture (Linux/Windows)
 
 Commands:
@@ -38,20 +29,20 @@ Commands:
   diagnose --serial SERIAL [--adb PATH] [--buffers LIST] [--timeout-ms 10000]
   capture --serial SERIAL [--adb PATH] [--output FILE|-] [--duration-secs 600] [--max-bytes 1073741824] [--max-entries N]
   start --serial SERIAL --session-dir DIR [--adb PATH] [same capture bounds]
-  capture/start options: [--record-format v1|v2|v3] [--transport text|proto]
-  v3 requires explicit --transport proto; defaults remain v1 and text.
+  capture/start transport: [--transport text|proto] (default text; proto is experimental)
+  One native document format is used for both transports.
   capture/start history: [--tail N | --since TIME] [--dump] [--buffers LIST]
   status --session-dir DIR
-  query --session-dir DIR [--after-seq 0] [--limit 100] [--query TEXT] (v1 only)
-  query-v2 (--file FILE | --session-dir DIR) [OPTIONS]
-  get-v2 (--file FILE | --session-dir DIR) --ref TOKEN [OPTIONS]
-  context-v2 (--file FILE | --session-dir DIR) --ref TOKEN [OPTIONS]
+  query (--file FILE | --session-dir DIR) [OPTIONS]
+  get (--file FILE | --session-dir DIR) --ref TOKEN [OPTIONS]
+  context (--file FILE | --session-dir DIR) --ref TOKEN [OPTIONS]
   stop --session-dir DIR [--wait-secs 10] [--force]
 
-Use query-v2 --help, get-v2 --help or context-v2 --help for focused help.
+Use query --help, get --help or context --help for focused help.
 Options use --name VALUE; --dump, --all, --regex, --ignore-case,
 --case-sensitive, --force and --help/-h take no value. Help is plain text on stdout.
-Command results are JSON; capture writes JSONL records (default stdout).
+Command results are JSON; capture writes a native JSONL document (default stdout),
+including its header and final footer. Capture summaries go to stderr.
 Errors are JSON on stderr. New output files/session directories must not exist.
 Stop requests cooperative exit even for stale sessions, never signals a persisted PID.
 After the wait, --force administratively closes an unacknowledged session with a
@@ -60,7 +51,7 @@ Local sessions can contain
 sensitive device logs. No device logs are cleared.
 
 ";
-const CAPTURE_SCOPE_HELP: &str = "Device history (capture and start, all record formats):
+const CAPTURE_SCOPE_HELP: &str = "Device history (capture and start):
   --tail N        Recent N records, then follow; default 1 (-T 1).
                   ASCII digits only; range 1..=2147483647.
   --since TIME    Follow from device time; mutually exclusive with --tail.
@@ -73,8 +64,7 @@ const CAPTURE_SCOPE_HELP: &str = "Device history (capture and start, all record 
   --buffers LIST  Comma-separated main,system,crash,events,radio or all alone.
                   Default main,system,crash (same as GUI); no duplicates.
 Host bounds remain active for history and follow: --duration-secs (600; 1..86400),
---max-entries (10000000; 1..10000000), --max-bytes (1073741824; 1..1073741824,
-v2/v3 minimum 8192). --tail is device history selection, not a host record limit.
+--max-entries (10000000; 1..10000000), --max-bytes (1073741824; 8192..1073741824). --tail is device history selection, not a host record limit.
 
 ";
 const DIAGNOSE_HELP: &str = "diagnose --serial SERIAL [OPTIONS]
@@ -94,21 +84,20 @@ Missing help entries and Android SDK level do not prove OEM feature support.
 Without advertised shell_v2, remote stderr/exit separation is not guaranteed.
 
 ";
-const V2_SOURCE_HELP: &str = "Source (required, exactly one):
-  --file FILE          Offline v1 JSONL or finalized native v2/v3 artifact.
-  --session-dir DIR    Published prefix of a v1/v2/v3 session, including active capture.
+const QUERY_SOURCE_HELP: &str = "Source (required, exactly one):
+  --file FILE          Finalized native artifact.
+  --session-dir DIR    Published prefix of a native session, including active capture.
 These commands do not call ADB. Tokens bind the source file and local signing key;
 after copying a file, query it again to obtain new references/cursors.
 
 ";
-const V2_RESPONSE_HELP: &str = "Response budget (all v2 commands):
+const QUERY_RESPONSE_HELP: &str = "Response budget (query, get and context):
   --max-response-bytes N  Default 65536; range 8192..=1048576 bytes.
                          Includes JSON envelope, escaped strings and final LF.
                          A budget too small for the envelope/reference is an error.
 
 ";
-const V2_SCAN_HELP: &str =
-    "Preview/scan budgets (query-v2 and context-v2; accepted but unused by get-v2):
+const QUERY_SCAN_HELP: &str = "Preview/scan budgets (query and context only; rejected by get):
   --preview-bytes N     Default 2048; range 0..=16384 UTF-8 message bytes per record.
                        Preserves code points; response budget may shorten previews.
   --max-scan-bytes N    Default 16777216; range 8388609..=67108864 bytes.
@@ -118,7 +107,7 @@ are extra. Inspect scan.file_bytes_read for actual log-file reads. Forward scans
 reserve space for an 8 MiB record and may stop before using the full byte budget.
 
 ";
-const QUERY_V2_HELP: &str = "query-v2 (--file FILE | --session-dir DIR) [OPTIONS]
+const QUERY_HELP: &str = "query (--file FILE | --session-dir DIR) [OPTIONS]
   --mode snapshot|tail  Default snapshot. Snapshot fixes the first page's upper
                         bound; tail refreshes it per call and requires --session-dir.
   --query TEXT          Default empty (all); case-sensitive literal message match,
@@ -126,7 +115,7 @@ const QUERY_V2_HELP: &str = "query-v2 (--file FILE | --session-dir DIR) [OPTIONS
   --regex               Interpret --query as a Rust regular expression.
   --ignore-case         Case-insensitive message matching; default case-sensitive.
   --case-sensitive      Explicit default; conflicts with --ignore-case.
-  --tag TEXT            Case-sensitive literal Tag substring (--tag-include alias).
+  --tag TEXT            Case-sensitive literal Tag substring.
   --tag-exclude TEXT    Exclude a case-sensitive literal Tag substring.
   --package TEXT        Shared GUI package/process matching (when stored).
   --pid N --tid N       Exact unsigned process/thread IDs, combined with AND.
@@ -152,7 +141,7 @@ const QUERY_V2_HELP: &str = "query-v2 (--file FILE | --session-dir DIR) [OPTIONS
                         Without --all, even text/jsonl returns only one page.
   --limit N             Default 100; range 1..=1000 returned records per page.
   --cursor TOKEN        Continue with next_cursor; cannot combine with --start-at.
-  --start-at beginning|end  Default beginning. End requires native v2/v3 session
+  --start-at beginning|end  Default beginning. End requires a native session
                            + --mode tail, without --cursor. Returns an empty page
                            at the published boundary; the prefix is not scanned.
 Both modes default to the first record. Keep source, --mode and all filters unchanged
@@ -162,15 +151,15 @@ is empty. scan.stop_reason reports upper_bound/record_limit/scan_budget/response
 complete means this snapshot/current tail boundary was scanned, NOT capture completeness.
 Tail does not wait: when has_more=false, reuse next_cursor later for new data.
 An exhausted snapshot stays fixed; omit --cursor to see new data in a new snapshot.
-JSON pages contain previews and record_ref; use get-v2 for full original record JSON.
+JSON pages contain previews and record_ref; use get for full original record JSON.
 Streaming keeps bounded pages/records in memory, never the entire result. Page budgets
 control work per chunk, not total streaming stdout bytes; --limit is per page.
 Text is normalized and JSONL is decoded/derived, not a lossless native archive.
 A late error can leave partial stdout; require exit 0 and complete stderr summary.
 
 ";
-const GET_V2_HELP: &str = "get-v2 (--file FILE | --session-dir DIR) --ref TOKEN [OPTIONS]
-  --ref TOKEN           Required record_ref from query-v2 or context-v2.
+const GET_HELP: &str = "get (--file FILE | --session-dir DIR) --ref TOKEN [OPTIONS]
+  --ref TOKEN           Required record_ref from query or context.
   --view stored|decoded Default stored: the archive's original JSON line.
                         Decoded: full structured JSON with message and metadata,
                         using the fixed protobuf projection; a derived view,
@@ -183,11 +172,11 @@ with next_text_offset until complete=true, then concatenate chunks and parse JSO
 The final LF is excluded. Decoded JSON is bounded to 64 MiB, independently of
 the 8 MiB archive line limit. Each call validates the whole target
 record (at most 8 MiB) plus source metadata; it does not scan the preceding logs.
-Only --max-response-bytes controls chunk size; preview/scan budgets do not apply.
+Only --max-response-bytes controls chunk size; preview/scan budget flags are rejected.
 
 ";
-const CONTEXT_V2_HELP: &str = "context-v2 (--file FILE | --session-dir DIR) --ref TOKEN [OPTIONS]
-  --ref TOKEN           Required record_ref from query-v2 or context-v2.
+const CONTEXT_HELP: &str = "context (--file FILE | --session-dir DIR) --ref TOKEN [OPTIONS]
+  --ref TOKEN           Required record_ref from query or context.
   --before N            Default 10; range 0..=100 preceding records.
   --after N             Default 10; range 0..=100 following records.
 Returns ordered previews within the reference's original snapshot, without a
@@ -205,18 +194,19 @@ fn print_help(command: &str) -> Result<()> {
             print!("{DIAGNOSE_HELP}");
             return Ok(());
         }
-        "query-v2" => print!("{QUERY_V2_HELP}"),
-        "get-v2" => print!("{GET_V2_HELP}"),
-        "context-v2" => print!("{CONTEXT_V2_HELP}"),
-        "help" | "--help" | "-h" | "devices" | "capture" | "start" | "status" | "query"
-        | "stop" | "version" | "--version" => {
-            print!(
-                "{HELP}{CAPTURE_SCOPE_HELP}{DIAGNOSE_HELP}{QUERY_V2_HELP}{GET_V2_HELP}{CONTEXT_V2_HELP}"
-            );
+        "query" => print!("{QUERY_HELP}"),
+        "get" => print!("{GET_HELP}"),
+        "context" => print!("{CONTEXT_HELP}"),
+        "help" | "--help" | "-h" | "devices" | "capture" | "start" | "status" | "stop"
+        | "version" | "--version" => {
+            print!("{HELP}{CAPTURE_SCOPE_HELP}{DIAGNOSE_HELP}{QUERY_HELP}{GET_HELP}{CONTEXT_HELP}");
         }
         _ => return Err(usage(format!("unknown command: {command}; use --help"))),
     }
-    print!("{V2_SOURCE_HELP}{V2_RESPONSE_HELP}{V2_SCAN_HELP}");
+    print!("{QUERY_SOURCE_HELP}{QUERY_RESPONSE_HELP}");
+    if command != "get" {
+        print!("{QUERY_SCAN_HELP}");
+    }
     Ok(())
 }
 
@@ -248,24 +238,18 @@ fn now() -> u64 {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Config {
     adb: PathBuf,
     serial: String,
     duration_secs: u64,
     max_bytes: u64,
     max_entries: u64,
-    #[serde(default = "default_record_version")]
-    record_schema_version: u8,
-    #[serde(default)]
     transport: adb::LogTransport,
-    #[serde(default)]
     scope: CaptureScope,
-    #[serde(default = "LogBuffer::defaults")]
     buffers: Vec<LogBuffer>,
 }
-fn default_record_version() -> u8 {
-    1
-}
+
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct VisibleEnd {
     seq: u64,
@@ -345,12 +329,6 @@ impl Status {
     }
     fn terminal(&self) -> bool {
         matches!(self.state.as_str(), "completed" | "failed" | "abandoned")
-    }
-
-    fn update_progress(&mut self, visible: &Mutex<writer::Progress>) {
-        let progress = *visible.lock().unwrap();
-        self.entries = progress.entries;
-        self.bytes = progress.bytes;
     }
 }
 fn private_options() -> OpenOptions {
@@ -529,20 +507,10 @@ fn config(flags: &mut BTreeMap<String, String>) -> Result<Config> {
         .transpose()
         .map_err(|e| usage(e.to_string()))?
         .unwrap_or_else(LogBuffer::defaults);
-    let record_schema_version = match flags.remove("--record-format").as_deref().unwrap_or("v1") {
-        "v1" => 1,
-        "v2" => 2,
-        "v3" => 3,
-        _ => return Err(usage("--record-format must be v1, v2 or v3")),
-    };
     let transport = match flags.remove("--transport").as_deref().unwrap_or("text") {
-        "text" if record_schema_version != 3 => adb::LogTransport::Text,
-        "proto" if matches!(record_schema_version, 2 | 3) => adb::LogTransport::Proto,
-        _ => {
-            return Err(usage(
-                "--transport must be text for v1, text or proto for v2, and explicit proto for v3",
-            ));
-        }
+        "text" => adb::LogTransport::Text,
+        "proto" => adb::LogTransport::Proto,
+        _ => return Err(usage("--transport must be text or proto")),
     };
     let serial = required(flags, "--serial")?;
     if serial.len() > 1024 || serial.starts_with('-') || serial.chars().any(char::is_control) {
@@ -560,19 +528,8 @@ fn config(flags: &mut BTreeMap<String, String>) -> Result<Config> {
         adb,
         serial,
         duration_secs: number(flags, "--duration-secs", 600, 1, 86400)?,
-        max_bytes: number(
-            flags,
-            "--max-bytes",
-            1073741824,
-            if matches!(record_schema_version, 2 | 3) {
-                8192
-            } else {
-                1
-            },
-            1073741824,
-        )?,
+        max_bytes: number(flags, "--max-bytes", 1073741824, 8192, 1073741824)?,
         max_entries: number(flags, "--max-entries", 10000000, 1, 10000000)?,
-        record_schema_version,
         transport,
         scope,
         buffers,
@@ -644,7 +601,7 @@ fn execute() -> Result<()> {
             } else {
                 Box::new(new_file(Path::new(&output))?)
             };
-            let status = capture_selected(config, None, writer)?;
+            let status = capture::run(config, None, writer)?;
             writeln!(
                 io::stderr(),
                 "{}",
@@ -763,7 +720,7 @@ fn execute() -> Result<()> {
                 .map_err(|e| error("invalid_session", e.to_string(), 3))?;
                 if config.duration_secs == 0
                     || config.duration_secs > 86400
-                    || config.max_bytes == 0
+                    || config.max_bytes < 8192
                     || config.max_bytes > 1073741824
                     || config.max_entries == 0
                     || config.max_entries > 10000000
@@ -778,21 +735,8 @@ fn execute() -> Result<()> {
                         3,
                     ));
                 }
-                if !matches!(config.record_schema_version, 1..=3)
-                    || (config.record_schema_version == 1
-                        && config.transport != adb::LogTransport::Text)
-                    || (config.record_schema_version == 3
-                        && config.transport != adb::LogTransport::Proto)
-                    || (matches!(config.record_schema_version, 2 | 3) && config.max_bytes < 8192)
-                {
-                    return Err(error(
-                        "invalid_session",
-                        "invalid record format or transport",
-                        3,
-                    ));
-                }
                 let writer = Box::new(new_file(&dir.join("logs.jsonl"))?);
-                capture_selected(config, Some(&dir), writer).map(|_| ())
+                capture::run(config, Some(&dir), writer).map(|_| ())
             })();
             if let Err(e) = &result {
                 let mut status = load_status(&dir).unwrap_or_else(|_| Status::new(&dir));
@@ -805,27 +749,14 @@ fn execute() -> Result<()> {
             }
             result
         }
-        "query-v2" | "get-v2" | "context-v2" => query_v2::run(&command, flags),
-        "status" | "stop" | "query" => {
+        "query" | "get" | "context" => query::run(&command, flags),
+        "status" | "stop" => {
             let dir_value = required(&mut flags, "--session-dir")?;
-            let (after, limit, needle) = if command == "query" {
-                (
-                    number(&mut flags, "--after-seq", 0, 0, u64::MAX)?,
-                    number(&mut flags, "--limit", 100, 1, 10000)?,
-                    flags.remove("--query").unwrap_or_default(),
-                )
-            } else {
-                (0, 100, String::new())
-            };
             let dir = session_path(&dir_value)?;
             match command.as_str() {
                 "status" => {
                     no_flags(&flags)?;
                     emit(&load_status(&dir)?)
-                }
-                "query" => {
-                    no_flags(&flags)?;
-                    query(&dir, after, limit, &needle)
                 }
                 _ => {
                     let wait = number(&mut flags, "--wait-secs", 10, 1, 30)?;
@@ -903,485 +834,4 @@ fn diagnose(flags: &mut BTreeMap<String, String>) -> Result<()> {
     } else {
         Ok(())
     }
-}
-
-fn record(entry: LogEntry, seq: u64) -> LegacyRecord {
-    LegacyRecord::from_entry(&entry, seq)
-}
-
-fn capture_selected(
-    config: Config,
-    dir: Option<&Path>,
-    writer: Box<dyn Write + Send>,
-) -> Result<Status> {
-    if matches!(config.record_schema_version, 2 | 3) {
-        capture_v2::capture(config, dir, writer)
-    } else {
-        capture(config, dir, writer)
-    }
-}
-
-fn capture(config: Config, dir: Option<&Path>, writer: Box<dyn Write + Send>) -> Result<Status> {
-    let mut status = Status::new(dir.unwrap_or_else(|| Path::new("")));
-    let interrupted = Arc::new(AtomicBool::new(false));
-    let signal_flag = Arc::clone(&interrupted);
-    ctrlc::set_handler(move || {
-        signal_flag.store(true, Ordering::Release);
-    })
-    .map_err(io_error)?;
-    let visible = Arc::new(Mutex::new(writer::Progress::default()));
-    let writer_visible = Arc::clone(&visible);
-    let (write_tx, write_rx) = mpsc::sync_channel::<Vec<u8>>(4);
-    let (done_tx, done_rx) = mpsc::channel();
-    let (progress_tx, progress_rx) = mpsc::sync_channel(1);
-    std::thread::spawn(move || {
-        let result = writer::run(writer, write_rx, &writer_visible, &progress_tx);
-        let _ = done_tx.send(result);
-    });
-    let (tx, rx) = mpsc::sync_channel(128);
-    let mut child = match adb::start_logcat_with_scope(
-        &config.adb,
-        &config.serial,
-        &config.buffers,
-        1,
-        tx,
-        WakeSignal::default(),
-        &config.scope,
-        adb::LogcatStartOptions::default(),
-    ) {
-        Ok(child) => child,
-        Err(e) => {
-            status.state = "failed".into();
-            status.reason = Some("adb_spawn".into());
-            status.error = Some(e.clone());
-            if let Some(dir) = dir {
-                write_status(dir, &mut status)?;
-            }
-            return Err(error("adb_error", e, 4));
-        }
-    };
-    let deadline = Instant::now() + Duration::from_secs(config.duration_secs);
-    let mut heartbeat = Instant::now();
-    let mut failure = None;
-    let mut received_entries = 0u64;
-    let mut accepted_entries = 0;
-    let mut accepted_bytes = 0;
-    let mut writer_done = None;
-    let poll_writer = || match done_rx.try_recv() {
-        Ok(result) => Some(result),
-        Err(mpsc::TryRecvError::Empty) => None,
-        Err(mpsc::TryRecvError::Disconnected) => {
-            Some(Err(io::Error::other("output writer disconnected")))
-        }
-    };
-    let mut saw_exited = false;
-    'capture: loop {
-        // Output may fail on the only record from an otherwise idle device.
-        // Keep its actual result for cleanup instead of waiting for another log
-        // to fill the write queue or for the capture deadline to expire.
-        if let Some(result) = poll_writer() {
-            writer_done = Some(result);
-            break;
-        }
-        if interrupted.load(Ordering::Acquire) {
-            status.reason = Some("interrupted".into());
-            break;
-        }
-        if Instant::now() >= deadline {
-            status.reason = Some("duration_limit".into());
-            break;
-        }
-        if dir.is_some_and(|d| d.join("stop").exists()) {
-            status.reason = Some("stopped".into());
-            break;
-        }
-        match rx.recv_timeout(Duration::from_millis(25)) {
-            Ok(BackendEvent::Logcat { event, .. }) => match event {
-                LogcatEvent::Started => {
-                    status.state = "running".into();
-                    status.readiness = Some("adb_process_started".into());
-                    if let Some(dir) = dir {
-                        write_status(dir, &mut status)?;
-                    }
-                }
-                LogcatEvent::Entry(entry) => {
-                    received_entries += 1;
-                    // Preserve the host observation sampled by the ADB reader,
-                    // before queue/backpressure waiting, without inventing a
-                    // native session identity for the legacy v1 format.
-                    let observed_unix_ms = entry.received_unix_ms();
-                    let mut record = record(entry.into_inner(), accepted_entries + 1);
-                    record.observed_unix_ms = observed_unix_ms;
-                    let mut bytes = serde_json::to_vec(&record).map_err(io_error)?;
-                    bytes.push(b'\n');
-                    let size = bytes.len() as u64;
-                    if accepted_bytes + size > config.max_bytes {
-                        status.reason = Some("max_bytes".into());
-                        status.omitted_by_limit = true;
-                        break;
-                    }
-                    loop {
-                        match write_tx.try_send(bytes) {
-                            Ok(()) => break,
-                            Err(TrySendError::Disconnected(_)) => {
-                                writer_done = poll_writer();
-                                break 'capture;
-                            }
-                            Err(TrySendError::Full(pending)) => {
-                                bytes = pending;
-                                if let Some(result) = poll_writer() {
-                                    writer_done = Some(result);
-                                    break 'capture;
-                                }
-                                if Instant::now() >= deadline {
-                                    failure = Some(error(
-                                        "output_backpressure",
-                                        "output stalled until capture deadline",
-                                        5,
-                                    ));
-                                    break 'capture;
-                                }
-                                if dir.is_some_and(|d| d.join("stop").exists()) {
-                                    status.reason = Some("stopped".into());
-                                    break 'capture;
-                                }
-                                if heartbeat.elapsed() >= Duration::from_millis(500) {
-                                    status.update_progress(&visible);
-                                    if let Some(dir) = dir {
-                                        write_status(dir, &mut status)?;
-                                    }
-                                    heartbeat = Instant::now();
-                                }
-                                if interrupted.load(Ordering::Acquire) {
-                                    status.reason = Some("interrupted".into());
-                                    break 'capture;
-                                }
-                                let _ = progress_rx.recv_timeout(Duration::from_millis(25));
-                            }
-                        }
-                    }
-                    accepted_entries += 1;
-                    accepted_bytes += size;
-                    if accepted_entries >= config.max_entries {
-                        status.reason = Some("max_entries".into());
-                        status.omitted_by_limit = true;
-                        break;
-                    }
-                }
-                LogcatEvent::Stderr(line) => {
-                    status.diagnostic_lines += 1;
-                    status.last_diagnostic = Some(line);
-                }
-                LogcatEvent::Exited { code, error: e, .. } => {
-                    saw_exited = true;
-                    if interrupted.load(Ordering::Acquire) {
-                        status.reason = Some("interrupted".into());
-                    } else if e.is_some() || code != Some(0) {
-                        failure = Some(error(
-                            "adb_error",
-                            e.unwrap_or_else(|| format!("ADB exited with code {code:?}")),
-                            4,
-                        ));
-                    } else {
-                        status.reason = Some(
-                            if config.scope.is_dump() {
-                                "snapshot_complete"
-                            } else {
-                                "adb_exit"
-                            }
-                            .into(),
-                        );
-                    }
-                    break;
-                }
-            },
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                failure = Some(error("adb_error", "backend channel disconnected", 4));
-                break;
-            }
-            _ => (),
-        }
-        if heartbeat.elapsed() >= Duration::from_millis(500) {
-            status.update_progress(&visible);
-            if let Some(dir) = dir {
-                write_status(dir, &mut status)?;
-            }
-            heartbeat = Instant::now();
-        }
-    }
-    if let Some(result) = &writer_done {
-        let message = match result {
-            Ok(()) => "output writer stopped before capture ended".into(),
-            Err(e) => e.to_string(),
-        };
-        failure.get_or_insert_with(|| error("output_error", message, 5));
-    }
-    child.stop();
-    // Both backend readers own the only senders. Disconnection proves diagnostic
-    // EOF, and receiving Exited proves the backend reaped its owned ADB child.
-    let drain_deadline = Instant::now() + Duration::from_secs(2);
-    loop {
-        let remaining = drain_deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            failure.get_or_insert_with(|| {
-                error(
-                    "adb_error",
-                    "backend readers did not finish within two seconds",
-                    4,
-                )
-            });
-            break;
-        }
-        match rx.recv_timeout(remaining) {
-            Ok(BackendEvent::Logcat {
-                event: LogcatEvent::Stderr(line),
-                ..
-            }) => {
-                status.diagnostic_lines += 1;
-                status.last_diagnostic = Some(line);
-            }
-            Ok(BackendEvent::Logcat {
-                event: LogcatEvent::Exited { error: e, .. },
-                ..
-            }) => {
-                saw_exited = true;
-                if let Some(e) = e {
-                    failure.get_or_insert_with(|| error("adb_error", e, 4));
-                }
-            }
-            Ok(BackendEvent::Logcat {
-                event: LogcatEvent::Entry(_),
-                ..
-            }) => {
-                received_entries += 1;
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                status.diagnostics_complete = true;
-                break;
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                failure.get_or_insert_with(|| {
-                    error(
-                        "adb_error",
-                        "backend readers did not finish within two seconds",
-                        4,
-                    )
-                });
-                break;
-            }
-            _ => (),
-        }
-    }
-    if !saw_exited && failure.is_none() {
-        failure = Some(error(
-            "adb_error",
-            "backend ended without confirming owned ADB child exit",
-            4,
-        ));
-    }
-    drop(rx);
-    drop(write_tx);
-    let result = match writer_done {
-        Some(r) => Ok(r),
-        None => done_rx.recv_timeout(Duration::from_secs(2)),
-    };
-    match result {
-        Ok(Ok(())) => (),
-        Ok(Err(e)) => {
-            failure.get_or_insert_with(|| error("output_error", e.to_string(), 5));
-        }
-        Err(mpsc::RecvTimeoutError::Disconnected) => {
-            failure.get_or_insert_with(|| error("output_error", "output writer disconnected", 5));
-        }
-        Err(mpsc::RecvTimeoutError::Timeout) => {
-            failure.get_or_insert_with(|| {
-                error(
-                    "output_backpressure",
-                    "output writer did not drain within two seconds",
-                    5,
-                )
-            });
-        }
-    }
-    status.update_progress(&visible);
-    status.state = if failure.is_some() {
-        "failed"
-    } else {
-        "completed"
-    }
-    .into();
-    if let Some(ref mut e) = failure {
-        if e.code == "adb_error"
-            && let Some(ref diagnostic) = status.last_diagnostic
-        {
-            e.message.push_str(": ");
-            e.message.push_str(diagnostic);
-        }
-        status.reason = Some(e.code.into());
-        status.error = Some(e.message.clone());
-    }
-    status.discarded_entries = received_entries.saturating_sub(status.entries);
-    status.diagnostic_dropped_count = status.diagnostic_lines.saturating_sub(1);
-    if let Some(dir) = dir {
-        write_status(dir, &mut status)?;
-    } else if failure.is_some() {
-        let _ = writeln!(
-            io::stderr(),
-            "{}",
-            serde_json::to_string(&status).map_err(io_error)?
-        );
-    }
-    if let Some(e) = failure {
-        Err(e)
-    } else if interrupted.load(Ordering::Acquire) {
-        if dir.is_none() {
-            let _ = writeln!(
-                io::stderr(),
-                "{}",
-                serde_json::to_string(&status).map_err(io_error)?
-            );
-        }
-        Err(error(
-            "interrupted",
-            "capture interrupted; owned ADB child stopped",
-            130,
-        ))
-    } else {
-        Ok(status)
-    }
-}
-fn query(dir: &Path, after: u64, limit: u64, needle: &str) -> Result<()> {
-    let status = load_status(dir)?;
-    let frozen = status.management_closed_unix_ms.is_some();
-    let path = dir.join("logs.jsonl");
-    regular(&path)?;
-    let mut file = File::open(path).map_err(io_error)?;
-    if file.metadata().map_err(io_error)?.len() > 1073741824 {
-        return Err(error(
-            "invalid_session",
-            "logs exceed session size limit",
-            3,
-        ));
-    }
-    let matcher = ciallogcat::filter::compile_query(needle, false, true).map_err(usage)?;
-    let size = file.metadata().map_err(io_error)?.len();
-    if frozen && status.bytes > size {
-        return Err(error(
-            "invalid_session",
-            "file is shorter than frozen boundary",
-            3,
-        ));
-    }
-    let upper = if frozen { status.bytes } else { u64::MAX };
-    let mut reader = LegacyReader::new(BufReader::new((&mut file).take(upper)), InputMode::Active);
-    let mut entries = Vec::new();
-    let mut next = after;
-    let mut partial = false;
-    let mut more = false;
-    let mut total = 0u64;
-    let mut scanned_bytes = 0u64;
-    let mut scanned_records = 0u64;
-    let mut scan_limited = false;
-    let mut last_seen = 0;
-    let mut read_end = 0;
-    loop {
-        let outcome = match reader.read_record() {
-            Ok(outcome) => outcome,
-            Err(e) => {
-                if e.kind == RecordErrorKind::Io {
-                    return Err(io_error(e));
-                }
-                if e.offset == 0 {
-                    // Only inspect a failed first record: valid v1 queries keep
-                    // their existing read cost, and corrupt v1 stays corrupt v1.
-                    drop(reader);
-                    file.rewind().map_err(io_error)?;
-                    let mut first = Vec::new();
-                    BufReader::new(file)
-                        .take(MAX_RECORD + 1)
-                        .read_until(b'\n', &mut first)
-                        .map_err(io_error)?;
-                    if let Ok(header) = ciallogcat::document::decode_header(&first) {
-                        return Err(error(
-                            "unsupported_format",
-                            format!(
-                                "query reads v1 records, but logs.jsonl has a native v{} document header; use query-v2 --session-dir DIR with the same session directory",
-                                header.schema_version
-                            ),
-                            3,
-                        ));
-                    }
-                }
-                return Err(error("invalid_session", e.to_string(), 3));
-            }
-        };
-        let located = match outcome {
-            ReadOutcome::Record(record) => record,
-            ReadOutcome::End => break,
-            ReadOutcome::Incomplete => {
-                partial = true;
-                break;
-            }
-        };
-        let size = located.encoded_bytes;
-        read_end = located.offset + size;
-        let value = located.record;
-        let seq = value.seq;
-        if frozen && seq > status.entries {
-            return Err(error(
-                "invalid_session",
-                "record exceeds frozen sequence boundary",
-                3,
-            ));
-        }
-        last_seen = seq;
-        if seq <= after {
-            continue;
-        }
-        if scanned_bytes + size > 16 * 1024 * 1024 || scanned_records >= 100000 {
-            scan_limited = true;
-            more = true;
-            break;
-        }
-        let matches = matcher
-            .as_ref()
-            .is_none_or(|matcher| matcher.is_match(&value.message));
-        if matches && (entries.len() as u64 >= limit || total + size > MAX_RECORD) {
-            more = true;
-            break;
-        }
-        next = seq;
-        scanned_records += 1;
-        scanned_bytes += size;
-        if matches {
-            total += size;
-            entries.push(value);
-        }
-    }
-    if frozen && !more && (partial || last_seen != status.entries) {
-        return Err(error(
-            "invalid_session",
-            "frozen byte and sequence boundaries disagree",
-            3,
-        ));
-    }
-    // An administrative close racing this request can make its old upper bound
-    // stale; never return a successful page beyond the now-frozen prefix.
-    if let Some(closed) = session_management::closure_status(dir)?
-        && (closed["bytes"]
-            .as_u64()
-            .is_some_and(|bytes| read_end > bytes)
-            || closed["entries"]
-                .as_u64()
-                .is_some_and(|seq| last_seen > seq))
-    {
-        return Err(error(
-            "stale_session",
-            "session was administratively closed while querying",
-            3,
-        ));
-    }
-    emit(
-        &json!({"schema_version":SCHEMA,"type":"query","entries":entries,"next_after_seq":next,"partial":partial,"complete":!more && !partial,"stop_reason":if partial {"incomplete_tail"} else if scan_limited {"scan_budget"} else if more {"result_budget"} else {"end_of_file"},"has_more":more,"scan_limited":scan_limited,"scanned_records":scanned_records}),
-    )
 }

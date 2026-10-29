@@ -18,12 +18,25 @@ impl Drop for Directory {
     }
 }
 
-fn legacy(seq: u64, message: &str) -> Vec<u8> {
-    serde_json::to_vec(&ciallogcat::record_io::LegacyRecord::from_entry(
-        &LogEntry::new("10-23 00:00:00.000", 1, 2, "tag", Level::Info, message),
-        seq,
-    ))
-    .unwrap()
+fn native(seq: u64, message: &str) -> Vec<u8> {
+    let mut session = ciallogcat::session::Session::new();
+    session.begin_attempt().unwrap();
+    session.stream_started().unwrap();
+    let mut entry = LogEntry::new("10-23 00:00:00.000", 1, 2, "tag", Level::Info, message);
+    let mut identity = session.next_record(Some(1234)).unwrap();
+    identity.seq = seq;
+    entry.provenance = Some(identity);
+    let header =
+        document::DocumentHeader::live(session.id(), "fixture".into(), vec![LogBuffer::Main]);
+    let mut encoder = document::StreamEncoder::new(header).unwrap();
+    [
+        encoder.header_bytes().unwrap(),
+        encoder.record_bytes(&entry).unwrap(),
+        encoder
+            .finish_bytes(document::CaptureStatus::default())
+            .unwrap(),
+    ]
+    .concat()
 }
 
 fn wait_job(app: &mut CiallogcatApp, ctx: &egui::Context) {
@@ -48,11 +61,11 @@ fn live_entry(app: &mut CiallogcatApp, ctx: &egui::Context, message: &str) {
 }
 
 #[test]
-fn compact_gui_open_filter_and_compatible_export_keep_original_payload_and_gaps() {
+fn native_gui_open_filter_and_save_keep_original_payload_and_gaps() {
     let directory = Directory::new();
-    let input = directory.0.join("compact.jsonl");
-    let compact = directory.0.join("filtered.jsonl");
-    let compatible = directory.0.join("compatible.jsonl");
+    let input = directory.0.join("native.jsonl");
+    let filtered = directory.0.join("filtered.jsonl");
+    let retained = directory.0.join("retained.jsonl");
     let payload = vec![
         0x08, 1, 0x18, 4, 0x28, 7, 0x30, 7, 0x3a, 1, b'T', 0x42, 8, 0xe2, 0x82, 0xbf, b'\n', b'b',
         b'o', b'd', b'y',
@@ -67,9 +80,6 @@ fn compact_gui_open_filter_and_compatible_export_keep_original_payload_and_gaps(
     let identity = entry.provenance;
     let mut header = DocumentHeader::live(session.id(), "fixture".into(), LogBuffer::defaults());
     header.source.transport_format = Some("logcat_proto_experimental".into());
-    header
-        .set_format(document::NativeFormat::CompactV3)
-        .unwrap();
     let mut entries = LogStore::default();
     entries.push(entry);
     let capture = CaptureStatus {
@@ -94,18 +104,18 @@ fn compact_gui_open_filter_and_compatible_export_keep_original_payload_and_gaps(
     );
     app.query = "body".into();
     app.schedule_filter();
-    app.start_file_job(Action::Export, compact.clone(), &ctx);
+    app.start_file_job(Action::Export, filtered.clone(), &ctx);
     wait_job(&mut app, &ctx);
-    app.start_file_job(Action::SaveV2, compatible.clone(), &ctx);
+    app.start_file_job(Action::Save, retained.clone(), &ctx);
     wait_job(&mut app, &ctx);
-    for (path, version) in [(compact, 3), (compatible, 2)] {
+    for path in [filtered, retained] {
         let saved = document::load(
             BufReader::new(File::open(path).unwrap()),
             16 * MIB,
             &AtomicBool::new(false),
         )
         .unwrap();
-        assert_eq!(saved.header.schema_version, version);
+        assert_eq!(saved.header.schema_version, 3);
         assert_eq!(
             saved.entries[0].proto.as_ref().unwrap().raw_payload,
             payload
@@ -133,7 +143,7 @@ fn jsonl_rows(bytes: &[u8]) -> Vec<serde_json::Value> {
         .collect()
 }
 
-fn offline_filter_fixture(format: document::NativeFormat) -> Document {
+fn offline_filter_fixture() -> Document {
     let mut session = Session::new();
     session.begin_attempt().unwrap();
     session.stream_started().unwrap();
@@ -150,7 +160,6 @@ fn offline_filter_fixture(format: document::NativeFormat) -> Document {
     }
     let mut header = DocumentHeader::live(session.id(), "fixture".into(), vec![LogBuffer::Crash]);
     header.source.transport_format = Some("logcat_proto_experimental".into());
-    header.set_format(format).unwrap();
     header.extra.insert(
         "view_filter".into(),
         serde_json::json!({"package":"com.example.shop","query":"old view","minimum_level":"V",
@@ -195,10 +204,10 @@ fn offline_filter_fixture(format: document::NativeFormat) -> Document {
     document
 }
 
-fn offline_exports_freeze_view_filter(format: document::NativeFormat) {
+fn offline_exports_freeze_view_filter() {
     let directory = Directory::new();
     let mut input = directory.0.join("source.jsonl");
-    fs::write(&input, snapshot_bytes(&offline_filter_fixture(format))).unwrap();
+    fs::write(&input, snapshot_bytes(&offline_filter_fixture())).unwrap();
     // Reopen the first export in a fresh app before filtering it a second time.
     for (round, (query, selected_rows)) in [("checkout", vec![2, 3]), ("AUTH_EXPIRED", vec![1])]
         .into_iter()
@@ -261,12 +270,9 @@ fn offline_exports_freeze_view_filter(format: document::NativeFormat) {
         // Original source range, nonempty gaps, capture facts and extensions survive.
         assert_eq!(rows.last().unwrap(), &expected_end);
 
-        let conversion = if format == document::NativeFormat::V2 {
-            Action::SaveCompact
-        } else {
-            Action::SaveV2
-        };
-        for (name, action) in [("retained", Action::Save), ("converted", conversion)] {
+        {
+            let name = "retained";
+            let action = Action::Save;
             let saved_path = directory.0.join(format!("{name}-{round}.jsonl"));
             app.start_file_job(action, saved_path.clone(), &ctx);
             wait_job(&mut app, &ctx);
@@ -293,16 +299,7 @@ fn offline_exports_freeze_view_filter(format: document::NativeFormat) {
                 serde_json::to_value(&saved.end.capture).unwrap(),
                 original.last().unwrap()["capture"]
             );
-            if action == Action::Save {
-                assert_eq!(fs::read(saved_path).unwrap(), original_bytes);
-            } else {
-                assert_ne!(saved.header.schema_version, opened.header.schema_version);
-                assert_ne!(saved.header.artifact_id, opened.header.artifact_id);
-                assert_eq!(
-                    saved.header.derived_from_artifact,
-                    Some(opened.header.artifact_id)
-                );
-            }
+            assert_eq!(fs::read(saved_path).unwrap(), original_bytes);
         }
         assert!(Arc::ptr_eq(app.files.document.as_ref().unwrap(), &opened));
         assert!(Arc::ptr_eq(&app.entries, &opened.entries));
@@ -313,13 +310,8 @@ fn offline_exports_freeze_view_filter(format: document::NativeFormat) {
 }
 
 #[test]
-fn offline_gui_export_freezes_view_filter_v2() {
-    offline_exports_freeze_view_filter(document::NativeFormat::V2);
-}
-
-#[test]
-fn offline_gui_export_freezes_view_filter_v3() {
-    offline_exports_freeze_view_filter(document::NativeFormat::CompactV3);
+fn offline_gui_export_freezes_view_filter() {
+    offline_exports_freeze_view_filter();
 }
 
 #[test]
@@ -503,7 +495,7 @@ fn failed_and_cancelled_imports_preserve_current_source_and_view() {
         app.capture_controller.intent(),
         CaptureIntent::Capture(_)
     ));
-    fs::write(&path, legacy(7, "valid")).unwrap();
+    fs::write(&path, native(7, "valid")).unwrap();
     app.start_file_job(Action::Open, path, &ctx);
     app.files
         .job
@@ -517,23 +509,26 @@ fn failed_and_cancelled_imports_preserve_current_source_and_view() {
 }
 
 #[test]
-fn legacy_import_is_read_only_and_never_fabricates_capture_identity() {
+fn native_import_is_read_only_and_preserves_capture_identity() {
     let directory = Directory::new();
-    let path = directory.0.join("legacy.jsonl");
-    fs::write(&path, legacy(7, "unattributed")).unwrap();
+    let path = directory.0.join("native.jsonl");
+    fs::write(&path, native(7, "unattributed")).unwrap();
     let ctx = egui::Context::default();
     let mut app = CiallogcatApp::with_config(&ctx, AppConfig::default(), None);
     app.package = "com.previous.device".into();
     app.start_file_job(Action::Open, path, &ctx);
     wait_job(&mut app, &ctx);
     assert_eq!(app.entries.len(), 1);
-    assert!(app.entries[0].provenance.is_none());
+    assert_eq!(app.entries[0].provenance.unwrap().seq, 7);
     assert!(app.entries[0].process_source.is_none());
     let document = app.files.document.as_ref().unwrap();
-    assert!(document.header.session_id.is_none());
+    assert_eq!(
+        document.header.session_id,
+        Some(app.entries[0].provenance.unwrap().session_id)
+    );
     assert!(app.package.is_empty());
     assert!(app.active_filter.package.is_empty());
-    assert_eq!(document.record_metadata[0].legacy_original_seq, Some(7));
+    assert_eq!(document.record_metadata[0].seq, 7);
     let before = app.memory_limit_mib;
     app.files.document_bytes = 32 * MIB;
     app.apply_memory_budget(16);
@@ -548,7 +543,7 @@ fn cancel_after_publication_keeps_saved_file_but_never_opens_candidate() {
     app.append_entry(LogEntry::marker("old view"));
     let old = Arc::clone(&app.entries);
     let candidate = document::load(
-        io::Cursor::new(legacy(1, "new view")),
+        io::Cursor::new(native(1, "new view")),
         16 * MIB,
         &AtomicBool::new(false),
     )
@@ -635,7 +630,7 @@ fn candidate_arrival_blocks_release_on_a_previously_pressed_capture_button() {
         .1;
     harness.pointer(pause, true);
     let document = document::load(
-        io::Cursor::new(legacy(7, "new file")),
+        io::Cursor::new(native(7, "new file")),
         16 * MIB,
         &AtomicBool::new(false),
     )
@@ -709,7 +704,7 @@ fn save_before_open_failure_preserves_old_document_and_success_replaces_it() {
     let old = Arc::clone(&app.entries);
     let candidate = || {
         let doc = document::load(
-            io::Cursor::new(legacy(42, "new file")),
+            io::Cursor::new(native(42, "new file")),
             16 * MIB,
             &AtomicBool::new(false),
         )
@@ -795,7 +790,7 @@ fn export_and_prepared_copy_share_frozen_history_and_candidate_modal_blocks_comm
         .1;
     h.pointer(ready, true);
     let candidate = document::load(
-        io::Cursor::new(legacy(1, "candidate")),
+        io::Cursor::new(native(1, "candidate")),
         16 * MIB,
         &AtomicBool::new(false),
     )
@@ -822,4 +817,351 @@ fn export_and_prepared_copy_share_frozen_history_and_candidate_modal_blocks_comm
     h.pointer(ready, false);
     assert_eq!(h.copied.len(), 1);
     assert!(h.copied[0] == expected);
+}
+
+#[test]
+fn deep_filter_export_fails_without_publication_or_changing_the_open_document() {
+    let directory = Directory::new();
+    let input = directory.0.join("deep-source.jsonl");
+    let output = directory.0.join("filtered.jsonl");
+    let mut source = offline_filter_fixture();
+    source.end.scope.kind = "filtered".into();
+    let mut valid_bytes = None;
+    for depth in 115..=132 {
+        let mut nested = serde_json::Value::Null;
+        for _ in 0..depth {
+            nested = serde_json::Value::Array(vec![nested]);
+        }
+        source.end.scope.filter = Some(nested);
+        let mut bytes = Vec::new();
+        if document::write_snapshot(&mut bytes, &source, &AtomicBool::new(false)).is_ok()
+            && source
+                .select(&[0, 1, 2], serde_json::json!({"query":""}))
+                .is_err()
+        {
+            valid_bytes = Some(bytes);
+            break;
+        }
+    }
+    let original = valid_bytes.expect("readable source whose composed filter exceeds the limit");
+    fs::write(&input, &original).unwrap();
+    let ctx = egui::Context::default();
+    let mut app = CiallogcatApp::with_config(&ctx, AppConfig::default(), None);
+    app.start_file_job(Action::Open, input.clone(), &ctx);
+    wait_job(&mut app, &ctx);
+    let opened = Arc::clone(app.files.document.as_ref().unwrap());
+    app.start_file_job(Action::Export, output.clone(), &ctx);
+    wait_job(&mut app, &ctx);
+    assert!(!output.exists());
+    assert!(
+        app.files
+            .notice
+            .as_ref()
+            .unwrap()
+            .contains("recursion limit")
+    );
+    assert_eq!(fs::read(&input).unwrap(), original);
+    assert_eq!(fs::read_dir(&directory.0).unwrap().count(), 1);
+    assert!(Arc::ptr_eq(app.files.document.as_ref().unwrap(), &opened));
+    assert!(Arc::ptr_eq(&app.entries, &opened.entries));
+    assert_eq!(snapshot_bytes(&opened), original);
+}
+
+#[test]
+fn failed_open_retains_path_for_explicit_keyboard_and_pointer_recovery() {
+    let directory = Directory::new();
+    let missing = directory.0.join("missing.jsonl");
+    let valid = directory.0.join("valid.jsonl");
+    fs::write(&valid, native(1, "opened after correction")).unwrap();
+    let mut h = crate::ui_test_support::Harness::new(false);
+    h.resize(900.0, 560.0);
+    h.app.append_entry(LogEntry::marker("old view"));
+    h.app.selected = Some(0);
+    h.app.selection.select_all(&[0]);
+    h.app.follow_logs = false;
+    let old = Arc::clone(&h.app.entries);
+    h.key(egui::Key::O, egui::Modifiers::COMMAND);
+    h.frame(vec![egui::Event::Text(missing.display().to_string())]);
+    h.key(egui::Key::Enter, egui::Modifiers::NONE);
+    wait_job(&mut h.app, &h.ctx);
+    h.frame(vec![]);
+    assert!(
+        h.app.files.dialog.is_none(),
+        "failure must not interrupt with a modal"
+    );
+    assert!(
+        h.app
+            .files
+            .notice
+            .as_ref()
+            .unwrap()
+            .contains(&missing.display().to_string())
+    );
+    let (_, retry_bounds) = h
+        .label_bounds
+        .iter()
+        .find(|(label, _)| label == "修改路径重试…")
+        .unwrap();
+    assert!(retry_bounds.max.x <= 900.0 && retry_bounds.max.y <= 560.0);
+    h.click_rendered_label("修改路径重试…");
+    assert_eq!(
+        h.app.files.dialog.as_ref().unwrap().path,
+        missing.display().to_string()
+    );
+    assert!(
+        h.app.files.job.is_none(),
+        "opening recovery must not retry automatically"
+    );
+    h.key(egui::Key::Escape, egui::Modifiers::NONE);
+    assert!(Arc::ptr_eq(&old, &h.app.entries));
+    assert_eq!(h.app.selected, Some(0));
+    assert!(!h.app.follow_logs);
+    // The ordinary shortcut is also useful recovery; Cancel did not lose the path.
+    h.key(egui::Key::O, egui::Modifiers::COMMAND);
+    assert_eq!(
+        h.app.files.dialog.as_ref().unwrap().path,
+        missing.display().to_string()
+    );
+    h.key(egui::Key::A, egui::Modifiers::COMMAND);
+    h.frame(vec![egui::Event::Text(valid.display().to_string())]);
+    h.key(egui::Key::Enter, egui::Modifiers::NONE);
+    wait_job(&mut h.app, &h.ctx);
+    h.frame(vec![]);
+    assert!(h.app.files.candidate.is_some());
+    assert!(
+        Arc::ptr_eq(&old, &h.app.entries),
+        "a corrected open still requires replacement confirmation"
+    );
+    h.click_rendered_label("直接替换");
+    h.app.poll_files(&h.ctx);
+    assert_eq!(h.app.entries[0].message.as_ref(), "opened after correction");
+    assert!(h.app.files.retry.is_none());
+}
+
+#[test]
+fn failed_save_before_open_retry_is_save_only_and_never_overwrites() {
+    let directory = Directory::new();
+    let source = directory.0.join("source.jsonl");
+    let occupied = directory.0.join("occupied.jsonl");
+    let corrected = directory.0.join("corrected.jsonl");
+    fs::write(&source, native(1, "old evidence")).unwrap();
+    fs::write(&occupied, b"leave existing destination unchanged").unwrap();
+    let mut h = crate::ui_test_support::Harness::new(false);
+    h.app.start_file_job(Action::Open, source, &h.ctx);
+    wait_job(&mut h.app, &h.ctx);
+    let old = Arc::clone(h.app.files.document.as_ref().unwrap());
+    let candidate = document::load(
+        io::Cursor::new(native(2, "must not open")),
+        16 * MIB,
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    let bytes = candidate.memory_bytes();
+    h.app.files.candidate = Some((candidate, directory.0.join("candidate.jsonl"), bytes));
+    h.app
+        .start_file_job(Action::SaveBeforeOpen, occupied.clone(), &h.ctx);
+    wait_job(&mut h.app, &h.ctx);
+    h.frame(vec![]);
+    assert!(h.app.files.candidate.is_none());
+    assert!(h.app.files.replace.is_none());
+    assert_eq!(
+        fs::read(&occupied).unwrap(),
+        b"leave existing destination unchanged"
+    );
+    h.click_rendered_label("修改路径重试…");
+    let dialog = h.app.files.dialog.as_ref().unwrap();
+    assert!(dialog.action == Action::Save);
+    assert_eq!(dialog.path, occupied.display().to_string());
+    assert!(!corrected.exists());
+    h.key(egui::Key::A, egui::Modifiers::COMMAND);
+    h.frame(vec![egui::Event::Text(corrected.display().to_string())]);
+    h.key(egui::Key::Enter, egui::Modifiers::NONE);
+    wait_job(&mut h.app, &h.ctx);
+    let saved = document::load(
+        BufReader::new(File::open(&corrected).unwrap()),
+        16 * MIB,
+        &AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(saved.entries[0].message.as_ref(), "old evidence");
+    assert!(Arc::ptr_eq(h.app.files.document.as_ref().unwrap(), &old));
+    assert!(h.app.files.candidate.is_none());
+    assert!(h.app.files.retry.is_none());
+    assert_eq!(
+        fs::read(&occupied).unwrap(),
+        b"leave existing destination unchanged"
+    );
+}
+
+#[test]
+fn cancelled_file_failure_has_no_retry_and_dismiss_discards_failed_path() {
+    let mut h = crate::ui_test_support::Harness::new(false);
+    let (sender, receiver) = mpsc::channel();
+    sender.send(Err("cancelled".into())).unwrap();
+    h.app.files.job = Some(Job {
+        cancel: Arc::new(AtomicBool::new(true)),
+        receiver,
+        path: PathBuf::from("cancelled.jsonl"),
+        action: Action::Open,
+    });
+    h.app.poll_files(&h.ctx);
+    h.frame(vec![]);
+    assert!(h.app.files.retry.is_none());
+    assert!(!h.labels.iter().any(|(label, _)| label == "修改路径重试…"));
+    h.app.file_operation_failed(
+        Action::Open,
+        PathBuf::from("failed.jsonl"),
+        "not found".into(),
+        false,
+    );
+    h.frame(vec![]);
+    h.click_rendered_label("×");
+    assert!(h.app.files.notice.is_none());
+    assert!(h.app.files.retry.is_none());
+    h.key(egui::Key::O, egui::Modifiers::COMMAND);
+    assert!(h.app.files.dialog.as_ref().unwrap().path.is_empty());
+}
+
+#[test]
+fn export_path_recovery_waits_for_the_current_filter_before_confirmation() {
+    let directory = Directory::new();
+    let source = directory.0.join("source.jsonl");
+    fs::write(&source, native(1, "retained evidence")).unwrap();
+    let mut h = crate::ui_test_support::Harness::new(false);
+    h.app.start_file_job(Action::Open, source, &h.ctx);
+    wait_job(&mut h.app, &h.ctx);
+    h.app.file_operation_failed(
+        Action::Export,
+        directory.0.join("export.jsonl"),
+        "destination exists".into(),
+        false,
+    );
+    h.app.query = "retained".into();
+    h.app.queue_filter();
+    h.frame(vec![]);
+    h.click_rendered_label("修改路径重试…");
+    assert!(
+        h.app.files.dialog.is_none(),
+        "debouncing filter must block export recovery just like File Export"
+    );
+    h.app.schedule_filter();
+    h.frame(vec![]);
+    h.click_rendered_label("修改路径重试…");
+    assert!(
+        h.app.files.dialog.is_none(),
+        "pending filter must block export recovery"
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while h.app.filter_pending {
+        h.app.poll_filter();
+        assert!(Instant::now() < deadline);
+        std::thread::yield_now();
+    }
+    h.click_rendered_label("修改路径重试…");
+    assert!(h.app.files.dialog.as_ref().unwrap().action == Action::Export);
+    assert_eq!(h.app.active_filter.query, "retained");
+    assert!(
+        h.app.files.job.is_none(),
+        "even ready export still requires confirmation"
+    );
+}
+
+#[test]
+fn file_recovery_notice_stays_compact_and_full_diagnostic_is_keyboard_accessible() {
+    for width in [900.0, 1280.0] {
+        for file_open in [false, true] {
+            let directory = Directory::new();
+            let mut h = crate::ui_test_support::Harness::new(false);
+            h.resize(width, 560.0);
+            if file_open {
+                let source = directory.0.join("source.jsonl");
+                fs::write(&source, native(1, "keep this source")).unwrap();
+                h.app.start_file_job(Action::Open, source, &h.ctx);
+                wait_job(&mut h.app, &h.ctx);
+            } else {
+                h.app.append_entry(LogEntry::marker("keep this view"));
+            }
+            h.app.selected = Some(0);
+            h.app.selection.select_all(&[0]);
+            h.app.show_details = false;
+            let path = PathBuf::from(format!(
+                "/synthetic/{}/evidence.jsonl",
+                "long-path-".repeat(35)
+            ));
+            h.app.file_operation_failed(
+                Action::Open,
+                path.clone(),
+                "Permission denied (os error 13)".into(),
+                false,
+            );
+            let expected = h.app.files.notice.clone().unwrap();
+            assert!(expected.starts_with("文件操作未完成：Permission denied (os error 13)"));
+            h.frame(vec![]);
+            h.frame(vec![]);
+            let bounds = |label: &str| {
+                h.label_bounds
+                    .iter()
+                    .find(|(text, _)| text == label)
+                    .unwrap()
+                    .1
+            };
+            let retry = bounds("修改路径重试…");
+            let details = bounds("详情");
+            let dismiss = bounds("×");
+            assert!((retry.center().y - details.center().y).abs() < 1.0);
+            assert!((retry.center().y - dismiss.center().y).abs() < 1.0);
+            assert!(retry.min.x >= 0.0 && dismiss.max.x <= width);
+            assert!(retry.max.x < details.min.x && details.max.x < dismiss.min.x);
+            assert!(
+                dismiss.max.y <= if file_open { 148.0 } else { 122.0 },
+                "file notice must not grow into three rows"
+            );
+            if file_open {
+                assert!(
+                    h.labels
+                        .iter()
+                        .any(|(label, _)| label.contains("文件 · source.jsonl · 1 条"))
+                );
+            }
+            let following = h.app.follow_logs;
+            h.click_rendered_label("详情");
+            assert!(egui::Popup::is_id_open(
+                &h.ctx,
+                egui::Id::new("file_notice_diagnostic")
+            ));
+            let trigger = h.ctx.memory(|memory| memory.focused());
+            let copy = h
+                .labels
+                .iter()
+                .find(|(label, _)| label == "Copy diagnostic")
+                .unwrap()
+                .1;
+            h.pointer(copy, true);
+            h.pointer(copy, false);
+            assert_eq!(h.copied.as_slice(), std::slice::from_ref(&expected));
+            assert_eq!(
+                h.app.follow_logs, following,
+                "diagnostic popup must not pause underlying table follow"
+            );
+            assert!(h.copied[0].contains(&path.display().to_string()));
+            h.key(egui::Key::Escape, egui::Modifiers::NONE);
+            assert_eq!(h.app.selected, Some(0));
+            for _ in 0..60 {
+                if h.ctx.memory(|memory| memory.focused()) == trigger {
+                    break;
+                }
+                h.key(egui::Key::Tab, egui::Modifiers::NONE);
+            }
+            assert!(trigger.is_some());
+            assert_eq!(h.ctx.memory(|memory| memory.focused()), trigger);
+            h.key(egui::Key::Space, egui::Modifiers::NONE);
+            assert!(egui::Popup::is_id_open(
+                &h.ctx,
+                egui::Id::new("file_notice_diagnostic")
+            ));
+            h.key(egui::Key::Escape, egui::Modifiers::NONE);
+            assert_eq!(h.app.entries.len(), 1);
+            assert_eq!(h.app.selected, Some(0));
+        }
+    }
 }

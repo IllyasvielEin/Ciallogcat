@@ -1,35 +1,35 @@
 # TODO 与 Agent 交接
 
-更新：2026-10-28。这里是后续工作的唯一队列。先读本文，再读 [架构与方向](docs/development-plan.md)、[验证状态](docs/validation.md) 和 [迁移指南](docs/migration.md)。
+更新：2026-10-29。这里是后续工作的唯一队列。先读本文，再读 [架构与方向](docs/development-plan.md)、[验证状态](docs/validation.md) 和 [迁移指南](docs/migration.md)。
 
 ## 当前状态与约定
 
-- 2026-10-28 用户要求整理并提交迁移成果、准备继续开发。本轮恢复工作区、保存功能基线并更新交接；下一轮按 X28 → X29 → X27 的顺序推进。此前暂停是历史状态，本轮未修改这些产品缺陷。
-- Q01–Q09、X01–X22 已完成原定实现及 mock 验收；X23–X26 已修复且独立定向复核通过，本轮全量自动检查已通过，仍欠 release 重建和受影响交互复验。X27–X29 是已确认未修的 P2，未确认 P0/P1。
-- 最近一次独立审查为 gpt-6.1-sol / high 三路团队检查，已结束，无需恢复旧子任务。
-- 迁移包基线为 `853976f69ae7f362a6bbe5c12781172f5cd86403`；2026-10-28 重新获取远端，`origin/main` 仍为该提交。本轮将快照中的 116 个文件变更保存为本地功能提交 `cb5e9fe`；尚未推送，远端仍不含这些成果。原迁移包保留在工作区根目录，由 `.git/info/exclude` 本地排除。
+- 2026-10-29 按用户要求移除旧 query/存档兼容路径，收敛为统一记录模型、唯一原生编码和共用有界读取；设备传输仍是显式 text/proto，不增加 auto 或版本别名。
+- X27–X29 已修复并经独立复核：序号/字节双边界、非日志字段投影、最终 JSON 读写深度契约均有永久回归。原生窗口/设备验收仍与无显示器自动测试分开记录。
+- 架构第一轮完整自动验证：headless 306、默认 GUI 配置 448 项通过（分别忽略 1/4 项）；双配置严格 Clippy、格式、74 项 Python 和 pinned protobuf 检查通过。随后编码去重及独立 GUI hillclimb 继续，最终合并工作树须重跑检查，不能沿用该轮数字。
+- 当前基线为 `79f1e2855fd16b08e96264272abaaf68adf153a4`（1.2.2）。本轮仅本地修改，未提交、推送、改版号或发布；历史迁移与发布记录不是本轮的远端操作授权。
 - 暂无可访问 Android 设备，用户已同意先用 mock，真机验收延期。Linux Xvfb/mock、交叉编译与真实平台运行必须分别记录。
-- 默认传输/格式策略保持现状；proto 和 compact v3 显式选择。GUI/CLI 共用证据核心，设备操作交给外部执行器。
+- 默认文本传输，proto 显式选择；两者使用唯一原生格式，不提供版本选择或旧布局兼容。GUI/CLI 共用证据核心，设备操作交给外部执行器。
 
-## 1. 已确认缺陷（P2，按处理顺序）
+## 1. 已修复缺陷（P2，保留复现与验收条件）
 
-### [ ] X28：context/get 的已发布序号上界
+### [x] X28：context/get 的已发布序号上界
 
-位置：`src/cli/query_v2.rs` 的 `context`、`reference_row`，对照 query 主路径。
+位置：`src/cli/query.rs` 的 `context`、`reference_row`，对照 query 主路径。
 
-复现：构造 v1/v2/v3 session，各含 seq=1,2,3；status 的已发布字节覆盖三条，seq 上界却为 1。`query-v2 --limit 1` 返回 seq1 引用；以该引用调用 `context-v2 --before 0 --after 2`，当前返回 1–3，仍声明 snapshot.seq=1，且给 seq3 签发的引用能被 get-v2 读取。原 query 续页则正确拒绝。
+复现：构造 native session，含 seq=1,2,3；status 的已发布字节覆盖三条，seq 上界却为 1。`query --limit 1` 返回 seq1 引用；以该引用调用 `context --before 0 --after 2`，旧实现返回 1–3，仍声明 snapshot.seq=1，且给 seq3 签发的引用能被 get 读取。query 续页则正确拒绝。
 
-验收：context 与 get 都执行引用自身的 `upper.seq`，明确拒绝不一致来源，不能用后来增长的 session 上界代替原引用上界；覆盖三个来源版本及正常 session 增长。此问题要求不一致 status，尚未证明正常原子发布会生成它。
+验收：context 与 get 都执行引用自身的 `upper.seq`，明确拒绝不一致来源，不能用后来增长的 session 上界代替原引用上界；覆盖离线/活动来源及正常 session 增长。此问题要求不一致 status，尚未证明正常原子发布会生成它。
 
-### [ ] X29：深层扩展转换/再筛选后不可重读
+### [x] X29：深层扩展布局/再筛选后不可重读
 
-位置：`src/document.rs` 的格式转换、`projection_extensions`、`select` 的 `all_of` 包装、最终行编码预检。
+位置：`src/document.rs` 的 `projection_extensions`、`select` 的 `all_of` 包装、最终行编码预检。
 
-复现：合法 v2 proto 行的 `device_time.future` 含 125 层短数组，load、转 CompactV3 和 write_snapshot 均成功，约 2 KiB 的输出重新 load/query 却报 recursion limit。原 v2 写回和 124 层转换是成功对照。合法 footer 的 `scope.filter` 含 124 层短数组，再筛选追加 all_of 也可写出不可读文件。
+历史复现（旧转换路径已移除；剩余单一编码的深度问题也已独立修复）：合法 v2 proto 行的 `device_time.future` 含 125 层短数组，load、转 CompactV3 和 write_snapshot 均成功，约 2 KiB 的输出重新 load/query 却报 recursion limit。原 v2 写回和 124 层转换是成功对照。合法 footer 的 `scope.filter` 含 124 层短数组，再筛选追加 all_of 也可写出不可读文件。
 
-验收：统一最终布局的读写深度契约，转换和重复筛选成功输出必须能重读；不支持的深度在成功返回/发布前明确拒绝，并保留源文件和旧视图。覆盖临界层数、v2/v3 转换、重复筛选及 CLI/GUI 读取。8 MiB 字节限制不能替代深度约束。
+验收：统一最终布局的读写深度契约，保存和重复筛选成功输出必须能重读；不支持的深度在成功返回/发布前明确拒绝，并保留源文件和旧视图。覆盖临界层数、投影扩展、重复筛选及 CLI/GUI 读取。8 MiB 字节限制不能替代深度约束。
 
-### [ ] X27：非日志行显示内部占位字段
+### [x] X27：非日志行显示内部占位字段
 
 位置：`src/main.rs` 表格/可访问文本、`src/model.rs` 文本格式，以及详情与复制路径。
 
@@ -40,10 +40,10 @@
 ## 2. 最终验证与交付
 
 - [ ] X23–X26 最终集成验收（本轮全量自动测试通过，release 重建及原生交互复验仍待完成）：X23 截断末行不参与诊断分类；X24 成功 dump 后同 session 恢复仍记未知暂停；X25 Failed 不调度过期快照 deadline；X26 footer 诊断按 JSON 编码字节限额。独立定向复核已通过，勿重复作为未修问题。
-- [ ] 完成 X27–X29 修复后，运行 [贡献指南](CONTRIBUTING.md) 的 GUI/headless 测试、双配置 Clippy、格式检查、Python fixture/Agent/benchmark/打包测试和 protobuf 再生成检查。
+- [ ] 编码去重与 GUI hillclimb 合并后重新运行 [贡献指南](CONTRIBUTING.md) 的 GUI/headless 测试、双配置 Clippy、格式检查、Python fixture/Agent/benchmark/打包测试和 protobuf 再生成检查。
 - [ ] 重建 GUI 与 headless CLI release，记录源码状态、工具链和二进制 hash；针对受影响交互做 mock 原生复验。旧 372/236 测试数及旧 release 不代表最终工作树通过。
-- [ ] 需要性能结论时用同一新构建复测三组合，保留 wall/CPU/RSS、完整性与原 payload 核对；不将存档缩小等同吞吐提升。
-- [ ] 整理提交并推送，确认新远端 CI（包括 Windows）实际完成，再按 [发布指南](docs/release.md) 决定版本/发布。本轮已保存本地功能提交；用户随后要求发布 1.1.0，版本、发布说明及本机 GUI/headless release 构建已准备，推送因缺少 GitHub 凭据受阻，远端 CI 和发布尚待完成。
+- [ ] 需要性能结论时用冻结的新构建复测 text/proto，并通过显式旧二进制比较历史基线，保留 wall/CPU/RSS、完整性与原 payload 核对；不将存档缩小等同吞吐提升。
+- [ ] 整理提交并推送，确认新远端 CI（包括 Windows）实际完成，再按 [发布指南](docs/release.md) 决定版本/发布。本轮尚未获得推送或发布授权；先报告最终本地验证结果，分别确认后续操作。
 
 ## 3. 平台与真机（条件具备后）
 
@@ -57,7 +57,7 @@
 ## 4. 可选方向（需求成立再排期）
 
 - [ ] 原生系统文件选择器：当前支持路径与拖放，需独立依赖和平台兼容评估。
-- [ ] GUI 原始/解码/展示对象的重复持有与转换峰值内存：先测再优化，v3 目前只去重磁盘存档。
+- [ ] GUI 原始/解码/展示对象的重复持有与峰值内存：先测再优化，紧凑编码目前只去重磁盘存档。
 - [ ] 自动选 proto、独立多 buffer 流、数据库索引、MCP 封装：以实际使用场景决定；暂不扩展为设备测试编排平台。
 
 ## 历史证据

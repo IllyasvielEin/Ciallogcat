@@ -20,11 +20,6 @@ fn encode(doc: &Document) -> Vec<u8> {
     bytes
 }
 
-fn convert(doc: &Document, format: NativeFormat) -> Document {
-    doc.convert_format(format, BUDGET, u64::MAX, &AtomicBool::new(false))
-        .unwrap()
-}
-
 fn reopen(doc: &Document) -> Document {
     load(Cursor::new(encode(doc)), BUDGET, &AtomicBool::new(false)).unwrap()
 }
@@ -47,8 +42,8 @@ fn extension_maps(doc: &Document) -> Vec<&Extensions> {
     ]
 }
 
-fn numeric_fixture(format: NativeFormat, token: &str) -> Vec<u8> {
-    let mut doc = convert(&super::proto_tests::sample_for_stream_tests(), format);
+fn numeric_fixture(token: &str) -> Vec<u8> {
+    let mut doc = super::proto_tests::sample_for_stream_tests();
     let meta = &mut doc.record_metadata[0];
     for extra in [
         &mut doc.header.extra,
@@ -70,10 +65,8 @@ fn numeric_fixture(format: NativeFormat, token: &str) -> Vec<u8> {
             serde_json::json!([TOKEN_MARKER, {"nested": TOKEN_MARKER}]),
         );
     }
-    if format == NativeFormat::CompactV3 {
-        meta.projection_extra
-            .insert("future".into(), TOKEN_MARKER.into());
-    }
+    meta.projection_extra
+        .insert("future".into(), TOKEN_MARKER.into());
     doc.end.scope.kind = "filtered".into();
     doc.end.scope.filter = Some(serde_json::json!({"future":TOKEN_MARKER}));
     doc.end.capture.known_gaps = vec![serde_json::json!({"future":TOKEN_MARKER})];
@@ -117,61 +110,53 @@ fn assert_numbers(doc: &Document, token: &str) {
 }
 
 #[test]
-fn numeric_extensions_survive_all_flatten_layers_load_select_v2_v3_v2() {
+fn numeric_extensions_survive_all_flatten_layers_load_select_and_reopen() {
     for token in NUMBERS {
-        for format in [NativeFormat::V2, NativeFormat::CompactV3] {
-            let source = load(
-                Cursor::new(numeric_fixture(format, token)),
-                BUDGET,
-                &AtomicBool::new(false),
-            )
+        let source = load(
+            Cursor::new(numeric_fixture(token)),
+            BUDGET,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_numbers(&source, token);
+        let selected = source
+            .select(&[0], serde_json::json!({"tag":"Tag"}))
             .unwrap();
-            assert_numbers(&source, token);
-            let selected = source
-                .select(&[0], serde_json::json!({"tag":"Tag"}))
-                .unwrap();
-            assert_eq!(
-                selected.end.scope.filter.as_ref().unwrap()["all_of"][0]["future"].to_string(),
-                *token
-            );
-            for extra in extension_maps(&reopen(&selected)) {
-                assert_eq!(extra["future"].to_string(), *token);
-            }
-            let compact = reopen(&convert(&source, NativeFormat::CompactV3));
-            assert_numbers(&compact, token);
-            if format == NativeFormat::CompactV3 {
-                assert_eq!(
-                    compact.record_metadata[0].projection_extra["future"].to_string(),
-                    *token
-                );
-            }
-            let back = reopen(&convert(&compact, NativeFormat::V2));
-            assert_numbers(&back, token);
-            if format == NativeFormat::CompactV3 {
-                assert_eq!(
-                    back.record_metadata[0].extra["projection_extensions"]["future"].to_string(),
-                    *token
-                );
-            }
-            assert_eq!(
-                back.entries[0].proto.as_ref().unwrap().raw_payload,
-                source.entries[0].proto.as_ref().unwrap().raw_payload
-            );
+        assert_eq!(
+            selected.end.scope.filter.as_ref().unwrap()["all_of"][0]["future"].to_string(),
+            *token
+        );
+        for extra in extension_maps(&reopen(&selected)) {
+            assert_eq!(extra["future"].to_string(), *token);
         }
+        let reopened = reopen(&source);
+        assert_numbers(&reopened, token);
+        assert_eq!(
+            reopened.record_metadata[0].projection_extra["future"].to_string(),
+            *token
+        );
+        assert_eq!(
+            reopened.entries[0].proto.as_ref().unwrap().raw_payload,
+            source.entries[0].proto.as_ref().unwrap().raw_payload
+        );
     }
 }
 
 #[test]
-fn numeric_legacy_extensions_survive_v1_v3_v2() {
+fn numeric_text_extensions_survive_repeated_reopen() {
     for token in NUMBERS {
-        let bytes = format!(
-            r#"{{"schema_version":1,"type":"entry","seq":9,"time":"old","pid":1,"tid":2,"level":"I","tag":"T","message":"m","future":{token},"tree":[{{"n":{token}}}]}}"#
-        );
-        let legacy = load(Cursor::new(bytes), BUDGET, &AtomicBool::new(false)).unwrap();
-        let compact = reopen(&convert(&legacy, NativeFormat::CompactV3));
-        let back = reopen(&convert(&compact, NativeFormat::V2));
-        for doc in [&legacy, &compact, &back] {
-            let extra = &doc.record_metadata[0].extra["legacy_extensions"];
+        let mut native = super::tests::sample();
+        let number: Value = serde_json::from_str(token).unwrap();
+        native.record_metadata[0]
+            .extra
+            .insert("future".into(), number.clone());
+        native.record_metadata[0]
+            .extra
+            .insert("tree".into(), serde_json::json!([{ "n": number }]));
+        let reopened = reopen(&native);
+        let repeated = reopen(&reopened);
+        for doc in [&native, &reopened, &repeated] {
+            let extra = &doc.record_metadata[0].extra;
             assert_eq!(extra["future"].to_string(), *token);
             assert_eq!(extra["tree"][0]["n"].to_string(), *token);
         }
@@ -186,8 +171,8 @@ fn arbitrary_precision_private_number_objects_are_rejected_before_type_loss() {
         r"$serde_json::private::\u004eumber",
     ] {
         let object = format!(r#"{{"nested":[{{"{key}":"1e-400"}}]}}"#);
-        for format in [NativeFormat::V2, NativeFormat::CompactV3] {
-            let template = numeric_fixture(format, "1e-400");
+        {
+            let template = numeric_fixture("1e-400");
             let original: Vec<Value> = template
                 .split(|b| *b == b'\n')
                 .filter(|line| !line.is_empty())
@@ -208,15 +193,11 @@ fn arbitrary_precision_private_number_objects_are_rejected_before_type_loss() {
                 (2, "/capture/future"),
                 (2, "/capture/known_gaps/0/future"),
             ];
-            if format == NativeFormat::V2 {
-                layers.extend([(1, "/device_time/future"), (1, "/process/future")]);
-            } else {
-                layers.extend([
-                    (1, "/projection_extensions/future"),
-                    (1, "/projection_extensions/device_time/future"),
-                    (1, "/projection_extensions/process/future"),
-                ]);
-            }
+            layers.extend([
+                (1, "/projection_extensions/future"),
+                (1, "/projection_extensions/device_time/future"),
+                (1, "/projection_extensions/process/future"),
+            ]);
             for (layer, path) in layers {
                 // The dangerous object enters as raw JSON bytes, never as a
                 // Value that serde_json could already have changed to Number.
@@ -229,7 +210,7 @@ fn arbitrary_precision_private_number_objects_are_rejected_before_type_loss() {
                 .unwrap_err();
                 assert!(
                     direct.message.contains("unsupported JSON object key"),
-                    "{format:?} {path}: {direct}"
+                    "{path}: {direct}"
                 );
                 let mut lines: Vec<Vec<u8>> = original
                     .iter()
@@ -251,13 +232,6 @@ fn arbitrary_precision_private_number_objects_are_rejected_before_type_loss() {
                 );
             }
         }
-        let legacy = format!(
-            r#"{{"schema_version":1,"type":"entry","seq":9,"time":"old","pid":1,"tid":2,"level":"I","tag":"T","message":"m","future":[{object}]}}"#
-        );
-        let error = load(Cursor::new(legacy), BUDGET, &AtomicBool::new(false))
-            .err()
-            .unwrap();
-        assert!(error.message.contains("unsupported JSON object key"));
     }
     // Quoted text, escaped backslashes, and similar keys remain ordinary JSON.
     for input in [
@@ -316,8 +290,10 @@ fn arbitrary_precision_does_not_coerce_core_integer_types_or_ranges() {
         "[2]",
         "{\"n\":2}",
     ];
-    for format in [NativeFormat::V2, NativeFormat::CompactV3] {
-        let doc = convert(&super::proto_tests::sample_for_stream_tests(), format);
+    for doc in [
+        super::proto_tests::sample_for_stream_tests(),
+        super::tests::sample(),
+    ] {
         let header = serde_json::to_value(&doc.header).unwrap();
         let footer = serde_json::to_value(&doc.end).unwrap();
         let row: Value = serde_json::from_slice(
@@ -338,7 +314,7 @@ fn arbitrary_precision_does_not_coerce_core_integer_types_or_ranges() {
             ] {
                 assert!(
                     decode_end(&replace_token(&footer, path, token), &doc.header).is_err(),
-                    "{format:?} footer {path}: {token}"
+                    "footer {path}: {token}"
                 );
             }
             for path in [
@@ -348,27 +324,17 @@ fn arbitrary_precision_does_not_coerce_core_integer_types_or_ranges() {
                 "/provenance/segment",
                 "/provenance/attempt",
                 "/provenance/observed_unix_ms",
-                "/legacy_original_seq",
             ] {
                 assert!(
                     decode_record(&replace_token(&row, path, token), &doc.header, 0).is_err(),
-                    "{format:?} record {path}: {token}"
+                    "record {path}: {token}"
                 );
             }
-            if format == NativeFormat::V2 {
-                for path in [
-                    "/pid",
-                    "/tid",
-                    "/proto/time_sec",
-                    "/proto/time_nsec",
-                    "/proto/uid",
-                    "/proto/pid",
-                    "/proto/tid",
-                    "/proto/priority",
-                ] {
+            if doc.entries[0].proto.is_none() {
+                for path in ["/pid", "/tid"] {
                     assert!(
                         decode_record(&replace_token(&row, path, token), &doc.header, 0).is_err(),
-                        "v2 record {path}: {token}"
+                        "text record {path}: {token}"
                     );
                 }
             }
@@ -378,27 +344,15 @@ fn arbitrary_precision_does_not_coerce_core_integer_types_or_ranges() {
             ("/text_loss/invalid_utf8_replaced", "1"),
             ("/proto/raw_payload", "0"),
         ] {
-            assert!(decode_record(&replace_token(&row, path, token), &doc.header, 0).is_err());
-        }
-    }
-    let legacy: Value = serde_json::from_str(r#"{"schema_version":1,"type":"entry","seq":9,"time":"old","pid":1,"tid":2,"level":"I","tag":"T","message":"m"}"#).unwrap();
-    for token in invalid {
-        for path in ["/schema_version", "/seq", "/pid", "/tid"] {
-            assert!(
-                load(
-                    Cursor::new(replace_token(&legacy, path, token)),
-                    BUDGET,
-                    &AtomicBool::new(false)
-                )
-                .is_err(),
-                "v1 {path}: {token}"
-            );
+            if row.pointer(path).is_some() {
+                assert!(decode_record(&replace_token(&row, path, token), &doc.header, 0).is_err());
+            }
         }
     }
 }
 
 #[test]
-fn long_numeric_tokens_count_toward_retained_memory_and_conversion_budget() {
+fn long_numeric_tokens_count_toward_retained_memory_and_load_budget() {
     let mut doc = super::proto_tests::sample_for_stream_tests();
     let before = doc.memory_bytes();
     let token = format!("0.{}1", "0".repeat(64 * 1024));
@@ -408,20 +362,15 @@ fn long_numeric_tokens_count_toward_retained_memory_and_conversion_budget() {
         .proto_extra
         .insert("future".into(), value);
     assert!(doc.memory_bytes() >= before + token.len());
-    let error = doc
-        .convert_format(
-            NativeFormat::CompactV3,
-            before + token.len() / 2,
-            u64::MAX,
-            &AtomicBool::new(false),
-        )
-        .err()
-        .unwrap();
+    let error = load(
+        Cursor::new(encode(&doc)),
+        before + token.len() / 2,
+        &AtomicBool::new(false),
+    )
+    .err()
+    .unwrap();
     assert_eq!(error.kind, DocumentErrorKind::MemoryBudget);
-    let back = reopen(&convert(
-        &convert(&doc, NativeFormat::CompactV3),
-        NativeFormat::V2,
-    ));
+    let back = reopen(&doc);
     assert_eq!(
         back.record_metadata[0].proto_extra["future"].to_string(),
         token
@@ -467,67 +416,315 @@ fn large_sidecar() -> Document {
 }
 
 #[test]
-fn conversion_cancels_after_first_sidecar_copy_without_copying_the_other_127_rows() {
+fn selection_cancels_after_first_sidecar_copy_without_copying_other_rows() {
     let source = large_sidecar();
-    for from in [NativeFormat::V2, NativeFormat::CompactV3] {
-        let doc = convert(&source, from);
-        for to in [NativeFormat::V2, NativeFormat::CompactV3] {
-            let cancel = Arc::new(AtomicBool::new(false));
-            let copies = Rc::new(Cell::new(0));
-            let hook = observe_clones({
-                let cancel = Arc::clone(&cancel);
-                let copies = Rc::clone(&copies);
-                move || {
-                    copies.set(copies.get() + 1);
-                    cancel.store(true, Ordering::Release);
+    let before = encode(&source);
+    let cancel = Arc::new(AtomicBool::new(false));
+    let copies = Rc::new(Cell::new(0));
+    let hook = observe_clones({
+        let cancel = Arc::clone(&cancel);
+        let copies = Rc::clone(&copies);
+        move || {
+            copies.set(copies.get() + 1);
+            cancel.store(true, Ordering::Release);
+        }
+    });
+    let result = source.select_cancellable(
+        &(0..128).collect::<Vec<_>>(),
+        serde_json::json!({"tag":"Tag"}),
+        &cancel,
+    );
+    drop(hook);
+    assert_eq!(result.err().unwrap().kind, DocumentErrorKind::Cancelled);
+    assert_eq!(copies.get(), 1, "copied beyond cancellation");
+    assert_eq!(source.record_metadata.len(), 128);
+    assert_eq!(encode(&source), before);
+}
+
+#[test]
+fn load_rejects_unaffordable_sidecars_without_mutating_source() {
+    let source = large_sidecar();
+    let bytes = encode(&source);
+    let budget = source.memory_bytes()
+        - source
+            .record_metadata
+            .iter()
+            .skip(1)
+            .map(row_metadata_bytes)
+            .sum::<usize>();
+    let result = load(Cursor::new(&bytes), budget, &AtomicBool::new(false));
+    assert_eq!(result.err().unwrap().kind, DocumentErrorKind::MemoryBudget);
+    assert_eq!(encode(&source), bytes);
+}
+
+fn nested_arrays(depth: usize) -> Value {
+    let mut value = Value::Null;
+    for _ in 0..depth {
+        value = Value::Array(vec![value]);
+    }
+    value
+}
+
+#[test]
+fn final_encoded_layouts_obey_the_readers_depth_limit() {
+    for layer in ["header", "text", "raw_proto", "derived_proto", "footer"] {
+        let mut accepted = 0;
+        let mut rejected = 0;
+        for depth in 115..=132 {
+            let mut doc = if matches!(layer, "raw_proto" | "derived_proto") {
+                super::proto_tests::sample_for_stream_tests()
+            } else {
+                super::tests::sample()
+            };
+            let value = nested_arrays(depth);
+            match layer {
+                "header" => {
+                    doc.header.extra.insert("nested".into(), value);
                 }
-            });
-            let result = doc.convert_format(to, BUDGET, u64::MAX, &cancel);
-            drop(hook);
-            assert_eq!(result.err().unwrap().kind, DocumentErrorKind::Cancelled);
-            assert_eq!(
-                copies.get(),
-                1,
-                "{from:?} -> {to:?} copied beyond cancellation"
-            );
-            assert_eq!(doc.record_metadata.len(), 128);
-            assert_eq!(
-                doc.record_metadata[127].extra["large"]
-                    .as_str()
-                    .unwrap()
-                    .len(),
-                64 * 1024
-            );
-            assert!(Arc::ptr_eq(&source.entries, &doc.entries));
+                "text" => {
+                    doc.record_metadata[0].extra.insert("nested".into(), value);
+                }
+                "raw_proto" => {
+                    doc.record_metadata[0]
+                        .proto_extra
+                        .insert("nested".into(), value);
+                }
+                "derived_proto" => {
+                    doc.record_metadata[0]
+                        .device_time_extra
+                        .insert("nested".into(), value);
+                }
+                "footer" => {
+                    doc.end.scope.kind = "filtered".into();
+                    doc.end.scope.filter = Some(value);
+                }
+                _ => unreachable!(),
+            }
+            // Serialize without the publication guard and use the actual
+            // reader as oracle. In particular, derived proto fields acquire
+            // extra containers only when the compact layout is constructed.
+            let readable = match layer {
+                "header" => decode_header(&encode_line(&doc.header).unwrap()).is_ok(),
+                "footer" => decode_end(&encode_line(&doc.end).unwrap(), &doc.header).is_ok(),
+                _ => decode_record(
+                    &encode_record_layout(&doc.entries[0], &doc.record_metadata[0]).unwrap(),
+                    &doc.header,
+                    0,
+                )
+                .is_ok(),
+            };
+            let mut bytes = Vec::new();
+            let written = write_snapshot(&mut bytes, &doc, &AtomicBool::new(false));
+            assert_eq!(written.is_ok(), readable, "{layer} depth {depth}");
+            if readable {
+                accepted += 1;
+                load(Cursor::new(bytes), BUDGET, &AtomicBool::new(false)).unwrap();
+            } else {
+                rejected += 1;
+                assert_eq!(written.unwrap_err().kind, DocumentErrorKind::InvalidData);
+            }
+        }
+        assert!(
+            accepted > 0 && rejected > 0,
+            "{layer}: boundary not covered"
+        );
+    }
+}
+
+#[test]
+fn repeated_selection_fails_before_returning_an_unreadable_filter() {
+    let mut source = super::tests::sample();
+    source.end.scope.kind = "filtered".into();
+    source.end.scope.filter = Some(nested_arrays(115));
+    let indices: Vec<_> = (0..source.entries.len()).collect();
+    let mut successful = 0;
+    for _ in 0..16 {
+        let before = encode(&source);
+        match source.select(&indices, serde_json::json!({"query":"unchanged"})) {
+            Ok(selected) => {
+                source = reopen(&selected);
+                successful += 1;
+            }
+            Err(error) => {
+                assert_eq!(error.kind, DocumentErrorKind::InvalidData);
+                assert!(successful > 0);
+                assert_eq!(encode(&source), before);
+                return;
+            }
+        }
+    }
+    panic!("composed filter never reached the reader's depth boundary");
+}
+
+#[test]
+fn decoded_projection_validates_its_final_extension_containers() {
+    let mut accepted = 0;
+    let mut rejected = 0;
+    for depth in 115..=132 {
+        let mut doc = super::proto_tests::sample_for_stream_tests();
+        doc.record_metadata[0]
+            .projection_extra
+            .insert("nested".into(), nested_arrays(depth));
+        let mut wire = WireRecord::from_row(&doc.entries[0], &doc.record_metadata[0]);
+        wire.extra.insert(
+            "projection_extensions".into(),
+            serde_json::to_value(&doc.record_metadata[0].projection_extra).unwrap(),
+        );
+        let raw = serde_json::to_vec(&wire).unwrap();
+        let readable = serde_json::from_slice::<WireRecord>(&raw).is_ok();
+        let encoded = encode_record_projection(
+            &doc.header,
+            &doc.entries[0],
+            &doc.record_metadata[0],
+            BUDGET,
+        );
+        assert_eq!(encoded.is_ok(), readable, "depth {depth}");
+        if readable {
+            accepted += 1;
+            let encoded = encoded.unwrap();
+            serde_json::from_slice::<Value>(&encoded).unwrap();
+            assert_eq!(encoded, raw);
+        } else {
+            rejected += 1;
+        }
+    }
+    assert!(accepted > 0 && rejected > 0);
+}
+
+#[test]
+fn stream_header_and_footer_reject_final_encoded_depth() {
+    let mut doc = super::tests::sample();
+    doc.header.extra.insert("nested".into(), nested_arrays(132));
+    assert!(StreamEncoder::new(doc.header).is_err());
+    let doc = super::tests::sample();
+    let mut stream = StreamEncoder::new(doc.header).unwrap();
+    for entry in doc.entries.iter() {
+        stream.record_bytes(entry).unwrap();
+    }
+    let mut capture = doc.end.capture;
+    capture.known_gaps.push(nested_arrays(132));
+    assert!(stream.finish_bytes(capture).is_err());
+    // Failed finalization does not consume the valid stream state.
+    stream.finish_bytes(CaptureStatus::default()).unwrap();
+}
+
+#[test]
+fn unreadable_encoded_footer_is_never_atomically_published() {
+    let directory =
+        std::env::temp_dir().join(format!("ciallogcat-depth-test-{}", SessionId::new()));
+    std::fs::create_dir(&directory).unwrap();
+    let original = directory.join("source.jsonl");
+    let destination = directory.join("output.jsonl");
+    let mut doc = super::tests::sample();
+    let before = encode(&doc);
+    std::fs::write(&original, &before).unwrap();
+    doc.end.scope.kind = "filtered".into();
+    doc.end.scope.filter = Some(nested_arrays(132));
+    let cancel = AtomicBool::new(false);
+    let result = crate::file_io::write_new_file(&destination, &cancel, |writer| {
+        write_snapshot(writer, &doc, &cancel).map_err(std::io::Error::other)
+    });
+    assert!(result.is_err());
+    assert!(!destination.exists());
+    assert_eq!(std::fs::read(&original).unwrap(), before);
+    assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
+fn every_extension_map_requires_final_depth_admission() {
+    let doc = super::proto_tests::sample_for_stream_tests();
+    let original = &doc.record_metadata[0];
+    assert!(!original.has_extensions());
+    for index in 0..7 {
+        let mut deep = Value::Null;
+        for _ in 0..130 {
+            deep = Value::Array(vec![deep]);
+        }
+        for (value, valid) in [
+            (serde_json::json!({}), true),
+            (serde_json::json!([]), true),
+            (deep, false),
+        ] {
+            let mut metadata = original.clone();
+            [
+                &mut metadata.extra,
+                &mut metadata.device_time_extra,
+                &mut metadata.process_extra,
+                &mut metadata.provenance_extra,
+                &mut metadata.text_loss_extra,
+                &mut metadata.proto_extra,
+                &mut metadata.projection_extra,
+            ]
+            .into_iter()
+            .nth(index)
+            .unwrap()
+            .insert("future".into(), value);
+            // An empty container VALUE is still an extension: do not inspect
+            // only its children when deciding which final shape must be checked.
+            assert!(metadata.has_extensions(), "map {index}");
+            let archived = encode_record(&doc.header, &doc.entries[0], &metadata);
+            let projected =
+                encode_record_projection(&doc.header, &doc.entries[0], &metadata, BUDGET);
+            if valid {
+                decode_record(&archived.unwrap(), &doc.header, 0).unwrap();
+                serde_json::from_slice::<WireRecord>(&projected.unwrap()).unwrap();
+            } else {
+                let error = archived.unwrap_err();
+                assert!(
+                    error.message.contains("recursion limit"),
+                    "map {index}: {error}"
+                );
+                let error = projected.unwrap_err();
+                assert!(
+                    error.message.contains("recursion limit"),
+                    "projection map {index}: {error}"
+                );
+            }
         }
     }
 }
 
 #[test]
-fn conversion_rejects_an_unaffordable_sidecar_before_deep_copying_it() {
-    let source = large_sidecar();
-    for format in [NativeFormat::V2, NativeFormat::CompactV3] {
-        let reference = convert(&source, format);
-        // Enough for all fixed costs and one row's extensions, not the second.
-        let budget = reference.memory_bytes()
-            - reference
-                .record_metadata
-                .iter()
-                .skip(1)
-                .map(row_metadata_bytes)
-                .sum::<usize>();
-        let copies = Rc::new(Cell::new(0));
-        let hook = observe_clones({
-            let copies = Rc::clone(&copies);
-            move || copies.set(copies.get() + 1)
-        });
-        let result = source.convert_format(format, budget, u64::MAX, &AtomicBool::new(false));
-        drop(hook);
-        assert_eq!(result.err().unwrap().kind, DocumentErrorKind::MemoryBudget);
-        assert_eq!(
-            copies.get(),
-            0,
-            "copied a source that cannot fit the budget"
-        );
+fn fixed_record_layouts_are_reader_admissible_despite_json_like_strings() {
+    let mut session = crate::session::Session::new();
+    session.begin_attempt().unwrap();
+    session.stream_started().unwrap();
+    let header = DocumentHeader::live(session.id(), "serial".into(), vec![LogBuffer::Main]);
+    let body = format!("{}\"\\\n\0中{}", "[{".repeat(160), "}]".repeat(160));
+    let proto = super::proto_tests::sample_for_stream_tests();
+    for mut entry in [
+        LogEntry::new(body.clone(), 0, 0, body.clone(), Level::Info, body.clone()),
+        LogEntry::marker(body.clone()),
+        LogEntry::unparsed(body),
+        proto.entries[0].clone(),
+        crate::protobuf::DecodedEntry::decode_payload(Vec::new())
+            .unwrap()
+            .project(),
+    ] {
+        entry.provenance = session.next_record(None);
+        let metadata = RecordMetadata {
+            seq: entry.provenance.unwrap().seq,
+            event_kind: (entry.kind == LogEntryKind::Marker).then(|| "event".into()),
+            ..RecordMetadata::default()
+        };
+        assert!(!metadata.has_extensions());
+        let bytes = encode_record(&header, &entry, &metadata).unwrap();
+        assert_eq!(bytes, encode_record_layout(&entry, &metadata).unwrap());
+        let (decoded, decoded_metadata) = decode_record(&bytes, &header, 0).unwrap();
+        assert_eq!(decoded.kind, entry.kind);
+        assert_eq!(decoded.message, entry.message);
+        assert_eq!(decoded_metadata.seq, metadata.seq);
+        let projection = encode_record_projection(&header, &entry, &metadata, BUDGET).unwrap();
+        serde_json::from_slice::<WireRecord>(&projection).unwrap();
+        let json: Value = serde_json::from_slice(&projection).unwrap();
+        fn depth(value: &Value) -> usize {
+            match value {
+                Value::Object(fields) => 1 + fields.values().map(depth).max().unwrap_or(0),
+                Value::Array(values) => 1 + values.iter().map(depth).max().unwrap_or(0),
+                _ => 0,
+            }
+        }
+        assert!(depth(&json) <= 2);
     }
 }

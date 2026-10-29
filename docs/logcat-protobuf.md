@@ -4,7 +4,7 @@
 
 结论：`logcat --proto` 值得作为 Android 15+ 的可选采集后端。它能改善消息边界、时间精度、UID 与多行消息，适合 GUI 和 Agent 共用的日志证据模型；它不是原始 logd 数据协议，也不能解决 PID 生命周期、日志缺口或逐条 buffer 归属。先完成现有采集可靠性与统一记录格式，再用有限设备矩阵试验 protobuf，不让它成为首批 GUI 闭环的前置条件。
 
-[三组合性能复测](transport-performance-2026-10-24.md)覆盖 v2/text、v2/proto 和 v3/proto：compact 缩小 protobuf 工件约 54%/62%，端到端吞吐并非普遍提高。该结果限固定主机合成负载，不能替代设备或 GUI 性能验收。
+[历史三组合性能复测](transport-performance-2026-10-24.md)覆盖旧构建的 v2/text、v2/proto 和 v3/proto：compact 缩小 protobuf 工件约 54%/62%，端到端吞吐并非普遍提高。该结果限固定主机合成负载，不能替代设备或 GUI 性能验收。
 
 同日进一步完成了[选项与软件实践调研](logcat-options-and-ecosystem.md)：官方 latest-release 清单指向 Android 17，其固定 schema 与本项目 Android 16 schema 逐字节相同；Studio 固定开发源码 `ada4bc6…` 在 API ≥36 且默认 flag 开启时使用 `logcat --proto`，其余使用 long/epoch 文本。这里的 API 36 是 Studio 采用策略，不是 AOSP 协议首次可用版本；尚未据此验证具体 Studio 稳定发行包或 OEM 设备。下文较早版本表保留原研究范围，新增证据支持继续设备验证，不改变当前显式选择策略。
 
@@ -38,16 +38,16 @@ CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=target/review-build cargo test --offline --
 
 现有 17 组 decoder fixtures 已在 Linux 通过，包括独立手写 wire golden、所有截断位置、单字节分片与 EINTR、恰好 1 MiB/超限帧、未知枚举/字段、无效 UTF-8 string 与任意 bytes、重复字段与原帧、无效时间/超大身份值、错误后禁止继续、EOF、错误位置与计数不回绕。生成器 `--check` 也已通过。后文的“仓库外实验”是前期验证记录，不应与产品测试混为真机证据。
 
-产品 ADB adapter 支持显式选择 `--record-format v2 --transport proto`，也支持 compact 存档 `--record-format v3 --transport proto`。默认仍为 v1/text；v3+text（包括省略 transport）拒绝。两种 native 格式沿用同一 capture_v2 流水线、历史范围、预算、flush 后成对发布水位与状态：
+产品 ADB adapter 默认文本传输，支持显式 `--transport proto`。两种传输使用唯一原生格式，不提供 `--record-format` 选项、自动选择或旧格式兼容；共享 capture 流水线、历史范围、预算、flush 后成对发布水位与状态：
 
 - 每次启动前执行目标 `adb -s SERIAL features`，只有精确的 `shell_v2` token 才允许启动。查询错误保留诊断，缺少能力明确失败。这个检查证明传输能力声明，不证明设备 logcat 接受 `--proto`。
 - `LogcatStartOptions` 可传入剩余 deadline 和取消回调；能力查询每 10 ms 检查一次，取采集剩余时间与查询自身 5 秒上限的较小值，取消/到期先 kill + reap 查询再返回，spawn 日志流前再次检查。查询失败的 stderr 只保留至多 4 KiB UTF-8 预览与截断后缀，避免能力错误撑坏 session status。
 - 使用参数数组启动 `adb -s SERIAL shell -T -n`，远端 command 为固定词汇组成的 `exec logcat --proto -v threadtime -T 1 -b ... '*:V'`。serial 留在本地 argv，buffer 来自枚举。stdout 按二进制读取；stderr 继续独立有界读取，退出/回收沿用现有采集生命周期。
 - 不自动降级、不把 stderr 解析为 protobuf。选项不支持、权限失败、协议错误均保留独立诊断；合法零记录不伪造已观察日志。空/default/unknown-only、未知级别、越界 PID/TID、坏时间进入 Unparsed，保留完整证据。
 - backend 的最终 Exited 保留原始错误诊断，并以 typed `incomplete_proto_frame` 标记单纯帧头/帧体截断；其他 reader/process 错误不会被该标记掩盖。CLI 在确认主动停止且 child 已回收时，将半帧记为 `incomplete_frame_at_stop` / `concurrent_with_host_stop` 缺口并标 partial，不假称停止必然是截断原因。unexpected 截断和其他协议错误仍走失败/重连处理。
-- Native v2 `proto` 对象以 base64 保存原始 payload、tag/message bytes 和全部已知字段，未知 JSON 扩展及 protobuf 字段都可往返。导入和写出重新解码原帧，拒绝显式字段或展示字段与原帧不一致的记录；`device_process_cache` 必须有匹配原帧。参见 [native 格式](native-format.md#optional-protobuf-evidence)。
+- 原生 `proto` 对象只保存一份 base64 原始 payload 及未知扩展，固定投影恢复完整展示和元字段。未知 JSON 扩展及 protobuf wire 字段都可往返，`device_process_cache` 仍只是来自原帧的进程名提示。参见 [原生格式](native-format.md#protobuf-storage-and-decoded-views)。
 
-Native v3 的 proto 行仅存一份原始 payload，使用 header 的固定投影声明恢复显示与完整元字段；未知 wire/JSON 扩展保留。`query-v2/get-v2/context-v2` 的名字表示 API v2，可读 v3 来源，响应 `source_schema_version=3`。`get-v2` 默认 stored 返回原行；显式 `--view decoded` 返回完整派生结构（包含 message、全部 proto 字段和扩展），响应明确标记派生视图。UTF-8 分块和响应预算仍有效，展开视图单独限制 64 MiB，存档/footer 仍为 8 MiB。native v2/v3 tail 均支持 `--start-at end` 的已发布边界，跳过前缀不宣称完成扫描。参见 [Agent 查询契约](agent-query.md)。示例 `examples/agent_capture.py` 仍固定 v2，仅接受 record_schema_version=2。
+`query/get/context` 使用同一查询协议；响应 schema 常量与存储 schema 常量互相独立，均不是用户选项。`get` 默认 stored 返回原行；显式 `--view decoded` 返回完整派生结构（包含 message、全部 proto 字段和扩展），响应明确标记派生视图。UTF-8 分块和响应预算仍有效，展开视图单独限制 64 MiB，存档/footer 仍为 8 MiB。native tail 支持 `--start-at end` 的已发布边界，跳过前缀不宣称完成扫描。参见 [Agent 查询契约](agent-query.md)。示例 `examples/agent_capture.py` 使用当前原生格式并校验 status 的内部 schema 标记。
 
 adapter 和 native 回归覆盖原始 bytes、空帧、未知字段帧、零记录、未知优先级、malformed、truncated、oversized、不支持选项、权限失败、缺 shell_v2、features 查询失败、巨大非法 UTF-8 错误预览，以及半帧期间主动停止。子进程场景核对 argv trace，不存在文本 fallback；挂起 features 的 deadline/cancel/预取消/过期调用验证查询已回收且没有创建日志流。另有 writer partial-write/flush 失败水位与 StreamEncoder 跨 attempt 身份/事务测试。这些是合成协议/宿主子进程验证；设备与 Windows/macOS 字节矩阵仍待验证。
 

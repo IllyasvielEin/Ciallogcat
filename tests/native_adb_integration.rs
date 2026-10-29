@@ -208,11 +208,7 @@ impl ProcessObserver {
 
 #[test]
 fn native_snapshot_scope_completes_text_and_binary_streams_without_reconnect() {
-    for (scenario, transport, format) in [
-        ("snapshot", "text", "v2"),
-        ("proto_normal", "proto", "v2"),
-        ("proto_normal", "proto", "v3"),
-    ] {
+    for (scenario, transport) in [("snapshot", "text"), ("proto_normal", "proto")] {
         for scope in [
             vec![],
             vec!["--tail", "3"],
@@ -223,8 +219,6 @@ fn native_snapshot_scope_completes_text_and_binary_streams_without_reconnect() {
                 "capture",
                 "--serial",
                 "TEST-USB",
-                "--record-format",
-                format,
                 "--transport",
                 transport,
                 "--dump",
@@ -244,10 +238,7 @@ fn native_snapshot_scope_completes_text_and_binary_streams_without_reconnect() {
             assert_eq!(status["reason"], "snapshot_complete");
             assert_eq!(status["stream_interruptions"], 0);
             assert_eq!(status["entries"], 1);
-            assert_eq!(
-                status["record_schema_version"],
-                if format == "v3" { 3 } else { 2 }
-            );
+            assert_eq!(status["record_schema_version"], 3);
             assert_eq!(status["visible_end"]["offset"], out.len());
             assert_eq!(status["visible_end"]["seq"], 1);
             assert!(out.len() <= 8192);
@@ -278,18 +269,28 @@ fn native_executable_protocol_handles_paths_unicode_invalid_utf8_and_partial_eof
         "TEST-USB",
         "--adb",
         s.adb.to_str().unwrap(),
+        "--dump",
         "--duration-secs",
         "2",
     ]);
     assert!(ok, "{err}");
-    let records: Vec<Value> = out
-        .lines()
-        .map(|l| serde_json::from_str(l).unwrap())
-        .collect();
-    assert_eq!(records.len(), 4);
-    assert_eq!(records[1]["message"], "unicode 雪 🚀");
-    assert!(records[2]["message"].as_str().unwrap().contains('\u{fffd}'));
-    assert_eq!(records[3]["message"], "final partial");
+    let doc = ciallogcat::document::load(
+        out.as_bytes(),
+        4 * 1024 * 1024,
+        &std::sync::atomic::AtomicBool::new(false),
+    )
+    .unwrap();
+    assert_eq!(doc.header.schema_version, 3);
+    assert_eq!(doc.entries.len(), 4);
+    assert_eq!(doc.entries[0].kind, ciallogcat::model::LogEntryKind::Marker);
+    assert_eq!(doc.entries[1].message.as_ref(), "unicode 雪 🚀");
+    assert!(doc.entries[2].message.contains('\u{fffd}'));
+    assert_eq!(doc.entries[3].message.as_ref(), "final partial");
+    assert_eq!(doc.end.capture.extra["attempts"], 1);
+    assert_eq!(
+        serde_json::from_str::<Value>(err.trim()).unwrap()["reason"],
+        "snapshot_complete"
+    );
 }
 
 #[test]
@@ -304,8 +305,6 @@ fn native_background_stop_reaps_idle_child_and_publishes_finalized_snapshot() {
         s.adb.to_str().unwrap(),
         "--session-dir",
         &dir,
-        "--record-format",
-        "v2",
         "--duration-secs",
         "10",
     ]);
@@ -326,7 +325,7 @@ fn native_background_stop_reaps_idle_child_and_publishes_finalized_snapshot() {
         assert!(Instant::now() < until);
         std::thread::sleep(Duration::from_millis(20));
     }
-    let query = s.ok(&["query-v2", "--session-dir", &dir, "--mode", "tail"]);
+    let query = s.ok(&["query", "--session-dir", &dir, "--mode", "tail"]);
     assert_eq!(query["records"][0]["message_preview"], "before idle");
     let stopped = s.ok(&["stop", "--session-dir", &dir]);
     assert_eq!(stopped["state"], "completed");
@@ -335,7 +334,7 @@ fn native_background_stop_reaps_idle_child_and_publishes_finalized_snapshot() {
         observer.assert_exited();
     }
     let end = s.ok(&[
-        "query-v2",
+        "query",
         "--session-dir",
         &dir,
         "--mode",
@@ -348,7 +347,7 @@ fn native_background_stop_reaps_idle_child_and_publishes_finalized_snapshot() {
 
 #[test]
 fn native_binary_pipe_preserves_protobuf_payload_and_can_be_stopped() {
-    for format in ["v2", "v3"] {
+    {
         let s = Sandbox::new("proto_normal");
         let dir = s.path("session");
         s.ok(&[
@@ -359,8 +358,6 @@ fn native_binary_pipe_preserves_protobuf_payload_and_can_be_stopped() {
             s.adb.to_str().unwrap(),
             "--session-dir",
             &dir,
-            "--record-format",
-            format,
             "--transport",
             "proto",
             "--duration-secs",
@@ -384,7 +381,7 @@ fn native_binary_pipe_preserves_protobuf_payload_and_can_be_stopped() {
             std::thread::sleep(Duration::from_millis(20));
         }
         let page = s.ok(&[
-            "query-v2",
+            "query",
             "--session-dir",
             &dir,
             "--mode",
@@ -392,27 +389,17 @@ fn native_binary_pipe_preserves_protobuf_payload_and_can_be_stopped() {
             "--start-at",
             "end",
         ]);
-        assert_eq!(
-            page["source_schema_version"],
-            if format == "v3" { 3 } else { 2 }
-        );
+        assert_eq!(page["source_schema_version"], 3);
         assert_eq!(page["records"].as_array().unwrap().len(), 0);
         assert_eq!(page["validation"]["scope"], "tail_suffix");
         let stopped = s.ok(&["stop", "--session-dir", &dir]);
         assert_eq!(stopped["visible_end"]["offset"], stopped["bytes"]);
-        let (ok, _, error) = s.run(&["query", "--session-dir", &dir]);
-        assert!(!ok);
-        let error: Value = serde_json::from_str(error.trim()).unwrap();
-        assert_eq!(error["error"]["code"], "unsupported_format");
-        assert!(
-            error["error"]["message"]
-                .as_str()
-                .unwrap()
-                .contains(&format!("native {format}"))
-        );
-        let all = s.ok(&["query-v2", "--session-dir", &dir]);
+        let all = s.ok(&["query", "--session-dir", &dir]);
+        assert_eq!(all["schema_version"], 2);
+        assert_eq!(all["source_schema_version"], page["source_schema_version"]);
+        assert_eq!(all["complete"], true);
         let detail = s.ok(&[
-            "get-v2",
+            "get",
             "--session-dir",
             &dir,
             "--ref",
@@ -468,8 +455,6 @@ fn native_stderr_errors_and_proto_capability_failure_are_reported() {
         "TEST-USB",
         "--adb",
         p.adb.to_str().unwrap(),
-        "--record-format",
-        "v2",
         "--transport",
         "proto",
         "--duration-secs",
@@ -492,8 +477,6 @@ fn native_burst_can_stop_with_bounded_output_and_complete_cleanup() {
         s.adb.to_str().unwrap(),
         "--session-dir",
         &dir,
-        "--record-format",
-        "v2",
         "--duration-secs",
         "10",
         "--max-bytes",
