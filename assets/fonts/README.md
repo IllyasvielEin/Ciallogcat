@@ -4,7 +4,7 @@ Fonts are compiled into the GUI executable; runtime downloads and system font
 installation are not required. Both font licenses and this notice accompany the
 GUI ZIP, tar.gz and DEB packages. CLI-only builds do not embed these fonts.
 
-## Cascadia Next SC NF (primary)
+## Cascadia Next SC NF (log primary and UI CJK fallback)
 
 - Embedded file: `CascadiaNextSCNF-Regular.ttf`
 - Version: v1.0.1
@@ -36,11 +36,32 @@ the SHA-256; the resulting bytes must match the checked-in TTF exactly.
 
 The font includes the Currency Symbols block U+20A0–U+20BF, including the Bitcoin
 sign `₿` (U+20BF) missing from Cascadia and the current egui defaults. It is appended
-after the existing fonts in both the monospace and proportional families, keeping
-Cascadia first and preserving egui's defaults. Only glyph selection changes; log
+after the existing fonts in both the monospace and proportional families, preserving
+egui's default proportional Latin for controls and Cascadia first for logs.
+Cascadia follows the proportional defaults to supply Chinese glyphs; text
+inputs, identifiers and log content continue using the original monospace chain. Only glyph selection changes; log
 text, Unicode codepoints and copy content must remain intact.
 
 `src/font_fallback.rs` contains regression checks using egui's actual font lookup,
 text layout and rasterized atlas at 1.0 and 1.5 pixels per point. These checks do
 not replace native GUI screenshots at normal and 1.5× scaling or native clipboard
 verification during the X03 experience review.
+
+## Font roles and small UI text
+
+Controls use egui's bundled proportional font chain before Cascadia's Chinese
+fallback. This requires no additional asset, system installation or runtime
+download. Log messages, timestamps, process identifiers and editable filter
+text remain Cascadia-first at their existing sizes.
+
+`src/typography_regressions.rs` exercises the actual production font definitions
+at 12 / 12.5 / 13 points and 1 / 1.5 pixels per point: proportional UI advances,
+unchanged monospace advances, Chinese diagnostic glyphs, `Il1` / `O0`, paths,
+hexadecimal text and `₿`. UI metadata is 12pt with a theme-aware readable color;
+row height and toolbar/status panel dimensions are unchanged.
+
+The 2026-10-29 paired rendering review compared LXGW WenKai Screen v1.530 and
+Noto Sans SC v2.004 with this existing-asset chain. They are not bundled: the
+small dense controls did not establish a clear enough benefit to justify
+additional 26.1 MB / 8.3 MB assets respectively. This is a scoped default-font
+decision, not a claim that either font is unsuitable for other reading styles.

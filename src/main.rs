@@ -1692,7 +1692,7 @@ impl CiallogcatApp {
         egui::Panel::top("toolbar").exact_size(44.0).show(root_ui, |ui| {
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = if compact { 4.0 } else { 8.0 };
-                    let device_label = ui.label(RichText::new("Device").weak());
+                    let device_label = ui.label("设备");
 
                     let selected_label = self
                         .selected_device
@@ -1791,10 +1791,11 @@ impl CiallogcatApp {
                         ui.close();
                     }
                 });
-                    let view = egui::containers::menu::MenuButton::new("View")
+                    let view = egui::containers::menu::MenuButton::new("视图")
                         .config(egui::containers::menu::MenuConfig::new()
                             .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside))
                         .ui(ui, |ui| {
+                        ui.set_max_width(360.0);
                         if ui.add_enabled(self.entries.incident_count() > 0 && !self.filter_pending && self.filter_dirty_since.is_none(), egui::Button::new(format!("下一条崩溃 / ANR 线索（{}） · F8", self.entries.incident_count())))
                             .on_hover_text("在全部保留日志中定位已知签名并打开前后上下文；包含筛选外记录，不能替代故障诊断").clicked() {
                             self.jump_to_incident();
@@ -1807,23 +1808,23 @@ impl CiallogcatApp {
                             ui.add(egui::DragValue::new(&mut draft).range(16..=4096).suffix(" MiB"));
                         });
                         self.memory_limit_draft = Some(draft);
-                        ui.label("Retained-log estimate only; excludes snapshots, queues, clipboard and process RSS.");
+                        ui.add(egui::Label::new("仅估算保留日志；不含快照、队列、剪贴板及进程总内存。").wrap());
                         if self.entries.memory_bytes() > memory_budget_bytes(draft) {
-                            ui.colored_label(Color32::from_rgb(239, 190, 82), "Apply removes oldest logs immediately to about 90% of this budget. This cannot be undone.");
+                            ui.colored_label(budget_warning_color(ui.visuals()), "应用后立即移除最旧日志，降至预算约 90%；无法撤销。");
                         }
                         ui.horizontal(|ui| {
-                            if ui.button("Apply budget").clicked() {
+                            if ui.button("应用预算").clicked() {
                                 self.apply_memory_budget(draft);
                                 ui.close();
                             }
-                            if ui.button("Cancel budget").clicked() {
+                            if ui.button("取消修改").clicked() {
                                 self.memory_limit_draft = None;
                                 ui.close();
                             }
                         });
                         ui.separator();
                         if ui
-                            .checkbox(&mut self.show_details, "Details on selection")
+                            .checkbox(&mut self.show_details, "选中时显示详情")
                             .changed()
                         {
                             self.mark_config_dirty();
@@ -1831,24 +1832,38 @@ impl CiallogcatApp {
                         if ui
                             .add(
                                 egui::Slider::new(&mut self.row_height, 21.0..=34.0)
-                                    .text("Row height"),
+                                    .text("行高"),
                             )
                             .changed()
                         {
                             self.mark_config_dirty();
                         }
-                        if ui.checkbox(&mut self.dark, "Dark theme").changed() {
+                        if ui.checkbox(&mut self.dark, "深色主题").changed() {
                             configure_style(&ctx, self.dark);
                             self.mark_config_dirty();
                         }
                         ui.separator();
-                        ui.label("Ctrl+F /    Find messages");
-                        ui.label("↑ ↓ Home End    Select log");
-                        ui.label("Ctrl+C    Copy selected logs");
-                        ui.label("Shift+Click / Shift+Up/Down    Select range");
-                        ui.label("Ctrl+Click    Toggle row");
-                        ui.label("Ctrl+A    Select all filtered logs");
-                        ui.label("Esc    Leave input / selection");
+                        ui.collapsing("快捷键", |ui| {
+                            egui::Grid::new("view_shortcuts")
+                                .num_columns(2)
+                                .min_row_height(18.0)
+                                .spacing(egui::vec2(16.0, 4.0))
+                                .show(ui, |ui| {
+                            for (keys, action) in [
+                                ("Ctrl+F 或 /", "聚焦消息筛选"),
+                                ("↑ ↓ Home End", "选择日志"),
+                                ("Ctrl+C", "复制选中日志"),
+                                ("Shift+单击 / Shift+↑↓", "选择范围"),
+                                ("Ctrl+单击", "切换单行选择"),
+                                ("Ctrl+A", "全选筛选结果"),
+                                ("Esc", "退出输入或选择"),
+                            ] {
+                                ui.label(keys);
+                                ui.label(action);
+                                ui.end_row();
+                            }
+                            });
+                        });
                     });
                     if view.1.is_none() { self.memory_limit_draft = None; }
                 self.file_menu(ui);
@@ -1864,7 +1879,7 @@ impl CiallogcatApp {
                                     }
                                     if ui
                                         .button("×")
-                                        .on_hover_text("Delete saved filter")
+                                        .on_hover_text("删除筛选方案")
                                         .clicked()
                                     {
                                         delete_saved = Some(index);
@@ -1874,7 +1889,7 @@ impl CiallogcatApp {
                             if !self.saved_filters.is_empty() {
                                 ui.separator();
                             }
-                            if ui.button("Save current…").clicked() {
+                            if ui.button("保存当前筛选…").clicked() {
                                 self.show_save_filter = true;
                                 ui.close();
                             }
@@ -1908,7 +1923,7 @@ impl CiallogcatApp {
                             }
                         }
                         if matches!(self.capture_state, CaptureState::Error(_))
-                            && ui.button("Retry").clicked()
+                            && ui.button("重试采集").clicked()
                         {
                             self.retry_capture(&ctx);
                         }
@@ -1924,12 +1939,12 @@ impl CiallogcatApp {
                     let package_response = ui.add_sized(
                         [if compact { 160.0 } else { 190.0 }, 28.0],
                         egui::TextEdit::singleline(&mut self.package)
-                            .hint_text("Package · all processes")
+                            .hint_text("包名 · 全部进程")
                             .font(TextStyle::Monospace)
                             .id(egui::Id::new("package_filter")),
                     );
                     ctx.accesskit_node_builder(package_response.id, |node| {
-                        node.set_label("Package filter");
+                        node.set_label("包名筛选");
                     });
                     filter_changed |= package_response.changed();
                     if package_response.gained_focus() {
@@ -1952,7 +1967,7 @@ impl CiallogcatApp {
                         .show(|ui| {
                             ui.set_min_width(304.0);
                             if ui
-                                .selectable_label(self.package.trim().is_empty(), "All processes")
+                                .selectable_label(self.package.trim().is_empty(), "全部进程")
                                 .clicked()
                             {
                                 package_choice = Some(String::new());
@@ -1978,9 +1993,7 @@ impl CiallogcatApp {
                                         }
                                     }
                                     if !found_package {
-                                        ui.label(
-                                            RichText::new("No matching installed packages").weak(),
-                                        );
+                                        ui.label(RichText::new("没有匹配的已安装应用").weak());
                                     }
                                 });
 
@@ -1988,9 +2001,9 @@ impl CiallogcatApp {
                             if self.package_query_pending {
                                 ui.horizontal(|ui| {
                                     ui.spinner();
-                                    ui.label(RichText::new("Loading packages…").weak());
+                                    ui.label(RichText::new("正在加载包列表…").weak());
                                 });
-                            } else if ui.button("Refresh package list").clicked() {
+                            } else if ui.button("刷新包列表").clicked() {
                                 refresh_packages = true;
                             }
                         });
@@ -2006,12 +2019,12 @@ impl CiallogcatApp {
                     let query_response = ui.add_sized(
                         [query_width, 28.0],
                         egui::TextEdit::singleline(&mut self.query)
-                            .hint_text("Filter messages · press / to focus")
+                            .hint_text("筛选消息 · / 聚焦")
                             .font(TextStyle::Monospace)
                             .id(egui::Id::new("query_shortcut")),
                     );
                     ctx.accesskit_node_builder(query_response.id, |node| {
-                        node.set_label("Message filter");
+                        node.set_label("消息筛选");
                     });
                     filter_changed |= query_response.changed();
                     if query_response.gained_focus() {
@@ -2110,13 +2123,13 @@ impl CiallogcatApp {
                     }
                     let regex_response = ui
                         .toggle_value(&mut self.use_regex, ".*")
-                        .on_hover_text("Use a regular expression");
+                        .on_hover_text("使用正则表达式");
                     regex_response.widget_info(|| {
                         egui::WidgetInfo::selected(
                             egui::WidgetType::Checkbox,
                             regex_response.enabled(),
                             self.use_regex,
-                            "Use a regular expression",
+                            "使用正则表达式",
                         )
                     });
                     if regex_response.clicked() {
@@ -2125,13 +2138,13 @@ impl CiallogcatApp {
                     filter_changed |= regex_response.changed();
                     let case_response = ui
                         .toggle_value(&mut self.case_sensitive, "Aa")
-                        .on_hover_text("Match case");
+                        .on_hover_text("区分大小写");
                     case_response.widget_info(|| {
                         egui::WidgetInfo::selected(
                             egui::WidgetType::Checkbox,
                             case_response.enabled(),
                             self.case_sensitive,
-                            "Match case",
+                            "区分大小写",
                         )
                     });
                     if case_response.clicked() {
@@ -2194,13 +2207,13 @@ impl CiallogcatApp {
                                     ),
                                 ),
                             )
-                            .on_hover_text(format!("{level:?} and above"));
+                            .on_hover_text(format!("{level:?} 及以上"));
                         response.widget_info(|| {
                             egui::WidgetInfo::selected(
                                 egui::WidgetType::RadioButton,
                                 response.enabled(),
                                 self.min_level == level,
-                                format!("Minimum level: {level:?} and above"),
+                                format!("最低级别：{level:?} 及以上"),
                             )
                         });
                         if response.clicked() {
@@ -2253,9 +2266,9 @@ impl CiallogcatApp {
                 ui.horizontal(|ui| {
                     ui.label(
                         RichText::new(if checking {
-                            "Selected log · checking filter…"
+                            "日志详情 · 正在检查筛选…"
                         } else {
-                            "Selected log"
+                            "日志详情"
                         })
                         .strong(),
                     );
@@ -2307,8 +2320,8 @@ impl CiallogcatApp {
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if ui
-                            .button("Copy")
-                            .on_hover_text("Copy complete log · Ctrl+C")
+                            .button("复制")
+                            .on_hover_text("复制完整日志 · Ctrl+C")
                             .clicked()
                         {
                             copy_requested = true;
@@ -2550,20 +2563,20 @@ impl CiallogcatApp {
             if matches.is_empty() {
                 ui.centered_and_justified(|ui| {
                     ui.label(if self.filter_pending || self.filter_dirty_since.is_some() {
-                        "Filtering logs…"
+                        "正在筛选日志…"
                     } else if self.filter_error.is_some() {
-                        "Invalid regular expression. Correct the query or turn off .* ."
+                        "正则表达式无效。请修改消息条件，或关闭 .*。"
                     } else if !entries.is_empty() {
-                        "No matching logs. Check the package, Tag include/exclude, minimum level and message filter."
+                        "没有匹配日志。请检查包名、Tag 包含/排除、最低级别及消息筛选条件。"
                     } else if self.files.document.is_some() {
                         "文件中没有日志记录。可以打开其他文件或选择设备开始采集。"
                     } else {
                         match self.capture_state {
-                            CaptureState::NoAdb => "Install Android platform-tools, then click Refresh to find ADB.\nOr open a native JSONL file via File / Ctrl+O; no device required.",
-                            CaptureState::WaitingForDevice => "Connect and authorize an Android device, then select it above.\nOr open a native JSONL file via File / Ctrl+O; no device required.",
-                            CaptureState::Error(_) => "Capture stopped. Click Retry to resume.",
+                            CaptureState::NoAdb => "安装 Android platform-tools 后，点击刷新以查找 ADB。\n也可通过文件 / Ctrl+O 打开原生 JSONL，无需设备。",
+                            CaptureState::WaitingForDevice => "连接并授权 Android 设备，然后在上方选择。\n也可通过文件 / Ctrl+O 打开原生 JSONL，无需设备。",
+                            CaptureState::Error(_) => "采集已停止。点击重试采集继续。",
                             CaptureState::Paused => "采集已暂停。点击开始采集继续接收日志。",
-                            _ => "Waiting for logs from the selected device…",
+                            _ => "正在等待所选设备的日志…",
                         }
                     });
                 });
@@ -2636,7 +2649,7 @@ impl CiallogcatApp {
                             }
                             header_ids[column] = log_table_ui::cell(
                                 ui, header_row, 0, column, title, None, |ui| {
-                                    ui.label(RichText::new(*title).weak().size(11.0).strong());
+                                    ui.label(RichText::new(*title).size(12.0).color(readable_metadata_color(ui.visuals())).strong());
                                 },
                             );
                         });
@@ -2819,7 +2832,7 @@ impl CiallogcatApp {
                             .size(10.0),
                     );
                     if self.files.document.is_some() {
-                        ui.label(RichText::new("文件 · 只读").weak().size(11.0));
+                        ui.label(RichText::new("文件 · 只读").color(readable_metadata_color(ui.visuals())).size(12.0));
                     } else if let CaptureState::Error(error) = &self.capture_state {
                         Self::status_diagnostic(ui, "capture_diagnostic", "采集错误", error);
                     } else if let CaptureState::Reconnecting { deadline, retry, error } = &self.capture_state {
@@ -2827,26 +2840,25 @@ impl CiallogcatApp {
                         let label = if self.selected_device_available() { format!("{seconds}s 后重连 {retry}/3") } else { format!("等待设备以重连 {retry}/3") };
                         Self::status_diagnostic(ui, "capture_reconnect", &label, error);
                     } else {
-                        ui.label(RichText::new(self.capture_state.label()).weak().size(11.0));
+                        ui.label(RichText::new(self.capture_state.label()).color(readable_metadata_color(ui.visuals())).size(12.0));
                     }
                     ui.separator();
                     let dropped = if self.dropped_entries > 0 {
-                        format!(" · {} dropped", format_count(self.dropped_entries))
+                        format!(" · 已移除 {} 条", format_count(self.dropped_entries))
                     } else {
                         String::new()
                     };
                     ui.label(
                         RichText::new(format!(
-                            "{} total · {:.0}/s{dropped}",
+                            "{} 条日志 · {:.0}/秒{dropped}",
                             format_count(self.entries.len()),
                             self.logs_per_second
                         ))
-                        .weak()
-                        .monospace()
-                        .size(11.0),
+                        .color(readable_metadata_color(ui.visuals()))
+                        .size(12.0),
                     );
-                    ui.label(RichText::new(format!("{} matches", format_count(self.matches.len()))).weak().monospace().size(11.0))
-                        .on_hover_text(format!("Retained ≈ {:.1} / {} MiB", self.entries.memory_bytes() as f64 / MIB as f64, self.memory_limit_mib));
+                    ui.label(RichText::new(format!("{} 条匹配", format_count(self.matches.len()))).color(readable_metadata_color(ui.visuals())).size(12.0))
+                        .on_hover_text(format!("保留日志 ≈ {:.1} / {} MiB", self.entries.memory_bytes() as f64 / MIB as f64, self.memory_limit_mib));
                     // Independent compact indicators keep one long diagnostic from
                     // hiding counts or an unrelated settings/query failure.
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -2875,7 +2887,7 @@ impl CiallogcatApp {
                             Self::status_diagnostic(ui, "process_diagnostic", "进程查询错误", error);
                         }
                         if let Some(notice) = self.copy_notice.as_ref() {
-                            Self::status_diagnostic(ui, "copy_notice", "Copy / history", notice);
+                            Self::status_diagnostic(ui, "copy_notice", "复制 / 历史", notice);
                         }
                         if let Some(error) = self.config_error.as_ref() {
                             Self::status_diagnostic(
@@ -2911,7 +2923,7 @@ impl CiallogcatApp {
                 .show(|ui| {
                     ui.set_max_width(520.0);
                     ui.label(RichText::new(label).strong());
-                    if ui.button("Copy diagnostic").clicked() {
+                    if ui.button("复制诊断").clicked() {
                         ui.ctx().copy_text(diagnostic.to_owned());
                     }
                     ui.separator();
@@ -3332,6 +3344,20 @@ fn selected_level_color(level: Level, dark: bool, selected: bool) -> Color32 {
     }
 }
 
+// Important metadata remains legible without brightening disabled controls or hints.
+fn readable_metadata_color(visuals: &egui::Visuals) -> Color32 {
+    visuals.widgets.inactive.fg_stroke.color
+}
+
+// Destructive budget warnings need contrast on both panel backgrounds.
+fn budget_warning_color(visuals: &egui::Visuals) -> Color32 {
+    if visuals.dark_mode {
+        Color32::from_rgb(239, 190, 82)
+    } else {
+        Color32::from_rgb(130, 80, 0)
+    }
+}
+
 fn configure_style(ctx: &egui::Context, dark: bool) {
     ctx.set_theme(if dark {
         egui::ThemePreference::Dark
@@ -3362,7 +3388,7 @@ fn configure_style(ctx: &egui::Context, dark: bool) {
     });
 }
 
-fn configure_fonts(ctx: &egui::Context) {
+fn app_font_definitions() -> egui::FontDefinitions {
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert(
         APP_FONT_NAME.to_owned(),
@@ -3371,16 +3397,25 @@ fn configure_fonts(ctx: &egui::Context) {
         ))),
     );
 
-    for family in [FontFamily::Proportional, FontFamily::Monospace] {
-        fonts
-            .families
-            .entry(family)
-            .or_default()
-            .insert(0, APP_FONT_NAME.to_owned());
-    }
+    // Controls use egui's proportional Latin; Cascadia supplies CJK coverage.
+    // Log messages, identifiers and editable query text keep the exact old chain.
+    fonts
+        .families
+        .entry(FontFamily::Proportional)
+        .or_default()
+        .push(APP_FONT_NAME.to_owned());
+    fonts
+        .families
+        .entry(FontFamily::Monospace)
+        .or_default()
+        .insert(0, APP_FONT_NAME.to_owned());
 
     font_fallback::install(&mut fonts);
-    ctx.set_fonts(fonts);
+    fonts
+}
+
+fn configure_fonts(ctx: &egui::Context) {
+    ctx.set_fonts(app_font_definitions());
 }
 
 fn highlighted_message(
@@ -3584,3 +3619,6 @@ mod reading_regressions;
 
 #[cfg(test)]
 mod copy_regressions;
+
+#[cfg(test)]
+mod typography_regressions;

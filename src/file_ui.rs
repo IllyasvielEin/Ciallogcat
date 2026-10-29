@@ -111,7 +111,7 @@ impl Snapshot {
 
 impl CiallogcatApp {
     pub(super) fn file_menu(&mut self, ui: &mut egui::Ui) {
-        ui.menu_button("File", |ui| {
+        ui.menu_button("文件", |ui| {
             let ready = !self.files.busy();
             if ui
                 .add_enabled(ready, egui::Button::new("打开日志…    Ctrl+O"))

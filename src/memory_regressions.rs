@@ -242,24 +242,24 @@ fn applying_budget_trims_once_and_keeps_only_applied_config() {
 fn budget_cancel_escape_outside_and_reopen_discard_draft_using_real_input() {
     let (ctx, app) = app(10);
     let mut h = Harness::from_app(ctx, app, egui::vec2(1280.0, 820.0));
-    h.click_rendered_label("View");
+    h.click_rendered_label("视图");
     h.app.memory_limit_draft = Some(16);
-    h.click_rendered_label("Cancel budget");
+    h.click_rendered_label("取消修改");
     assert_eq!(h.app.memory_limit_mib, 300);
     assert_eq!(h.app.entries.len(), 10);
-    h.click_rendered_label("View");
+    h.click_rendered_label("视图");
     assert_eq!(h.app.memory_limit_draft, Some(300));
     h.app.memory_limit_draft = Some(32);
     h.key(egui::Key::Escape, egui::Modifiers::NONE);
     assert!(h.app.memory_limit_draft.is_none());
-    h.click_rendered_label("View");
+    h.click_rendered_label("视图");
     h.app.memory_limit_draft = Some(64);
     h.click(egui::pos2(800.0, 500.0));
     assert!(h.app.memory_limit_draft.is_none());
-    h.click_rendered_label("View");
+    h.click_rendered_label("视图");
     assert_eq!(h.app.memory_limit_draft, Some(300));
     h.app.memory_limit_draft = Some(64);
-    h.click_rendered_label("Apply budget");
+    h.click_rendered_label("应用预算");
     assert_eq!(h.app.memory_limit_mib, 64);
     assert_eq!(h.app.app_config().memory_limit_mib, 64);
 }
@@ -327,11 +327,11 @@ fn all_four_copy_entrypoints_block_pending_membership_and_copy_only_on_retry() {
         assert!(
             h.labels
                 .iter()
-                .any(|(label, _)| label == "Selected log · checking filter…")
+                .any(|(label, _)| label == "日志详情 · 正在检查筛选…")
         );
         match route {
             0 => h.frame(vec![egui::Event::Copy]),
-            1 => click_copy_label(&mut h, "Copy"),
+            1 => click_copy_label(&mut h, "复制"),
             2 | 3 => {
                 open_row_menu(&mut h);
                 click_copy_label(
@@ -450,7 +450,7 @@ fn held_pointer_target_stays_at_same_screen_position_through_prefix_trim() {
 fn budget_value_real_typing_and_dragging_do_not_apply_or_close_the_menu() {
     let (ctx, app) = app(10);
     let mut h = Harness::from_app(ctx, app, egui::vec2(1280.0, 820.0));
-    h.click_rendered_label("View");
+    h.click_rendered_label("视图");
     h.click_rendered_label("300");
     assert!(
         h.app.memory_limit_draft.is_some(),
@@ -460,8 +460,8 @@ fn budget_value_real_typing_and_dragging_do_not_apply_or_close_the_menu() {
     assert_eq!(h.app.memory_limit_draft, Some(16));
     assert_eq!(h.app.memory_limit_mib, 300);
     assert_eq!(h.app.app_config().memory_limit_mib, 300);
-    h.click_rendered_label("Cancel budget");
-    h.click_rendered_label("View");
+    h.click_rendered_label("取消修改");
+    h.click_rendered_label("视图");
     assert_eq!(h.app.memory_limit_draft, Some(300));
     let pos = h
         .labels
@@ -475,14 +475,14 @@ fn budget_value_real_typing_and_dragging_do_not_apply_or_close_the_menu() {
     let dragged = h.app.memory_limit_draft.expect("drag must keep View open");
     assert!(dragged < 300);
     assert_eq!(h.app.memory_limit_mib, 300);
-    h.click_rendered_label("Cancel budget");
-    h.click_rendered_label("View");
+    h.click_rendered_label("取消修改");
+    h.click_rendered_label("视图");
     h.click_rendered_label("300");
     h.frame(vec![egui::Event::Text("32".to_owned())]);
     h.key(egui::Key::Enter, egui::Modifiers::NONE);
     assert_eq!(h.app.memory_limit_draft, Some(32));
     assert_eq!(h.app.memory_limit_mib, 300);
-    h.click_rendered_label("Apply budget");
+    h.click_rendered_label("应用预算");
     assert_eq!(h.app.memory_limit_mib, 32);
     assert_eq!(h.app.app_config().memory_limit_mib, 32);
 }

@@ -150,13 +150,13 @@ fn two_toolbar_rows_keep_tag_level_capture_and_file_controls_inside_small_window
     let mut h = Harness::new(false);
     h.resize(900.0, 560.0);
     for label in [
-        "Device",
+        "设备",
         "↻ 刷新",
         "开始采集",
         "断开",
         "采集设置",
-        "File",
-        "View",
+        "文件",
+        "视图",
         "筛选方案",
         "清空视图",
         "暂停跟随",
@@ -193,13 +193,13 @@ fn two_toolbar_rows_keep_tag_level_capture_and_file_controls_inside_small_window
     assert!(query.width() >= 180.0 && package.width() >= 130.0);
     assert!((package.center().y - query.center().y).abs() < 1.0);
     let labels = [
-        "Device",
+        "设备",
         "↻ 刷新",
         "开始采集",
         "断开",
         "采集设置",
-        "File",
-        "View",
+        "文件",
+        "视图",
         "筛选方案",
         "清空视图",
         "暂停跟随",
@@ -439,7 +439,7 @@ fn context_anchor_stays_fully_visible_after_notice_reduces_table_height() {
     let details_top = h
         .label_bounds
         .iter()
-        .find(|(text, _)| text == "Selected log")
+        .find(|(text, _)| text == "日志详情")
         .unwrap()
         .1
         .min
@@ -735,7 +735,7 @@ fn tag_only_empty_results_name_the_active_filter_at_small_window_size() {
             .label_bounds
             .iter()
             .find(|(label, _)| {
-                label.starts_with("No matching logs.") && label.contains("Tag include/exclude")
+                label.starts_with("没有匹配日志。") && label.contains("Tag 包含/排除")
             })
             .expect("empty-result guidance must name both Tag conditions");
         assert!(bounds.min.x >= 0.0 && bounds.max.x <= 900.0);
@@ -759,9 +759,9 @@ fn no_device_empty_guidance_exposes_the_working_offline_open_shortcut() {
             .label_bounds
             .iter()
             .find(|(label, _)| {
-                label.contains("native JSONL")
-                    && label.contains("File / Ctrl+O")
-                    && label.contains("no device required")
+                label.contains("原生 JSONL")
+                    && label.contains("文件 / Ctrl+O")
+                    && label.contains("无需设备")
             })
             .expect("empty-state guidance must expose offline file reading");
         assert!(bounds.min.x >= 0.0 && bounds.max.x <= 900.0);
