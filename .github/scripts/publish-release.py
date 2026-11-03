@@ -49,6 +49,22 @@ def check_draft(release: dict):
         raise ValueError("release is already public; published assets will not be overwritten")
 
 
+def find_release(repo: str, tag: str):
+    # GET /releases/tags/{tag} only finds published releases. Authenticated
+    # listing includes drafts; use the release ID for every subsequent read.
+    matches = []
+    page = 1
+    while True:
+        releases = api(f"repos/{repo}/releases?per_page=100&page={page}")
+        matches.extend(release for release in releases if release["tag_name"] == tag)
+        if len(releases) < 100:
+            break
+        page += 1
+    if len(matches) > 1:
+        raise ValueError("multiple releases use the requested tag")
+    return matches[0] if matches else None
+
+
 def check_remote_assets(repo: str, release: dict, expected: set[str], *, complete: bool):
     # At most 12 assets are valid. A first page of 100 is already an error.
     assets = api(f"repos/{repo}/releases/{release['id']}/assets?per_page=100")
@@ -71,16 +87,18 @@ def publish(root: Path, directory: Path, tag: str, repo: str, commit: str):
     paths = validate_assets(directory, plan)
     expected = expected_assets(plan)
     verify_tag(repo, tag, commit)
-    endpoint = f"repos/{repo}/releases/tags/{quote(tag, safe='')}"
     latest_endpoint = f"repos/{repo}/releases/latest"
     previous_latest = api(latest_endpoint, missing_ok=True)
-    release = api(endpoint, missing_ok=True)
+    release = find_release(repo, tag)
     title = f"Ciallogcat{' CLI' if plan['scope'] == 'cli' else ''} {tag}"
     notes = str(root / "docs/releases" / f"{tag}.md")
     if release is None:
         gh("release", "create", tag, "--repo", repo, "--verify-tag", "--draft",
            "--latest=false", "--title", title, "--notes-file", notes)
-        release = api(endpoint)
+        release = find_release(repo, tag)
+        if release is None:
+            raise ValueError("created release draft is not visible")
+    endpoint = f"repos/{repo}/releases/{release['id']}"
     check_draft(release)
     check_remote_assets(repo, release, expected, complete=False)
     gh("release", "edit", tag, "--repo", repo, "--title", title, "--notes-file", notes)

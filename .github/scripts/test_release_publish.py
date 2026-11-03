@@ -19,7 +19,7 @@ class PublishTests(ReleaseFixture):
     def setUp(self):
         super().setUp()
         self.commit = "a" * 40
-        self.release = {"id": 7, "draft": True}
+        self.release = {"id": 7, "draft": True, "tag_name": "v1.3.1"}
         self.remote = {}
         self.commands = []
         self.tag_commit = self.commit
@@ -36,6 +36,10 @@ class PublishTests(ReleaseFixture):
     def api(self, path, *, missing_ok=False):
         if path.endswith("/releases/latest"):
             return self.latest
+        if "/releases?" in path:
+            return [self.release] if self.release else []
+        if "/releases/tags/" in path:
+            raise AssertionError("drafts must be read by ID, not by tag")
         if "/git/ref/tags/" in path:
             return {"object": {"type": "tag", "sha": "b" * 40}}
         if "/git/tags/" in path:
@@ -49,7 +53,7 @@ class PublishTests(ReleaseFixture):
     def gh(self, *args):
         self.commands.append(args)
         if args[1] == "create":
-            self.release = {"id": 7, "draft": True}
+            self.release = {"id": 7, "draft": True, "tag_name": args[2]}
         elif args[1] == "upload":
             for path in self.dist.iterdir():
                 self.remote[path.name] = path.read_bytes()
@@ -145,6 +149,7 @@ class PublishTests(ReleaseFixture):
         version = "1.4.0-rc.1"
         tag = f"v{version}"
         self.plan = {"tag": tag, "version": version, "scope": "full"}
+        self.release["tag_name"] = tag
         for manifest in ("Cargo.toml", "Cargo.lock"):
             path = self.root / manifest
             path.write_text(path.read_text().replace("1.3.1", version))
@@ -191,6 +196,19 @@ class PublishTests(ReleaseFixture):
 
 
 class ApiTests(unittest.TestCase):
+    def test_draft_discovery_paginates_and_rejects_ambiguous_tags(self):
+        draft = {"id": 7, "tag_name": "v1.3.1", "draft": True}
+        first_page = [{"id": n, "tag_name": f"v0.0.{n}"} for n in range(100)]
+        with patch.object(publisher, "api", side_effect=[first_page, [draft]]) as api:
+            self.assertEqual(publisher.find_release("owner/repo", "v1.3.1"), draft)
+            self.assertIn("page=2", api.call_args.args[0])
+        with patch.object(publisher, "api", return_value=[draft, draft]):
+            with self.assertRaisesRegex(ValueError, "multiple releases"):
+                publisher.find_release("owner/repo", "v1.3.1")
+        with patch.object(publisher, "api", side_effect=RuntimeError("API failure")):
+            with self.assertRaisesRegex(RuntimeError, "API failure"):
+                publisher.find_release("owner/repo", "v1.3.1")
+
     def test_only_an_http_404_means_missing_release(self):
         for code in (401, 403, 500):
             response = subprocess.CompletedProcess([], 1, f"HTTP/2.0 {code} Error\n\n{{}}", "API error")
