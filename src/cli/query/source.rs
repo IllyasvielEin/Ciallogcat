@@ -322,10 +322,35 @@ impl Source {
             // Include preceding LF so an exactly maximal footer can be located.
             let start = source
                 .previous_line_start(upper.offset, source.data_start, MAX_RECORD_BYTES + 1)?
-                .ok_or_else(|| invalid("native artifact lacks a bounded artifact_end"))?;
+                .ok_or_else(|| {
+                    invalid(format!(
+                        "native artifact lacks a bounded artifact_end at byte {}; file may be unfinished or truncated; --file requires a finalized artifact; use --session-dir for active capture",
+                        upper.offset
+                    ))
+                })?;
             let bytes = source.line(start, upper.offset, MAX_RECORD_BYTES)?;
-            let footer =
-                document::decode_end(&bytes, &source.header).map_err(|e| invalid(e.to_string()))?;
+            #[derive(Deserialize)]
+            struct Envelope {
+                #[serde(rename = "type")]
+                kind: Option<String>,
+            }
+            let envelope: Envelope = serde_json::from_slice(&bytes).map_err(|e| {
+                invalid(format!(
+                    "invalid final record at byte {start}; expected artifact_end; file may be unfinished or truncated; --file requires a finalized artifact; use --session-dir for active capture: {e}"
+                ))
+            })?;
+            if envelope.kind.as_deref() != Some("artifact_end") {
+                return Err(invalid(format!(
+                    "native artifact lacks artifact_end at byte {start}: found record type {}; file may be unfinished or truncated; --file requires a finalized artifact; use --session-dir for active capture",
+                    super::preview(envelope.kind.as_deref().unwrap_or("<missing>"), 96)
+                )));
+            }
+            let footer = document::decode_end(&bytes, &source.header).map_err(|e| {
+                invalid(format!(
+                    "invalid artifact_end at byte {start}: {}",
+                    e.message
+                ))
+            })?;
             source.upper.seq = footer.last_seq.or(Some(0));
             source.fence = source.upper;
             source.status["capture_completeness"] = json!(footer.capture.completeness);

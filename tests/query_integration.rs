@@ -1598,6 +1598,93 @@ fn native_large_footer_tail_obeys_watermarks_and_cursor_anchors() {
 }
 
 #[test]
+fn unfinished_file_reports_missing_footer_while_session_prefix_remains_queryable() {
+    for rows in [vec![], vec![(1, "iframe-login")]] {
+        let s = Sandbox::new();
+        let dir = s.session(&rows);
+        let file = s.path("session/logs.jsonl");
+        let bytes = fs::read(&file).unwrap();
+        let header_len = native_fixture::header_bytes().len();
+        document::decode_header(&bytes[..header_len]).unwrap();
+        let expected_offset = if rows.is_empty() {
+            bytes.len()
+        } else {
+            header_len
+        };
+        let (ok, error, _) = s.run(&["query", "--file", &file]);
+        assert!(!ok);
+        assert_eq!(error["error"]["code"], "invalid_source");
+        let message = error["error"]["message"].as_str().unwrap();
+        for expected in [
+            "artifact_end",
+            &format!("at byte {expected_offset}"),
+            "unfinished or truncated",
+            "--file requires a finalized artifact",
+            "--session-dir",
+        ] {
+            assert!(message.contains(expected), "{message}");
+        }
+        assert!(
+            !message.contains("missing field `artifact_id`"),
+            "{message}"
+        );
+        if !rows.is_empty() {
+            assert!(message.contains("found record type entry"), "{message}");
+        }
+
+        let page = s.ok(&["query", "--session-dir", &dir]);
+        assert_eq!(records(&page), rows.iter().map(|r| r.0).collect::<Vec<_>>());
+        assert_eq!(page["artifact_finalized"], false);
+
+        let encoded_rows: Vec<_> = rows
+            .iter()
+            .map(|&(seq, message)| native_fixture::row(seq, message, Some(1234)))
+            .collect();
+        OpenOptions::new()
+            .append(true)
+            .open(&file)
+            .unwrap()
+            .write_all(&native_fixture::footer(&encoded_rows))
+            .unwrap();
+        let page = s.ok(&["query", "--file", &file]);
+        assert_eq!(records(&page), rows.iter().map(|r| r.0).collect::<Vec<_>>());
+        assert_eq!(page["artifact_finalized"], true);
+    }
+}
+
+#[test]
+fn invalid_file_footer_reports_its_actual_byte_offset() {
+    let s = Sandbox::new();
+    let row = native_fixture::row(1, "iframe-login", Some(1234));
+    let prefix = native_fixture::bytes(std::slice::from_ref(&row), false);
+    let mut footer: Value = serde_json::from_slice(&native_fixture::footer(&[row])).unwrap();
+    footer.as_object_mut().unwrap().remove("artifact_id");
+    for (tail, expected) in [
+        (native_fixture::line(&footer), "invalid artifact_end"),
+        (
+            b"{\"type\":\"artifact_end\"".to_vec(),
+            "invalid final record",
+        ),
+    ] {
+        let file = s.path("invalid-footer.jsonl");
+        fs::write(&file, [&prefix[..], &tail[..]].concat()).unwrap();
+        let (ok, error, _) = s.run(&["query", "--file", &file]);
+        assert!(!ok);
+        assert_eq!(error["error"]["code"], "invalid_source");
+        let message = error["error"]["message"].as_str().unwrap();
+        assert!(message.contains(expected), "{message}");
+        assert!(
+            message.contains(&format!("at byte {}", prefix.len())),
+            "{message}"
+        );
+        assert!(!message.contains("line 0, byte 0"), "{message}");
+        if expected == "invalid final record" {
+            assert!(message.contains("--session-dir"), "{message}");
+        }
+    }
+}
+
+#[test]
 fn active_partial_watermark_and_inconsistent_native_footer_are_errors() {
     let s = Sandbox::new();
     let dir = s.session(&[(1, "one")]);
