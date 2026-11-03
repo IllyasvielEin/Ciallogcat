@@ -14,8 +14,32 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  preflight:
+    name: Validate release plan
+    runs-on: ubuntu-24.04
+    outputs:
+      scope: ${{ steps.plan.outputs.scope }}
+      version: ${{ steps.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Release policy tests
+        run: python -B -m unittest discover -s .github/scripts -p 'test_release_*.py'
+      - name: Validate version, scope and notes
+        id: plan
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: python .github/scripts/release_policy.py --tag "$RELEASE_TAG"
+
   build:
     name: Check and package (${{ matrix.platform }})
+    needs: preflight
+    if: needs.preflight.outputs.scope == 'full'
     strategy:
       fail-fast: false
       matrix:
@@ -27,6 +51,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
@@ -36,18 +63,6 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Validate version tag
-        shell: pwsh
-        env:
-          RELEASE_TAG: ${{ github.ref_name }}
-        run: |
-          $metadata = cargo metadata --locked --no-deps --format-version 1 | ConvertFrom-Json
-          if ($LASTEXITCODE -ne 0) { throw 'Cargo metadata failed' }
-          $version = ($metadata.packages | Where-Object name -eq 'ciallogcat').version
-          $shortTag = if ($version -match '^([0-9]+)\.([0-9]+)\.0$') { "v$($Matches[1]).$($Matches[2])" } else { $null }
-          if ($env:RELEASE_TAG -cne "v$version" -and $env:RELEASE_TAG -cne $shortTag) {
-            throw "Tag $env:RELEASE_TAG must match Cargo version v$version"
-          }
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
@@ -83,6 +98,7 @@ jobs:
 
   cli:
     name: Check and package headless CLI (${{ matrix.platform }})
+    needs: preflight
     strategy:
       fail-fast: false
       matrix:
@@ -94,6 +110,12 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
       - name: Install Rust (no GUI dependencies)
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -112,12 +134,17 @@ jobs:
         run: cargo build --locked --release --no-default-features --bin ciallogcat-cli
       - name: CLI smoke test
         shell: pwsh
+        env:
+          EXPECTED_VERSION: ${{ needs.preflight.outputs.version }}
         run: |
           $binary = if ($IsWindows) { './target/release/ciallogcat-cli.exe' } else { './target/release/ciallogcat-cli' }
           & $binary --help
           if ($LASTEXITCODE -ne 0) { throw 'CLI help smoke test failed' }
-          & $binary --version
+          $reported = & $binary --version
           if ($LASTEXITCODE -ne 0) { throw 'CLI version smoke test failed' }
+          if (($reported | ConvertFrom-Json).version -cne $env:EXPECTED_VERSION) {
+            throw 'CLI binary version does not match the release plan'
+          }
       - name: Install CLI Debian packaging tools
         if: runner.os == 'Linux'
         run: |
@@ -151,38 +178,52 @@ jobs:
 
   release:
     name: Publish GitHub Release
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
-    needs: [build, cli]
+    needs: [preflight, build, cli]
+    if: >-
+      ${{
+        always() && !cancelled() &&
+        github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') &&
+        needs.preflight.result == 'success' && needs.cli.result == 'success' &&
+        (
+          (needs.preflight.outputs.scope == 'cli' && needs.build.result == 'skipped') ||
+          (needs.preflight.outputs.scope == 'full' && needs.build.result == 'success')
+        )
+      }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
       - uses: actions/download-artifact@v7
         with:
+          name: cli-linux-x86_64
           path: dist
-          merge-multiple: true
+      - uses: actions/download-artifact@v7
+        with:
+          name: cli-windows-x86_64
+          path: dist
+      - uses: actions/download-artifact@v7
+        if: needs.preflight.outputs.scope == 'full'
+        with:
+          name: linux-x86_64
+          path: dist
+      - uses: actions/download-artifact@v7
+        if: needs.preflight.outputs.scope == 'full'
+        with:
+          name: windows-x86_64
+          path: dist
       - name: Publish
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_COMMIT: ${{ github.sha }}
         run: |
-          set -euo pipefail
-          cd dist
-          sha256sum --check ./*.sha256
-          prerelease=false
-          if [[ "$RELEASE_TAG" == *-* ]]; then prerelease=true; fi
-          if gh release view "$RELEASE_TAG" --json isDraft > release-state.json; then
-            if [[ "$(jq -r '.isDraft' release-state.json)" != true ]]; then
-              echo 'Release is already public; published assets will not be overwritten.' >&2
-              exit 1
-            fi
-          else
-            gh release create "$RELEASE_TAG" --verify-tag --draft \
-              --title "Ciallogcat $RELEASE_TAG" --generate-notes \
-              --notes-file "$GITHUB_WORKSPACE/docs/releases/${RELEASE_TAG}.md"
-          fi
-          gh release upload "$RELEASE_TAG" ./*.zip ./*.tar.gz ./*.deb ./*.sha256 --clobber
-          gh release edit "$RELEASE_TAG" --draft=false --prerelease="$prerelease"
+          python .github/scripts/publish-release.py --tag "$RELEASE_TAG" --commit "$RELEASE_COMMIT"

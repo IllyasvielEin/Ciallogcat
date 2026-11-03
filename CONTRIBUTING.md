@@ -23,6 +23,7 @@ python3 -B -m unittest discover -s tools -p test_transport_benchmark.py
 cargo fmt --manifest-path tools/proto-codegen/Cargo.toml --check
 cargo run --locked --manifest-path tools/proto-codegen/Cargo.toml -- --check
 python3 -B -m unittest discover -s .github/scripts -p test_package_cli.py
+python3 -B -m unittest discover -s .github/scripts -p 'test_release_*.py'
 ```
 
 [Checks 工作流](.github/workflows/checks.yml) 在 Pull request、推送 main 和手动触发时运行三个作业：Linux headless 测试与 Clippy（含 Python 自测）、Linux GUI 行为测试与默认功能 Clippy，以及 Windows 默认功能测试与 Clippy、headless CLI 构建及冒烟检查。格式检查只在 Linux headless 作业运行一次。作业有独立超时，同一分支或 PR 的新检查取消旧检查；失败时保留已有的受控测试诊断文件七天。

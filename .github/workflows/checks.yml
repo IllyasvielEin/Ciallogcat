@@ -55,6 +55,8 @@ jobs:
           cargo run --locked --manifest-path tools/proto-codegen/Cargo.toml -- --check
       - name: CLI packaging tests
         run: python -B -m unittest discover -s .github/scripts -p test_package_cli.py
+      - name: Release policy tests
+        run: python -B -m unittest discover -s .github/scripts -p 'test_release_*.py'
       - name: Headless tests
         run: cargo test --locked --no-default-features --all-targets
       - name: Headless Clippy
