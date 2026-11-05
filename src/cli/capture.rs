@@ -16,6 +16,102 @@ use std::sync::{
 // aggregate footer (never unbounded stderr or a list of every reconnect).
 const FOOTER_RESERVE: u64 = 4096;
 const FOOTER_DIAGNOSTIC_JSON_BYTES: usize = 1024;
+const STOP_ADMISSION_WINDOW: Duration = Duration::from_secs(1);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Confirmation {
+    Confirmed,
+    Unconfirmed,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum DrainResult {
+    Completed,
+    Deadline,
+    Budget,
+    Failed,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+pub(super) struct Shutdown {
+    trigger: String,
+    cleanup: Confirmation,
+    footer_write: Confirmation,
+    drain: DrainResult,
+}
+
+struct StopState {
+    trigger: String,
+    admission_until: Option<Instant>,
+    deadline: Instant,
+    result: DrainResult,
+}
+
+impl StopState {
+    fn new(trigger: &str, now: Instant) -> Self {
+        Self {
+            trigger: trigger.into(),
+            admission_until: matches!(trigger, "interrupted" | "stopped" | "duration_limit")
+                .then_some(now + STOP_ADMISSION_WINDOW),
+            deadline: now + Duration::from_secs(5),
+            result: match trigger {
+                "failed" => DrainResult::Failed,
+                "max_entries" | "max_bytes" => DrainResult::Budget,
+                _ => DrainResult::Completed,
+            },
+        }
+    }
+
+    fn admit(&mut self, now: Instant, failed: bool, at_limit: bool) -> bool {
+        let result = if failed {
+            Some(DrainResult::Failed)
+        } else if at_limit {
+            Some(DrainResult::Budget)
+        } else if self.admission_until.is_some_and(|end| now >= end) {
+            Some(DrainResult::Deadline)
+        } else {
+            None
+        };
+        if let Some(result) = result {
+            self.result = self.result.max(result);
+            self.admission_until = None;
+        }
+        self.admission_until.is_some()
+    }
+
+    fn finish(
+        mut self,
+        cleanup_confirmed: bool,
+        footer_enqueued: bool,
+        writer_confirmed: bool,
+        failed: bool,
+        at_limit: bool,
+    ) -> Shutdown {
+        // Waiting for the footer must not extend or retroactively expire the
+        // admission phase. Only new failures/limits can worsen its result here.
+        if failed {
+            self.result = DrainResult::Failed;
+        } else if at_limit {
+            self.result = self.result.max(DrainResult::Budget);
+        }
+        Shutdown {
+            trigger: self.trigger,
+            cleanup: if cleanup_confirmed {
+                Confirmation::Confirmed
+            } else {
+                Confirmation::Unconfirmed
+            },
+            footer_write: if footer_enqueued && writer_confirmed {
+                Confirmation::Confirmed
+            } else {
+                Confirmation::Unconfirmed
+            },
+            drain: self.result,
+        }
+    }
+}
 
 fn footer_diagnostic(message: &str) -> (&str, bool) {
     // Count the encoded JSON string, including its quotes. Control characters
@@ -44,6 +140,41 @@ mod tests;
 struct Packet {
     bytes: Vec<u8>,
     seq: Option<u64>,
+}
+
+/// Commit encoder state only once the corresponding packet has a writer slot.
+/// Closing admission releases pending immediately, so a stalled writer cannot
+/// prevent the consumer from draining the backend and receiving Exited.
+fn submit_pending(
+    admit: bool,
+    pending: &mut Option<(Packet, StreamEncoder)>,
+    encoder: &mut StreamEncoder,
+    write_tx: &mpsc::SyncSender<Packet>,
+    admitted_bytes: &mut u64,
+    admitted_entries: &mut u64,
+) -> Result<()> {
+    let Some((packet, next_encoder)) = pending.take() else {
+        return Ok(());
+    };
+    if !admit {
+        return Ok(());
+    }
+    let size = packet.bytes.len() as u64;
+    match write_tx.try_send(packet) {
+        Ok(()) => {
+            *encoder = next_encoder;
+            *admitted_bytes += size;
+            *admitted_entries += 1;
+            Ok(())
+        }
+        Err(TrySendError::Full(packet)) => {
+            *pending = Some((packet, next_encoder));
+            Ok(())
+        }
+        Err(TrySendError::Disconnected(_)) => {
+            Err(error("output_error", "output writer disconnected", 5))
+        }
+    }
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Progress {
@@ -86,6 +217,57 @@ pub(super) fn run(
     dir: Option<&Path>,
     writer: Box<dyn Write + Send>,
 ) -> Result<Status> {
+    let interrupted = Arc::new(AtomicBool::new(false));
+    let signal_flag = Arc::clone(&interrupted);
+    ctrlc::set_handler(move || signal_flag.store(true, Ordering::Release)).map_err(io_error)?;
+    run_capture(
+        &config,
+        dir,
+        writer,
+        interrupted,
+        |id, target, tx, cancelled, deadline| {
+            adb::start_logcat_with_scope(
+                &config.adb,
+                &target.serial,
+                &target.buffers,
+                id,
+                tx,
+                WakeSignal::default(),
+                &config.scope,
+                adb::LogcatStartOptions {
+                    transport: config.transport,
+                    deadline: Some(deadline),
+                    cancelled: Some(cancelled),
+                },
+            )
+        },
+    )
+}
+
+trait CaptureHandle {
+    fn stop(&mut self);
+}
+impl CaptureHandle for adb::LogcatHandle {
+    fn stop(&mut self) {
+        adb::LogcatHandle::stop(self);
+    }
+}
+
+/// The real capture loop also accepts controlled streams/writers in tests, so
+/// cancellation and finalization races exercise the production state machine.
+fn run_capture<H: CaptureHandle>(
+    config: &Config,
+    dir: Option<&Path>,
+    writer: Box<dyn Write + Send>,
+    interrupted: Arc<AtomicBool>,
+    mut start_stream: impl FnMut(
+        u64,
+        &Target,
+        mpsc::SyncSender<BackendEvent>,
+        &dyn Fn() -> bool,
+        Instant,
+    ) -> std::result::Result<H, String>,
+) -> Result<Status> {
     let start = Instant::now();
     let deadline = start + Duration::from_secs(config.duration_secs);
     let mut session = Session::new();
@@ -123,10 +305,6 @@ pub(super) fn run(
     status.visible_end = Some(VisibleEnd::default());
     status.capture_completeness = Some("unknown".into());
     status.stream_interruptions = Some(0);
-    let interrupted = Arc::new(AtomicBool::new(false));
-    let signal_flag = Arc::clone(&interrupted);
-    ctrlc::set_handler(move || signal_flag.store(true, Ordering::Release)).map_err(io_error)?;
-
     let visible = Arc::new(Mutex::new(Progress::default()));
     let published = Arc::clone(&visible);
     let (write_tx, write_rx) = mpsc::sync_channel::<Packet>(1);
@@ -154,9 +332,8 @@ pub(super) fn run(
         false,
         start,
     );
-    let mut child: Option<adb::LogcatHandle> = None;
-    let mut stopping = false;
-    let mut stop_deadline = None;
+    let mut child: Option<H> = None;
+    let mut stopping: Option<StopState> = None;
     let mut failure = None;
     let mut writer_done = None;
     let mut received = 0u64;
@@ -192,7 +369,10 @@ pub(super) fn run(
                 Err(mpsc::TryRecvError::Empty) => (),
             }
         }
-        if !stopping {
+        if let Phase::Failed(message) = controller.status() {
+            failure.get_or_insert_with(|| error("adb_error", message, 4));
+        }
+        if stopping.is_none() {
             let reason = if failure.is_some() {
                 Some("failed")
             } else if interrupted.load(Ordering::Acquire) {
@@ -205,40 +385,39 @@ pub(super) fn run(
                 status.reason.as_deref()
             };
             if let Some(reason) = reason {
+                let stop = StopState::new(reason, tick);
                 status.reason = Some(reason.to_owned());
-                stopping = true;
-                stop_deadline = Some(tick + Duration::from_secs(5));
-                pending = None;
+                stopping = Some(stop);
                 controller.request(Intent::Closed, false, tick);
                 if let Some(child) = &mut child {
                     child.stop();
                 }
             }
         }
-        if let Some((packet, next_encoder)) = pending.take() {
-            let size = packet.bytes.len() as u64;
-            match write_tx.try_send(packet) {
-                Ok(()) => {
-                    encoder = next_encoder;
-                    admitted_bytes += size;
-                    admitted_entries += 1;
-                    if admitted_entries >= config.max_entries {
-                        status.reason = Some("max_entries".into());
-                        status.omitted_by_limit = true;
-                    }
-                }
-                Err(TrySendError::Full(packet)) => pending = Some((packet, next_encoder)),
-                Err(TrySendError::Disconnected(_)) => {
-                    failure.get_or_insert_with(|| {
-                        error("output_error", "output writer disconnected", 5)
-                    });
-                }
-            }
+        let admit = stopping.as_mut().map_or_else(
+            || failure.is_none() && !status.omitted_by_limit,
+            |stop| stop.admit(tick, failure.is_some(), status.omitted_by_limit),
+        );
+        if let Err(e) = submit_pending(
+            admit,
+            &mut pending,
+            &mut encoder,
+            &write_tx,
+            &mut admitted_bytes,
+            &mut admitted_entries,
+        ) {
+            failure.get_or_insert(e);
         }
-        if stopping && controller.active_id().is_none() {
+        if admitted_entries >= config.max_entries {
+            if stopping.is_none() {
+                status.reason = Some("max_entries".into());
+            }
+            status.omitted_by_limit = true;
+        }
+        if stopping.is_some() && controller.active_id().is_none() && pending.is_none() {
             break;
         }
-        if stop_deadline.is_some_and(|end| tick >= end) {
+        if stopping.as_ref().is_some_and(|stop| tick >= stop.deadline) {
             failure.get_or_insert_with(|| {
                 error(
                     "adb_error",
@@ -262,20 +441,7 @@ pub(super) fn run(
             let cancelled = || {
                 interrupted.load(Ordering::Acquire) || dir.is_some_and(|d| d.join("stop").exists())
             };
-            match adb::start_logcat_with_scope(
-                &config.adb,
-                &target.serial,
-                &target.buffers,
-                id,
-                tx.clone(),
-                WakeSignal::default(),
-                &config.scope,
-                adb::LogcatStartOptions {
-                    transport: config.transport,
-                    deadline: Some(deadline),
-                    cancelled: Some(&cancelled),
-                },
-            ) {
+            match start_stream(id, &target, tx.clone(), &cancelled, deadline) {
                 Ok(handle) => child = Some(handle),
                 Err(message) => {
                     if !cancelled() {
@@ -295,7 +461,7 @@ pub(super) fn run(
             Phase::Starting => status.state = "starting".into(),
             _ => (),
         }
-        if stopping {
+        if stopping.is_some() {
             status.state = "stopping".into();
         }
         if heartbeat.elapsed() >= Duration::from_millis(500) {
@@ -333,7 +499,13 @@ pub(super) fn run(
                 }
                 LogcatEvent::Entry(queued) => {
                     received += 1;
-                    if stopping || status.reason.is_some() || failure.is_some() {
+                    let admit = stopping.as_mut().map_or_else(
+                        || status.reason.is_none() && failure.is_none(),
+                        |stop| {
+                            stop.admit(Instant::now(), failure.is_some(), status.omitted_by_limit)
+                        },
+                    );
+                    if !admit {
                         continue;
                     }
                     let observed = queued.received_unix_ms();
@@ -349,7 +521,9 @@ pub(super) fn run(
                             pending = Some((Packet { bytes, seq }, next_encoder));
                         }
                         Ok(_) => {
-                            status.reason = Some("max_bytes".into());
+                            if stopping.is_none() {
+                                status.reason = Some("max_bytes".into());
+                            }
                             status.omitted_by_limit = true;
                         }
                         Err(e) => {
@@ -367,12 +541,16 @@ pub(super) fn run(
                     incomplete_proto_frame,
                 } => {
                     child = None;
-                    if !stopping && config.scope.is_dump() && code == Some(0) && message.is_none() {
+                    if stopping.is_none()
+                        && config.scope.is_dump()
+                        && code == Some(0)
+                        && message.is_none()
+                    {
                         controller.completed(id, Instant::now());
                         status.reason = Some("snapshot_complete".into());
                         continue;
                     }
-                    let unexpected = !stopping;
+                    let unexpected = stopping.is_none();
                     // Exited is emitted after reaping and both pipe readers.
                     let exit_message = message
                         .clone()
@@ -418,6 +596,7 @@ pub(super) fn run(
     }
     // Finalization describes the successfully admitted prefix. It never claims
     // complete device capture, and failed output intentionally has no footer.
+    let mut footer_enqueued = false;
     if writer_done.is_none() {
         let mut capture = CaptureStatus {
             state: if failure.is_some() {
@@ -467,14 +646,31 @@ pub(super) fn run(
             let (diagnostic, truncated) = footer_diagnostic(&diagnostic);
             capture.known_gaps.push(json!({"kind":"incomplete_frame_at_stop","cause":"concurrent_with_host_stop","diagnostic":diagnostic,"diagnostic_truncated":truncated}));
         }
+        if !status.diagnostics_complete {
+            capture.known_gaps.push(json!({
+                "kind":"host_stop_unconfirmed", "loss":"unknown"
+            }));
+        }
         match encoder.finish_bytes(capture).map_err(io_error) {
             Ok(bytes) if bytes.len() as u64 <= FOOTER_RESERVE => {
                 let mut packet = Packet { bytes, seq: None };
                 let until = Instant::now() + Duration::from_secs(2);
                 loop {
                     match write_tx.try_send(packet) {
-                        Ok(()) => break,
-                        Err(TrySendError::Disconnected(_)) => break,
+                        Ok(()) => {
+                            footer_enqueued = true;
+                            break;
+                        }
+                        Err(TrySendError::Disconnected(_)) => {
+                            failure.get_or_insert_with(|| {
+                                error(
+                                    "output_error",
+                                    "output writer disconnected before footer",
+                                    5,
+                                )
+                            });
+                            break;
+                        }
                         Err(TrySendError::Full(p)) => {
                             packet = p;
                             if Instant::now() >= until {
@@ -503,11 +699,12 @@ pub(super) fn run(
         }
     }
     drop(write_tx);
+    let mut writer_confirmed = false;
     match writer_done
         .map(Ok)
         .unwrap_or_else(|| done_rx.recv_timeout(Duration::from_secs(2)))
     {
-        Ok(Ok(())) => (),
+        Ok(Ok(())) => writer_confirmed = true,
         Ok(Err(e)) => {
             if failure.as_ref().is_none_or(|e| e.code == "output_error") {
                 failure = Some(error("output_error", e.to_string(), 5));
@@ -539,6 +736,15 @@ pub(super) fn run(
         status.reason = Some(e.code.into());
         status.error = Some(e.message.clone());
     }
+    if let Some(stop) = stopping {
+        status.shutdown = Some(stop.finish(
+            status.diagnostics_complete,
+            footer_enqueued,
+            writer_confirmed,
+            failure.is_some(),
+            status.omitted_by_limit,
+        ));
+    }
     if let Some(dir) = dir {
         write_status(dir, &mut status)?;
     }
@@ -553,7 +759,7 @@ pub(super) fn run(
         Err(failure.unwrap_or_else(|| {
             error(
                 "interrupted",
-                "capture interrupted; owned ADB child stopped",
+                "capture cancelled by user (SIGINT); owned ADB cleanup and document footer flush confirmed; exit 130 denotes cancellation",
                 130,
             )
         }))

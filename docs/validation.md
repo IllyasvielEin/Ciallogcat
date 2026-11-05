@@ -1,6 +1,20 @@
 # 验证状态与边界
 
-历史证据截至 2026-10-24；本次新主机自动检查更新于 2026-10-28。未完成项统一见 [TODO](../TODO.md)。
+以下记录区分本地自动检查与真实平台验收，未完成项统一见 [TODO](../TODO.md)。
+
+## 2026-11-06 CLI 反馈优化
+
+本地验收时源码为基于 `f495689`（1.3.1）的功能工作树，目标为 GitHub issue #3，随后准备 CLI-only 1.3.2；设计和审核取舍见 [优化方案](cli-feedback-plan-2026-11-05.md)。本地 Linux 使用 mock/可控 backend，没有连接 Android 设备。
+
+- headless 全量 `cargo test --locked --offline --no-default-features`：324 通过、1 忽略。
+- 默认配置全量 `cargo test --locked --offline`：476 通过、4 忽略；与 headless 覆盖重叠，不能相加。
+- 新增回归覆盖独立时间展示与严格时间过滤、同页混合时间可用性、固定快照与来源观察时点、最小响应预算、严格 SIGINT 130、停止时主机记录保留与实际主循环的有界背压。
+- 实际 capture 循环通过握手控制 writer 和后端队列，同时验证准入截止、条数/字节预算、dump 与停止并发、完整 footer 重读和确认统计；真实 footer flush 失败与等待超时不会被报告为写入确认或用户取消成功。
+- 默认与 headless 两套严格 Clippy、格式检查及 diff 空白检查通过。`cargo build --locked --offline --release --no-default-features --bin ciallogcat-cli` 通过，重建二进制 help 已核对新参数与摘要说明。
+- astra-medium 实现审核未发现明确产品缺陷；其指出的两项主循环测试缺口已补充验证。审核不代表设备无损或平台验收。
+- 发布准备将共用 Cargo package 升至 1.3.2，锁文件只改变本包版本；发布清单明确 `scope=cli`。21 项 release policy/publish 测试、8 项 CLI 打包测试及发布清单验证通过，1.3.2 CLI release 重建和版本冒烟通过。
+
+上述本地验收未运行 Windows 原生执行、Android 真机或 GUI 原生窗口。用户随后授权推送及 CLI-only 1.3.2 发布，远端结果以该提交的 GitHub Actions 和 Release 为准；本地结果不代替远端验收。以下历史测试数量与构建哈希分别属于各自的源码状态。
 
 ## 2026-10-28 新主机检查
 

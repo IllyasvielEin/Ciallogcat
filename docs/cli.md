@@ -80,7 +80,8 @@ was scanned, not that the device capture has no gaps or has stopped.
 Text is a normalized readable view (multiline messages remain multiline).
 By default its timestamp is readable local time, for example
 `2026-10-28 11:43:20.123+08:00`. `--time-basis` selects the same
-clock for display and filtering: `received` (default) or exact protobuf `device`.
+clock for filtering and, unless `--display-time` is supplied, display:
+`received` (default) or exact protobuf `device`.
 The summary always identifies the clock; normal default `received` timestamps omit
 a repetitive per-row label, while non-default `device` timestamps retain `[device]`.
 Exceptional missing-time/calendar/timezone labels remain explicit, including their clock. Text-only `--time-format readable|epoch|rfc3339` and
@@ -91,6 +92,25 @@ nanoseconds), never floating-point conversion. RFC3339 uses `T` and an explicit
 offset or `Z`; readable uses a space. The local zone is resolved once per command,
 including across `--all` pages, and observes the offset/DST at each instant.
 
+Use text-only `--display-time received|device|both` to select labeled display
+clocks independently of filtering. For example:
+
+```sh
+ciallogcat-cli query --file capture.jsonl --all --format text --display-time both
+```
+
+Received time is the persisted host observation, not device event time. Device
+display uses the exact protobuf epoch when available; otherwise it shows quoted
+`device-text` with `no-absolute-time; unconverted`, or an unavailable label.
+Yearless device text remains unconverted even with epoch/RFC3339 formatting.
+Both displays each side separately; either can be unavailable. No missing clock
+silently substitutes another, and a host/device difference is not application
+latency. Displaying device text does not make it usable for device time filtering.
+Omitting the option preserves the previous text prefix and clock selection.
+`text_presentation` reports the requested mode and effective per-record policy;
+`time_window.basis` continues to describe filtering. Display options can change
+between cursor pages without changing record identities or the matching set.
+
 If an old record has no selected absolute clock, text prints an explicit
 `received-time-unavailable` / `device-time-unavailable` label with quoted original
 device text; it does not guess a year or timezone. Time **filtering** still fails
@@ -98,7 +118,7 @@ explicitly when otherwise matching records lack that clock. Out-of-calendar-rang
 epochs retain their exact numeric value with `calendar-unavailable`. Failed local
 zone discovery explicitly falls back to UTC; historical second-resolution offsets
 that RFC3339 cannot represent are likewise shown in UTC with a note, not rounded.
-`--time-format`, `--timezone` and `--process-width` are rejected outside `--format text`; JSON/JSONL,
+`--display-time`, `--time-format`, `--timezone` and `--process-width` are rejected outside `--format text`; JSON/JSONL record data,
 the frozen protobuf projection, archives and desktop clipboard output are unchanged.
 
 Text process names default to a maximum of **32 display columns**, with a visible
@@ -531,8 +551,57 @@ capture may be truncated; it does not prove additional records existed.
 `discarded_entries` counts backend records received but not confirmed written,
 including structural and unparsed records. It
 excludes unread device records and cannot establish end-to-end
-losslessness. Diagnostics retain only the last line; `diagnostic_dropped_count`
+losslessness. After writer timeout, it is the count not confirmed written at the
+last observed progress, rather than a proven permanent loss count: the writer
+may still make progress. The footer's `host_discarded_records` instead counts
+received records not admitted to the writer. Diagnostics retain only the last line; `diagnostic_dropped_count`
 is the number of earlier received diagnostic lines no longer retained.
+
+SIGINT, cooperative `stop`, and the duration limit terminate the owned ADB child
+immediately, then admit complete buffered host records for up to one second.
+Entry/byte limits and the 4096-byte footer reserve still apply. Reaching a hard
+limit or an actual failure closes admission; admission timeout releases pending
+records so backend cleanup can continue despite a slow writer. No reconnection
+occurs after stopping. Duration is a stop trigger, not a device event-time cutoff.
+Normal dump completion needs no additional admission window. ADB/reader exit
+confirmation has a five-second limit, followed by up to two seconds each for
+footer enqueue and writer completion; this is not a five-second total shutdown
+guarantee. Unread device/queue losses may be unknown; protobuf partial-frame gaps
+and observed host discards remain reported.
+
+Final status includes `shutdown`:
+
+- `trigger`: the original stop reason, retained even if a later failure changes `reason`.
+- `cleanup`: `confirmed` means no owned ADB child/readers await cleanup, including
+  when no child was started. It does not confirm writer completion.
+- `drain`: `completed`, `deadline`, `budget`, or `failed` describes host record
+  admission, with failure taking precedence over budget, then deadline.
+- `footer_write`: `confirmed` requires successful footer enqueue and confirmed
+  writer completion/final flush. `unconfirmed` does not prove the footer is absent.
+
+Missing shutdown fields from older status files mean unavailable. These
+confirmations do not promise disk durability or device-side losslessness.
+Successful SIGINT cleanup may produce `state: "completed"`, a finalized document,
+and the `interrupted` error envelope with exit 130. That exit denotes user
+cancellation; actual ADB/output failures retain their own error and exit code.
+
+Query JSON and text/JSONL stderr summaries include bounded `evidence.summary` to
+explain three independent questions together:
+
+| Field | Meaning |
+| --- | --- |
+| `complete` | The current query boundary was scanned, even if capture is active. |
+| `artifact_finalized` | All records from the beginning and the footer were validated. Nonempty skipped history prevents this claim. |
+| `source_status.capture_completeness` | The source capture observation is `unknown` or `partial`; neither asserts losslessness. |
+
+For example, `complete: true`, `artifact_finalized: true`, capture completeness
+`unknown`, and `known_gap_count: 0` are consistent: the query and artifact are
+complete, source coverage remains unknown, and no known gaps were reported.
+An empty gap list does not prove a lossless capture. Missing gap information is
+unavailable rather than zero. Footer observations and session status are labeled
+with their observation times; current session status may be newer than the fixed
+snapshot and does not describe its exact coverage. A tail suffix can see a valid
+footer while leaving skipped nonempty history unverified.
 
 Errors on stderr have `type: "error"` and an `error` object containing `code`
 and `message`. Do not treat a successful status/query command as proof that
@@ -544,7 +613,8 @@ the capture itself succeeded: inspect its state and reason.
 - 4: ADB discovery, launch, or capture error
 - 5: filesystem or output error
 - 6: timeout
-- 130: foreground capture interrupted with Ctrl-C after owned ADB cleanup
+- 130: foreground capture cancelled with Ctrl-C after cleanup/finalization;
+  inspect final status for confirmation, rather than interpreting 130 as artifact corruption
 
 Help is human-readable text; version output is JSON. Scripts should parse JSON
 fields rather than match diagnostic prose.

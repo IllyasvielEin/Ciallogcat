@@ -2,19 +2,23 @@
 
 ## 版本与触发
 
-当前源码目标版本为 v1.3.1，Cargo 版本为 1.3.1；本版仅发布 CLI 二进制附件。最新公开版本需以 GitHub Releases 为准；CLI-only 版本不更新仓库级 Latest 标记，CLI 用户应访问对应标签的 Release 页面。完整标签必须等于 Cargo 版本加 v 前缀；补丁号为零的正式版本也接受短标签，例如 v1.0 对应 1.0.0。预发布标签使用完整版本，例如 v1.0.0-rc.1。
+当前源码目标版本为 v1.3.2，Cargo 版本为 1.3.2；本版仅发布 CLI 二进制附件。最新公开版本需以 GitHub Releases 为准；CLI-only 版本不更新仓库级 Latest 标记，CLI 用户应访问对应标签的 Release 页面。完整标签必须等于 Cargo 版本加 v 前缀；补丁号为零的正式版本也接受短标签，例如 v1.0 对应 1.0.0。预发布标签使用完整版本，例如 v1.0.0-rc.1。
 
 Release 工作流仅在推送版本标签时触发构建、打包和发布，不提供手动触发入口。
 
 每次发布必须在标签对应提交中提供 `docs/releases/<TAG>.json` 和非空的同名 `.md` 发布说明，例如：
 
 ```json
-{"tag":"v1.3.1","version":"1.3.1","scope":"cli"}
+{"tag":"v1.3.2","version":"1.3.2","scope":"cli"}
 ```
 
 `scope` 仅允许 `cli`（仅 CLI 附件）或 `full`（GUI 和 CLI 附件）。配置必须恰好包含这三个字段，版本必须匹配 Cargo.toml 和 Cargo.lock；缺失或错误时停止，不默认发布全量。使用经过审核的说明正文，不自动生成混合组件说明。源码标签覆盖完整仓库，发布范围只控制二进制附件。
 
 独立的 [Checks 工作流](../.github/workflows/checks.yml) 在 Pull request、推送 main 和手动触发时执行开发期验证，不打包或发布。其他分支推送本身不触发检查，可通过 PR 或手动运行验证。重跑旧标签任务仍使用该标签的旧代码。公开标签不移动或覆盖，修复通过新版本发布。
+
+## v1.3.2 更新
+
+完整说明见 [v1.3.2 发布说明](releases/v1.3.2.md)。本版增加独立于时间筛选的 received/device/both 文本展示、集中解释查询/存档/采集完整性，以及有界保存主机尾部记录的停止流程和独立确认反馈。产品代码仅涉及 CLI 模块，GUI 与共享核心功能没有改动；仅发布 CLI 的六件附件，Latest 保留既有全量版本。共用 Cargo package 的源码版本同步升至 1.3.2。
 
 ## v1.3.1 更新
 
@@ -55,8 +59,8 @@ Release 工作流仅在推送版本标签时触发构建、打包和发布，不
 4. 创建并推送对应版本标签，例如：
 
 ```bash
-git tag -a v1.3.1 -m "Ciallogcat CLI v1.3.1"
-git push origin v1.3.1
+git tag -a v1.3.2 -m "Ciallogcat CLI v1.3.2"
+git push origin v1.3.2
 ```
 
 CI 首先校验标签、版本、发布范围和说明，然后在 Windows 和 Ubuntu 24.04 执行所选组件的格式检查、测试、Clippy、release 构建和打包。所有 job checkout 同一触发提交。`full` 模式构建 GUI，Linux 使用固定版本 cargo-deb 3.8.0 额外生成 GUI DEB，在干净 Ubuntu 24.04 容器中验证安装、桌面入口、图标、许可证、动态链接依赖和卸载。
@@ -71,9 +75,9 @@ CLI 使用独立的 Linux x86_64 / Windows x86_64 矩阵，执行 `cargo test --
 
 | 平台 | 附件 |
 | --- | --- |
-| Windows x86_64 | ciallogcat-cli-v1.3.1-windows-x86_64.zip |
-| Linux x86_64 | ciallogcat-cli-v1.3.1-linux-x86_64.tar.gz |
-| Ubuntu 24.04 x86_64 | ciallogcat-cli-v1.3.1-linux-x86_64.deb |
+| Windows x86_64 | ciallogcat-cli-v1.3.2-windows-x86_64.zip |
+| Linux x86_64 | ciallogcat-cli-v1.3.2-linux-x86_64.tar.gz |
+| Ubuntu 24.04 x86_64 | ciallogcat-cli-v1.3.2-linux-x86_64.deb |
 
 CLI 工作流生成 `ciallogcat-cli-v<VERSION>-linux-x86_64.tar.gz` 与 `ciallogcat-cli-v<VERSION>-windows-x86_64.zip`，名称使用校验后的实际版本标签。每个 CLI 压缩包包含版本目录下的 CLI 可执行文件、MIT `LICENSE`、使用指南 `README.md`、AOSP 许可 `LICENSE-AOSP.txt`、protobuf 声明 `PROTOBUF-NOTICE.md` 和查询指南 `agent-query.md`，不包含 GUI、字体或共享核心 `.rlib`。Linux CLI 还生成独立的 `ciallogcat-cli-v<VERSION>-linux-x86_64.deb` 与校验文件，Debian 包名为 `ciallogcat-cli`。依赖由 `dpkg-shlibdeps` 从无 GUI 的二进制自动生成，ADB 为推荐依赖；文件仅包含 `/usr/bin/ciallogcat-cli` 与自己的文档目录。干净 Ubuntu 24.04 容器验证安装、运行时链接、版本、帮助与卸载。详情见 [CLI 指南](cli.md)。
 

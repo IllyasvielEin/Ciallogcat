@@ -139,6 +139,241 @@ fn reference(value: &Value, index: usize) -> &str {
     value["records"][index]["record_ref"].as_str().unwrap()
 }
 
+fn evidence_summary(value: &Value) -> &str {
+    let summary = value["evidence"]["summary"].as_str().unwrap();
+    assert!(serde_json::to_vec(summary).unwrap().len() <= 512);
+    summary
+}
+
+#[test]
+fn evidence_separates_query_validation_capture_and_known_gaps() {
+    let s = Sandbox::new();
+    let rows = [native_fixture::row(1, "one", Some(1234))];
+    let file = s.path("evidence.jsonl");
+    fs::write(&file, native_fixture::bytes(&rows, true)).unwrap();
+    let complete = s.ok(&["query", "--file", &file]);
+    assert_eq!(complete["complete"], true);
+    assert_eq!(complete["artifact_finalized"], true);
+    assert_eq!(complete["source_status"]["capture_completeness"], "unknown");
+    assert_eq!(complete["source_status"]["known_gap_count"], 0);
+    let explanation = evidence_summary(&complete);
+    assert!(explanation.contains("Query boundary: complete"));
+    assert!(explanation.contains("full prefix verified and finalized"));
+    assert!(explanation.contains("Capture: unknown (artifact footer"));
+    assert!(explanation.contains("capture_observed_unix_ms=unavailable"));
+    assert!(explanation.contains("none reported; zero does not prove lossless"));
+
+    // Footer metadata is available before the cursor validates the prefix.
+    let first = s.ok(&["query", "--file", &file, "--max-scan-records", "1"]);
+    assert_eq!(first["complete"], false);
+    assert_eq!(first["artifact_finalized"], false);
+    assert!(evidence_summary(&first).contains("full prefix verification unfinished"));
+    assert!(evidence_summary(&first).contains("artifact footer"));
+
+    let mut footer: Value = serde_json::from_slice(&native_fixture::footer(&rows)).unwrap();
+    footer["capture"]["completeness"] = "partial".into();
+    footer["capture"]["observed_unix_ms"] = u64::MAX.into();
+    footer["capture"]["known_gaps"] = json!([{"kind":"fixture"}]);
+    let mut bytes = native_fixture::bytes(&rows, false);
+    bytes.extend(native_fixture::line(&footer));
+    fs::write(&file, bytes).unwrap();
+    let partial = s.ok(&["query", "--file", &file]);
+    assert!(evidence_summary(&partial).contains("Capture: partial"));
+    assert!(evidence_summary(&partial).contains(&format!("capture_observed_unix_ms={}", u64::MAX)));
+    assert!(
+        evidence_summary(&partial).contains("Known gaps: reported; additional gaps may be unknown")
+    );
+}
+
+#[test]
+fn evidence_uses_current_session_observation_without_widening_a_snapshot() {
+    let s = Sandbox::new();
+    let dir = s.session(&[(1, "one"), (2, "two")]);
+    let status_path = s.root.join("session/status.json");
+    let mut status: Value = serde_json::from_slice(&fs::read(&status_path).unwrap()).unwrap();
+    status["capture_completeness"] = "unknown".into();
+    status["known_gap_count"] = 0.into();
+    fs::write(&status_path, serde_json::to_vec(&status).unwrap()).unwrap();
+    let first = s.ok(&["query", "--session-dir", &dir, "--limit", "1"]);
+    assert_eq!(first["complete"], false);
+    assert!(evidence_summary(&first).contains("Capture: unknown (session status"));
+    let original_status_time = first["source_status"]["updated_unix_ms"].clone();
+    assert!(evidence_summary(&first).contains(&format!("updated_unix_ms={original_status_time}")));
+
+    // Finish capture after the first page. The resumed cursor still ends at the
+    // old record boundary, but capture diagnostics are a fresh source reading.
+    let rows = [
+        native_fixture::row(1, "one", Some(1234)),
+        native_fixture::row(2, "two", Some(1234)),
+    ];
+    let bytes = native_fixture::bytes(&rows, true);
+    fs::write(s.root.join("session/logs.jsonl"), &bytes).unwrap();
+    status["state"] = "completed".into();
+    status["bytes"] = bytes.len().into();
+    status["visible_end"]["offset"] = bytes.len().into();
+    status["updated_unix_ms"] = u64::MAX.into();
+    status["capture_completeness"] = "partial".into();
+    status["known_gap_count"] = 1.into();
+    fs::write(&status_path, serde_json::to_vec(&status).unwrap()).unwrap();
+    let resumed = s.ok(&["query", "--session-dir", &dir, "--cursor", cursor(&first)]);
+    assert_eq!(records(&resumed), [2]);
+    assert_eq!(resumed["snapshot"], first["snapshot"]);
+    assert_eq!(resumed["complete"], true);
+    assert_eq!(resumed["artifact_finalized"], false);
+    assert_eq!(resumed["validation"]["footer_seen"], false);
+    assert_eq!(
+        resumed["source_status"]["capture_status_source"],
+        "session_status"
+    );
+    assert!(evidence_summary(&resumed).contains("Capture: partial (session status"));
+    assert!(evidence_summary(&resumed).contains(&format!("updated_unix_ms={}", u64::MAX)));
+    assert!(
+        evidence_summary(&resumed)
+            .contains("current source observation, not fixed snapshot coverage")
+    );
+
+    // Scanning the footer does not silently substitute its capture metadata for
+    // the status observation. The fixture footer says unknown with zero gaps.
+    let current = s.ok(&["query", "--session-dir", &dir]);
+    assert_eq!(current["artifact_finalized"], true);
+    assert_eq!(current["source_status"]["known_gap_count"], 1);
+    assert!(evidence_summary(&current).contains("Capture: partial (session status"));
+}
+
+#[test]
+fn missing_session_gap_count_is_unavailable_despite_discard_and_interruption_counts() {
+    let s = Sandbox::new();
+    let dir = s.session(&[]);
+    let status_path = s.root.join("session/status.json");
+    let mut status: Value = serde_json::from_slice(&fs::read(&status_path).unwrap()).unwrap();
+    status["discarded_entries"] = u64::MAX.into();
+    status["stream_interruptions"] = u64::MAX.into();
+    fs::write(&status_path, serde_json::to_vec(&status).unwrap()).unwrap();
+    let page = s.ok(&[
+        "query",
+        "--session-dir",
+        &dir,
+        "--max-response-bytes",
+        "8192",
+    ]);
+    assert_eq!(page["complete"], true);
+    assert!(page["source_status"]["known_gap_count"].is_null());
+    assert!(evidence_summary(&page).contains("Capture: unavailable"));
+    assert!(evidence_summary(&page).contains("Known gaps: unavailable"));
+    assert!(!evidence_summary(&page).contains("none reported"));
+}
+
+#[test]
+fn minimum_response_budget_covers_json_previews_and_full_stream_summaries() {
+    let s = Sandbox::new();
+    let dir = s.session(&[]);
+    let file = s.path("session/logs.jsonl");
+    let message = format!("match {}", "\0\n\"\\雪".repeat(1000));
+    let rows: Vec<_> = (1..=4)
+        .map(|seq| native_fixture::row(seq, &message, Some(1234)))
+        .collect();
+    let bytes = native_fixture::bytes(&rows, true);
+    fs::write(&file, &bytes).unwrap();
+    s.native_status(&native_fixture::header(), 4, bytes.len(), 4);
+    let status_path = s.root.join("session/status.json");
+    let mut status: Value = serde_json::from_slice(&fs::read(&status_path).unwrap()).unwrap();
+    status["state"] = "completed".into();
+    status["updated_unix_ms"] = u64::MAX.into();
+    status["capture_completeness"] = "partial".into();
+    status["known_gap_count"] = u64::MAX.into();
+    status["discarded_entries"] = u64::MAX.into();
+    status["stream_interruptions"] = u64::MAX.into();
+    for field in [
+        "reason",
+        "error",
+        "readiness",
+        "last_diagnostic",
+        "last_stream_error",
+    ] {
+        status[field] = "\0\n\"\\雪".repeat(100).into();
+    }
+    fs::write(&status_path, serde_json::to_vec(&status).unwrap()).unwrap();
+    for (selector, source) in [("--file", &file), ("--session-dir", &dir)] {
+        for query in ["match", "absent"] {
+            let base = [
+                "query",
+                selector,
+                source,
+                "--max-response-bytes",
+                "8192",
+                "--preview-bytes",
+                "16384",
+                "--query",
+                query,
+            ];
+            let (ok, page, length) = s.run(&base);
+            assert!(ok, "{page}");
+            assert!(length <= 8192);
+            evidence_summary(&page);
+            if query == "absent" {
+                assert!(records(&page).is_empty());
+                assert_eq!(page["complete"], true);
+            } else {
+                assert!(!records(&page).is_empty());
+                assert_eq!(page["records"][0]["preview_truncated"], true);
+            }
+            for format in ["text", "jsonl"] {
+                for all in [false, true] {
+                    let mut args = base.to_vec();
+                    args.extend(["--format", format, "--limit", "1"]);
+                    if all {
+                        args.push("--all");
+                    }
+                    if format == "text" {
+                        // Both policies and their explanations are part of the
+                        // stderr envelope, even for an empty matching set.
+                        args.extend(["--display-time", "both", "--process-width", "4096"]);
+                    }
+                    let output = Command::new(env!("CARGO_BIN_EXE_ciallogcat-cli"))
+                        .args(&args)
+                        .env("CIALLOGCAT_CONFIG_DIR", s.root.join("config"))
+                        .stdin(Stdio::null())
+                        .output()
+                        .unwrap();
+                    assert!(
+                        output.status.success(),
+                        "{}",
+                        String::from_utf8_lossy(&output.stderr)
+                    );
+                    assert!(
+                        output.stderr.len() <= 8192,
+                        "{args:?}: {}",
+                        output.stderr.len()
+                    );
+                    let summary: Value = serde_json::from_slice(&output.stderr).unwrap();
+                    assert_eq!(summary["type"], "query_summary");
+                    assert_eq!(summary["format"], format);
+                    evidence_summary(&summary);
+                    if format == "text" {
+                        assert_eq!(
+                            summary["text_presentation"]["display_time_requested"],
+                            "both"
+                        );
+                        assert_eq!(summary["text_presentation"]["process_width"], 4096);
+                    }
+                    if query == "absent" {
+                        assert!(output.stdout.is_empty());
+                        assert_eq!(summary["records_returned"], 0);
+                        assert_eq!(summary["complete"], true);
+                    } else if all {
+                        assert_eq!(summary["records_returned"], 4);
+                        assert!(summary["pages"].as_u64().unwrap() > 1);
+                        assert_eq!(summary["artifact_finalized"], true);
+                    } else {
+                        assert_eq!(summary["records_returned"], 1);
+                        assert_eq!(summary["complete"], false);
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn canonical_query_uses_current_key_and_single_cursor_contract() {
     use hmac::{Hmac, Mac};
@@ -539,6 +774,7 @@ fn end_start_empty_native_session_sees_only_published_appends_and_footer() {
     assert_eq!(finished["artifact_finalized"], true);
     assert_eq!(finished["validation"]["footer_seen"], true);
     assert_eq!(cursor_payload(&finished)["count"], 1);
+    assert!(evidence_summary(&finished).contains("full prefix verified and finalized"));
 
     // A truly empty stopped document also validates without fabricating seq=1.
     let (empty_header, empty_lines) = native_lines(&[]);
@@ -546,6 +782,7 @@ fn end_start_empty_native_session_sees_only_published_appends_and_footer() {
     s.native_status(&empty_header, 0, empty_lines.concat().len(), 0);
     let empty = s.ok(&args);
     assert_eq!(empty["artifact_finalized"], true);
+    assert!(evidence_summary(&empty).contains("full prefix verified and finalized"));
     assert_eq!(cursor_payload(&empty)["count"], 0);
     assert!(cursor_payload(&empty)["first_seq"].is_null());
 }
@@ -624,6 +861,10 @@ fn end_start_sparse_sequences_keep_suffix_counts_and_filter_binding() {
     assert_eq!(finished["has_more"], false);
     assert_eq!(finished["artifact_finalized"], false);
     assert_eq!(finished["validation"]["footer_seen"], true);
+    assert!(
+        evidence_summary(&finished)
+            .contains("tail suffix and footer verified; nonempty prefix unverified")
+    );
     assert_eq!(cursor_payload(&finished)["count"], 2);
     assert_eq!(cursor_payload(&finished)["first_seq"], 12);
     let detail = s.ok(&[

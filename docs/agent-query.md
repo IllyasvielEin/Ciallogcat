@@ -60,6 +60,7 @@ snapshot 到达上界后，要查看后续追加需省略 cursor 创建新快照
 - `artifact_finalized`：所有记录已从头连续扫描且 footer 与累计统计相符。尾部起点跳过非空历史后，即使读到合法 footer，此字段仍为 false；从空会话起步则可以在后续完整扫描后为 true。无论是否 finalized，都不据此推断完整采集。
 - `validation`：`scope` 为 `full_prefix` 或 `tail_suffix`，表示该 cursor 的扫描范围，不代表尚未扫描的后续页已验证。`start` 保存显式尾部起点，否则为 null；`skipped_records` 来自该起点的 status.entries，**不是扫描验证所得**。`footer_seen` 表示读到且检查了 footer。tail_suffix 仍校验 footer 结构/身份/范围、首末记录、已发布历史 count 加实际扫描后缀 count；这些检查不替代跳过前缀的逐条验证。计数与 seq 分开，不假设 seq 连续。
 - `scan`：逻辑扫描字节/记录数、起止 offset、last_seq、实际日志文件读取字节和停止原因。`file_bytes_read` 包含 header、footer、身份前缀、边界 anchor 及缓冲读入；不包含 status/key 文件的固定控制读取。
+- `evidence.summary`：query 响应和流式 stderr summary 的有界说明，集中解释查询水位、存档验证和来源覆盖。`complete=true`、`artifact_finalized=true`、capture completeness 为 unknown、known_gap_count 为 0 可以同时成立；空缺口列表不证明无损。标明 footer/session status 的来源及观察时间；当前 session status 不等于固定 snapshot 的覆盖情况。缺失的 gap 信息按 unavailable 处理，不从其他计数推算。
 
 扫描为下一条最大 8 MiB 编码记录预留空间，因此可能在字节预算用满前停止。默认响应只含摘要，Tag、设备时间和 process 名称另有小预览限制；`metadata_preview_truncated` 表明这些字段被裁短或省略。首条大记录会缩小预览，必要时保留最小引用信息，并推进 cursor，避免卡在同一条。响应预算不足以容纳 envelope 和引用时明确报参数错误。
 
@@ -86,6 +87,7 @@ snapshot 到达上界后，要查看后续追加需省略 cursor 创建新快照
 `--file` 仍按原有离线文件规则处理。详情与兼容限制见 [CLI 指南](cli.md)。
 
 `--format text` 默认展示 readable/local，时间来源与 `--time-basis` 一致；默认 received 不逐行重复，device 及异常回退仍标注，summary 始终声明 basis。
+`--display-time received|device|both` 可独立选择带来源标签的展示，不改变筛选。received 是主机观察时间，不代表设备事件时间；device 优先使用精确 protobuf epoch，否则只展示标注未转换的 device-text 原文或 unavailable。both 分别显示两侧；同页不同记录可能使用不同的设备时间展示路径。无年份原文即使能展示，也不能用于要求精确 epoch 的 device 时间筛选，不推算年份、不改用 received。
 `--time-format epoch|rfc3339`、`--timezone utc` 可显式选择；纯展示参数不进入 cursor 过滤指纹。
 缺少绝对时间时仅展示明确未知与原始设备文本，不猜年份/时区；时间筛选仍按原有严格缺失规则报错。
 event/unparsed 用明确类型标签，不展示伪造的日志元字段；仍保留所选时钟前缀和完整 message。
@@ -93,7 +95,9 @@ event/unparsed 用明确类型标签，不展示伪造的日志元字段；仍�
 JSON/JSONL、归档字节和固定 protobuf 投影不受这些 text 选项影响。
 进程名默认限 32 个显示列，以中间省略号保留前后缀；`--process-width 0` 恢复全名。
 此行为不依赖 TTY，保留字素簇、PID/TID 和完整 message，不能把缩写作为唯一进程身份。
-text summary 的 `text_presentation` 报告列宽和实际缩短进程名的记录数。
+text summary 的 `text_presentation` 报告请求的展示模式、有效展示策略、列宽和实际缩短进程名的记录数；省略 display-time 时保留原布局。展示参数不进入 cursor 指纹。
+
+前台 SIGINT 保留 `interrupted` 与退出码 130，最终 status 的 `shutdown` 分别报告首次 trigger、ADB/readers cleanup、主机记录准入 drain、footer_write 确认。主动停止最多短暂保存一秒内可排空的完整主机记录，仍遵守硬预算；实际错误优先于取消码。footer_write 为 unconfirmed 只表示尚未确认写入及最终 flush，不表示确定缺少 footer；退出超时后的 discarded_entries 是最后观察时未确认写入的数量。完整说明见 [CLI 停止与退出契约](cli.md#json-and-exit-codes)。
 
 每个 query page / stream summary（包括零匹配）都返回 `time_window`：`basis`、
 `anchor_unix_ms`、`since_inclusive`、`until_exclusive`。边界值含精确十进制字符串
