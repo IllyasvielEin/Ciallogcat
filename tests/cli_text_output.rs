@@ -183,6 +183,15 @@ fn default_readable_and_explicit_formats_use_received_milliseconds() {
         assert!(output.stdout.ends_with("Tag: payload\n"));
         assert!(!output.stdout.contains("[received]"));
         assert_eq!(output.summary()["time_window"]["basis"], "received");
+        let presentation = &output.summary()["text_presentation"];
+        assert!(presentation["display_time_requested"].is_null());
+        assert_eq!(presentation["effective_time_policy"]["mode"], "received");
+        assert!(
+            presentation["effective_time_policy"]["received"]
+                .as_str()
+                .unwrap()
+                .contains("not device event time")
+        );
     }
 }
 
@@ -220,6 +229,10 @@ fn received_and_device_display_follow_the_same_basis_as_time_filters_in_native_r
         assert!(text.stdout.starts_with(prefix), "{}", text.stdout);
         assert_eq!(text.summary()["records_returned"], 1);
         assert_eq!(text.summary()["time_window"]["basis"], basis);
+        assert_eq!(
+            text.summary()["text_presentation"]["effective_time_policy"]["mode"],
+            basis
+        );
     }
     let device = s.text(
         &file,
@@ -236,6 +249,155 @@ fn received_and_device_display_follow_the_same_basis_as_time_filters_in_native_r
         device
             .stdout
             .starts_with("1970-01-01T00:00:01.000000123Z [device]")
+    );
+}
+
+#[test]
+fn explicit_display_clocks_are_labeled_and_independent_of_time_filter_basis() {
+    let s = Sandbox::new();
+    let file = s.native(vec![(proto("chosen\ninside\r\n\n", 1, 123), Some(99_321))]);
+    for (basis, since, until) in [
+        ("received", "1970-01-01T00:01:39Z", "1970-01-01T00:01:40Z"),
+        (
+            "device",
+            "1970-01-01T00:00:01.000000123Z",
+            "1970-01-01T00:00:01.000000124Z",
+        ),
+    ] {
+        for (display, prefix) in [
+            ("received", "99.321 [received; host-observation]"),
+            ("device", "1.000000123 [device]"),
+            (
+                "both",
+                "99.321 [received; host-observation] | 1.000000123 [device]",
+            ),
+        ] {
+            let output = s.text(
+                &file,
+                &[
+                    "--display-time",
+                    display,
+                    "--time-format",
+                    "epoch",
+                    "--time-basis",
+                    basis,
+                    "--since",
+                    since,
+                    "--until",
+                    until,
+                ],
+            );
+            assert!(output.stdout.starts_with(prefix), "{}", output.stdout);
+            assert!(output.stdout.ends_with("Tag: chosen\ninside\r\n\n"));
+            let summary = output.summary();
+            assert_eq!(summary["records_returned"], 1);
+            assert_eq!(summary["time_window"]["basis"], basis);
+            assert_eq!(
+                summary["text_presentation"]["display_time_requested"],
+                display
+            );
+            assert_eq!(
+                summary["text_presentation"]["effective_time_policy"]["mode"],
+                display
+            );
+        }
+    }
+}
+
+#[test]
+fn device_text_remains_unconverted_even_when_an_absolute_display_format_is_requested() {
+    let s = Sandbox::new();
+    let mut raw = row(1, "yearless", Some(99_321));
+    raw["device_time"]["text"] = "12-31 23:59:59.123\nraw\"clock".into();
+    let file = s.records(&[raw]);
+    for format in ["readable", "epoch", "rfc3339"] {
+        let text = s.text(
+            &file,
+            &[
+                "--display-time",
+                "device",
+                "--time-format",
+                format,
+                "--timezone",
+                "utc",
+            ],
+        );
+        assert!(
+            text.stdout.starts_with(
+                "[device-text=\"12-31 23:59:59.123\\nraw\\\"clock\"; no-absolute-time; unconverted]"
+            ),
+            "{}",
+            text.stdout
+        );
+        assert_eq!(text.summary()["records_returned"], 1);
+    }
+    let filtered = s.run(
+        &[
+            "query",
+            "--file",
+            &file,
+            "--format",
+            "text",
+            "--display-time",
+            "both",
+            "--time-basis",
+            "device",
+            "--since",
+            "1970-01-01T00:00:00Z",
+        ],
+        None,
+    );
+    assert!(!filtered.success);
+    assert!(filtered.stdout.is_empty());
+    let error: Value = serde_json::from_str(&filtered.stderr).unwrap();
+    assert_eq!(error["error"]["code"], "time_unavailable");
+}
+
+#[test]
+fn both_display_keeps_mixed_clock_availability_separate_in_all_and_single_pages() {
+    let s = Sandbox::new();
+    let text = LogEntry::new(
+        "12-31 23:59:59.123",
+        42,
+        43,
+        "Tag",
+        ciallogcat::model::Level::Info,
+        "yearless",
+    );
+    let file = s.native(vec![
+        (proto("exact", 1, 1), Some(2_345)),
+        (text.clone(), None),
+        (LogEntry::marker("boundary"), None),
+        (proto("only-device", 3, 999_999_999), None),
+        (text, Some(4_567)),
+    ]);
+    let flags = ["--display-time", "both", "--time-format", "epoch"];
+    let all = s.text(&file, &flags);
+    let lines: Vec<_> = all.stdout.lines().collect();
+    assert_eq!(lines.len(), 5);
+    assert!(lines[0].starts_with("2.345 [received; host-observation] | 1.000000001 [device]"));
+    assert!(lines[1].starts_with(
+        "[received-time-unavailable] | [device-text=\"12-31 23:59:59.123\"; no-absolute-time; unconverted]"
+    ));
+    assert_eq!(
+        lines[2],
+        "[received-time-unavailable] | [device-time-unavailable] [event] boundary"
+    );
+    assert!(lines[3].starts_with("[received-time-unavailable] | 3.999999999 [device]"));
+    assert!(lines[4].starts_with(
+        "4.567 [received; host-observation] | [device-text=\"12-31 23:59:59.123\"; no-absolute-time; unconverted]"
+    ));
+    let mut args = vec!["query", "--file", &file, "--format", "text"];
+    args.extend(flags);
+    let page = s.run(&args, None);
+    assert_eq!(page.summary()["complete"], true);
+    assert_eq!(page.stdout, all.stdout);
+    let policy = &page.summary()["text_presentation"]["effective_time_policy"];
+    assert!(
+        policy["device"]
+            .as_str()
+            .unwrap()
+            .contains("varies by record")
     );
 }
 
@@ -344,6 +506,20 @@ fn missing_native_receipt_time_and_calendar_overflow_are_explicit_without_false_
             "{}",
             fallback.stdout
         );
+        let both = s.text(
+            &huge,
+            &[
+                "--display-time",
+                "both",
+                "--time-format",
+                calendar,
+                "--timezone",
+                "utc",
+            ],
+        );
+        assert!(both.stdout.starts_with(
+            "18446744073709551.615 [received; host-observation; calendar-unavailable] | 18446744073709551615.000000001 [device; calendar-unavailable]"
+        ), "{}", both.stdout);
     }
 }
 
@@ -368,6 +544,21 @@ fn local_default_observes_dst_and_utc_override_and_epoch_ignore_local_zone() {
         lines[1].starts_with("2026-03-08 03:00:00.000-04:00"),
         "{}",
         local.stdout
+    );
+    let mut labeled = base.to_vec();
+    labeled.extend(["--display-time", "both", "--time-format", "rfc3339"]);
+    let labeled = s.run(&labeled, Some("America/New_York"));
+    assert!(labeled.success, "{}", labeled.stderr);
+    let lines: Vec<_> = labeled.stdout.lines().collect();
+    assert!(
+        lines[0].starts_with(
+            "2026-03-08T01:59:59.999-05:00 [received; host-observation] | [device-text="
+        )
+    );
+    assert!(
+        lines[1].starts_with(
+            "2026-03-08T03:00:00.000-04:00 [received; host-observation] | [device-text="
+        )
     );
     let mut utc = base.to_vec();
     utc.extend(["--timezone", "utc"]);
@@ -402,11 +593,30 @@ fn display_options_do_not_change_cursor_filters_or_archived_jsonl() {
             "1",
             "--time-format",
             "epoch",
+            "--display-time",
+            "received",
+            "--since",
+            "1970-01-01T00:00:00Z",
         ],
         None,
     );
     let summary = first.summary();
     assert_eq!(summary["complete"], false);
+    let cursor = summary["next_cursor"].as_str().unwrap();
+    let reference = s
+        .run(
+            &[
+                "query",
+                "--file",
+                &file,
+                "--cursor",
+                cursor,
+                "--since",
+                "1970-01-01T00:00:00Z",
+            ],
+            None,
+        )
+        .page();
     let second = s.run(
         &[
             "query",
@@ -415,18 +625,51 @@ fn display_options_do_not_change_cursor_filters_or_archived_jsonl() {
             "--format",
             "text",
             "--cursor",
-            summary["next_cursor"].as_str().unwrap(),
+            cursor,
             "--time-format",
             "rfc3339",
             "--process-width",
             "0",
             "--timezone",
             "utc",
+            "--display-time",
+            "both",
+            "--since",
+            "1970-01-01T00:00:00Z",
         ],
         None,
     );
     assert_eq!(second.summary()["complete"], true);
-    assert!(second.stdout.starts_with("1970-01-01T00:00:02.000Z"));
+    assert!(
+        second
+            .stdout
+            .starts_with("1970-01-01T00:00:02.000Z [received; host-observation] | [device-text=")
+    );
+    assert_eq!(reference["records"].as_array().unwrap().len(), 1);
+    assert_eq!(reference["records"][0]["message_preview"], "second\r\n");
+    for field in ["snapshot", "scan", "next_cursor", "time_window"] {
+        assert_eq!(second.summary()[field], reference[field], "{field}");
+    }
+    let mismatch = s.run(
+        &[
+            "query",
+            "--file",
+            &file,
+            "--format",
+            "text",
+            "--cursor",
+            cursor,
+            "--display-time",
+            "device",
+            "--since",
+            "1970-01-01T00:00:01Z",
+        ],
+        None,
+    );
+    assert!(!mismatch.success);
+    assert!(mismatch.stdout.is_empty());
+    let error: Value = serde_json::from_str(&mismatch.stderr).unwrap();
+    assert_eq!(error["error"]["code"], "cursor_mismatch");
     let jsonl = s.run(
         &["query", "--file", &file, "--all", "--format", "jsonl"],
         None,
@@ -454,6 +697,10 @@ fn invalid_and_non_text_presentation_options_fail_without_stdout() {
         vec!["--format", "jsonl", "--process-width", "32"],
         vec!["--format", "text", "--process-width", "-1"],
         vec!["--format", "text", "--process-width", "4097"],
+        vec!["--format", "text", "--display-time", "unknown"],
+        vec!["--format", "text", "--display-time", ""],
+        vec!["--format", "jsonl", "--display-time", "both"],
+        vec!["--format", "json", "--display-time", "received"],
     ] {
         let mut args = vec!["query", "--file", &file];
         args.extend(options);

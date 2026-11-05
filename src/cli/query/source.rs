@@ -230,6 +230,8 @@ impl Source {
                 "omitted_by_limit":value["omitted_by_limit"].as_bool(),
                 "discarded_entries":value["discarded_entries"].as_u64(),
                 "capture_completeness":excerpt("capture_completeness"),
+                "known_gap_count":value["known_gap_count"].as_u64(),
+                "capture_status_source":"session_status",
                 "stream_interruptions":value["stream_interruptions"].as_u64(),
                 "last_stream_error":excerpt("last_stream_error"),
                 "diagnostics_complete":value["diagnostics_complete"].as_bool(),

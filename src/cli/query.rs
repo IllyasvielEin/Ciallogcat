@@ -64,6 +64,7 @@ struct RecordRef {
 // Derived JSON can expand a compact payload (especially NUL/invalid UTF-8)
 // beyond the archive line limit. Keep it independently bounded.
 const MAX_DECODED_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_EVIDENCE_SUMMARY_BYTES: usize = 512;
 
 #[derive(Clone, Copy, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -177,19 +178,25 @@ fn record_reference(signer: &Signer, flags: &mut BTreeMap<String, String>) -> Re
 }
 
 fn emit_response(response: Value, budget: usize) -> Result<()> {
-    if encoded_len(&response)? > budget {
+    check_response_budget(&response, budget)?;
+    emit(&response)
+}
+
+fn check_response_budget(response: &Value, budget: usize) -> Result<()> {
+    if encoded_len(response)? > budget {
         return Err(error(
             "response_budget",
             "response envelope exceeds requested byte budget",
             2,
         ));
     }
-    emit(&response)
+    Ok(())
 }
 
 struct StreamOutput<'a> {
     writer: &'a mut dyn Write,
     text: Option<super::text_output::TextOptions>,
+    format: &'a str,
     records: u64,
 }
 impl StreamOutput<'_> {
@@ -238,6 +245,7 @@ fn stream_query(
     let mut output = StreamOutput {
         writer: &mut stdout,
         text,
+        format,
         records: 0,
     };
     let mut state = QueryState::open(path, session, signer, flags)?;
@@ -254,25 +262,16 @@ fn stream_query(
         if !all || state.complete() {
             let mut response = state.response(signer, page)?;
             output.writer.flush().map_err(io_error)?;
-            let fields = response.as_object_mut().unwrap();
-            fields.remove("records");
-            fields.insert("type".into(), "query_summary".into());
-            fields.insert("format".into(), format.into());
-            if let Some(text) = &output.text {
-                fields.insert(
-                    "text_presentation".into(),
-                    json!({
-                        "process_width": text.process_width(),
-                        "process_names_truncated": text.process_names_truncated(),
-                    }),
-                );
-            }
-            fields.insert("derived".into(), true.into());
-            fields.insert("records_returned".into(), output.records.into());
-            fields.insert("pages".into(), pages.into());
-            fields.insert("total_scanned_records".into(), scanned.into());
-            fields.insert("total_scanned_bytes".into(), scanned_bytes.into());
-            fields.insert("total_file_bytes_read".into(), file_bytes.into());
+            stream_summary(
+                &mut response,
+                &output,
+                state.predicate.device_time(),
+                pages,
+                scanned,
+                scanned_bytes,
+                file_bytes,
+            );
+            check_response_budget(&response, options.response)?;
             let mut stderr = io::stderr().lock();
             serde_json::to_writer(&mut stderr, &response).map_err(io_error)?;
             stderr.write_all(b"\n").map_err(io_error)?;
@@ -282,6 +281,31 @@ fn stream_query(
             return Err(invalid("query made no progress before snapshot boundary"));
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stream_summary(
+    response: &mut Value,
+    output: &StreamOutput<'_>,
+    device_time: bool,
+    pages: u64,
+    scanned: u64,
+    scanned_bytes: u64,
+    file_bytes: u64,
+) {
+    let fields = response.as_object_mut().unwrap();
+    fields.remove("records");
+    fields.insert("type".into(), "query_summary".into());
+    fields.insert("format".into(), output.format.into());
+    if let Some(text) = &output.text {
+        fields.insert("text_presentation".into(), text.presentation(device_time));
+    }
+    fields.insert("derived".into(), true.into());
+    fields.insert("records_returned".into(), output.records.into());
+    fields.insert("pages".into(), pages.into());
+    fields.insert("total_scanned_records".into(), scanned.into());
+    fields.insert("total_scanned_bytes".into(), scanned_bytes.into());
+    fields.insert("total_file_bytes_read".into(), file_bytes.into());
 }
 
 fn encoded_len(value: &impl Serialize) -> Result<usize> {
@@ -537,7 +561,8 @@ impl QueryState {
         worst.first_seq = Some(u64::MAX);
         worst.anchor.start = u64::MAX;
         worst.anchor.bytes = 64;
-        let reserve = encoded_len(&query_response(
+        worst.finalized = false;
+        let mut envelope = query_response(
             source,
             &worst,
             predicate,
@@ -548,7 +573,28 @@ impl QueryState {
             u64::MAX,
             "response_budget",
             u64::MAX,
-        )?)? + 128;
+        )?;
+        // Footer discovery can change the explanation during this scan. Reserve
+        // its whole JSON-string allowance, rather than the current template.
+        envelope["evidence"]["summary"] = "x".repeat(MAX_EVIDENCE_SUMMARY_BYTES - 2).into();
+        if let Some(output) = output.as_deref() {
+            // Streaming adds presentation metadata and accumulated counters to
+            // stderr. Bound that complete envelope before emitting any records.
+            stream_summary(
+                &mut envelope,
+                output,
+                predicate.device_time(),
+                u64::MAX,
+                u64::MAX,
+                u64::MAX,
+                u64::MAX,
+            );
+            envelope["records_returned"] = u64::MAX.into();
+            if output.text.is_some() {
+                envelope["text_presentation"]["process_names_truncated"] = u64::MAX.into();
+            }
+        }
+        let reserve = encoded_len(&envelope)? + 128;
         if reserve + 2048 >= options.response {
             return Err(usage(
                 "response budget is too small for a record reference and cursor",
@@ -713,11 +759,63 @@ fn query_response(
             "footer_seen":cursor.finalized},
         "records":entries,"next_cursor":signer.seal("c4",cursor)?,"has_more":cursor.offset<cursor.upper.offset,
         "complete":cursor.offset==cursor.upper.offset,"time_anchor_unix_ms":cursor.time_anchor_ms,
+        "evidence":{"summary":evidence_summary(source, cursor, prefix_scanned)},
         "time_window":predicate.time_window(cursor.time_anchor_ms),
         "scan":{"start_offset":start,"next_offset":cursor.offset,"last_seq":cursor.last_seq,
             "bytes":scanned_bytes,"records":scanned_records,"file_bytes_read":bytes_read,"stop_reason":stop_reason},
         "integrity":"append_only_identity_and_boundary_anchors"}),
     )
+}
+
+fn evidence_summary(source: &Source, cursor: &Cursor, prefix_scanned: bool) -> String {
+    let complete = cursor.offset == cursor.upper.offset;
+    let boundary = if complete { "complete" } else { "incomplete" };
+    let validation = if !prefix_scanned {
+        if cursor.finalized {
+            "tail suffix and footer verified; nonempty prefix unverified"
+        } else {
+            "tail suffix only; nonempty prefix unverified"
+        }
+    } else if cursor.finalized {
+        "full prefix verified and finalized"
+    } else if complete {
+        "prefix verified to boundary; footer not seen"
+    } else {
+        "full prefix verification unfinished"
+    };
+    // Deliberately use a finite vocabulary, never unbounded source diagnostics.
+    let completeness = match source.status["capture_completeness"].as_str() {
+        Some("unknown") => "unknown",
+        Some("partial") => "partial",
+        _ => "unavailable",
+    };
+    let timestamp = |field: &str| {
+        source.status[field]
+            .as_u64()
+            .map_or_else(|| "unavailable".into(), |value| value.to_string())
+    };
+    let observed = timestamp("observed_unix_ms");
+    let capture = if source.binding.session {
+        let updated = timestamp("updated_unix_ms");
+        format!(
+            "{completeness} (session status updated_unix_ms={updated}, observed_unix_ms={observed}; current source observation, not fixed snapshot coverage)"
+        )
+    } else {
+        let captured = timestamp("capture_observed_unix_ms");
+        format!(
+            "{completeness} (artifact footer capture_observed_unix_ms={captured}, observed_unix_ms={observed})"
+        )
+    };
+    let gaps = match source.status["known_gap_count"].as_u64() {
+        Some(0) => "none reported; zero does not prove lossless",
+        Some(_) => "reported; additional gaps may be unknown",
+        None => "unavailable; no lossless claim",
+    };
+    let text = format!(
+        "Query boundary: {boundary} (this request's fixed boundary). Artifact: {validation}. Capture: {capture}. Known gaps: {gaps}."
+    );
+    debug_assert!(serde_json::to_vec(&text).unwrap().len() <= MAX_EVIDENCE_SUMMARY_BYTES);
+    text
 }
 
 fn reference_row(source: &mut Source, reference: &RecordRef) -> Result<(Vec<u8>, Row)> {

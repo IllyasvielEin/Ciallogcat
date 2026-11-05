@@ -65,6 +65,14 @@ const CAPTURE_SCOPE_HELP: &str = "Device history (capture and start):
                   Default main,system,crash (same as GUI); no duplicates.
 Host bounds remain active for history and follow: --duration-secs (600; 1..86400),
 --max-entries (10000000; 1..10000000), --max-bytes (1073741824; 8192..1073741824). --tail is device history selection, not a host record limit.
+SIGINT/stop/duration request immediate ADB termination, then allow up to one second
+to admit buffered complete host records within the same entry/byte limits.
+Duration is a stop trigger, not a device-event-time cutoff. Shutdown still bounds
+ADB/reader confirmation to five seconds, then footer enqueue and writer completion
+to two seconds each. Backpressure can end admission earlier; losses stay explicit.
+Final status.shutdown separates trigger, cleanup, drain and footer_write confirmation.
+SIGINT retains exit 130 and interrupted after successful cleanup/finalization;
+actual ADB/output failures take precedence. Finalization does not prove lossless capture.
 
 ";
 const DIAGNOSE_HELP: &str = "diagnose --serial SERIAL [OPTIONS]
@@ -131,8 +139,13 @@ const QUERY_HELP: &str = "query (--file FILE | --session-dir DIR) [OPTIONS]
                         jsonl/text stream FULL decoded records, not previews;
                         continuation/summary JSON goes only to stderr.
   --time-format readable|epoch|rfc3339  Text only; default readable.
-                        Uses --time-basis (received by default) for display too.
+                        Uses --time-basis for display unless --display-time is set.
                         Missing absolute time is explicitly labeled, never guessed.
+  --display-time received|device|both  Text only; independently selects labeled
+                        display clocks. Received is host observation, not device
+                        event time. Device uses exact epoch or unconverted device-text.
+                        Omitted: preserve the original --time-basis display layout.
+                        This option never changes time filtering or cursor identity.
   --timezone local|utc  Text only; default local. Epoch ignores this setting.
   --process-width N     Text process column display width; default 32, 0 unlimited.
                         Middle ellipsis preserves prefix/suffix, not full identity.
@@ -149,6 +162,9 @@ when resuming; --limit and budgets may change. Response/scan budgets
 can stop a page before --limit. Follow next_cursor while has_more, even if records
 is empty. scan.stop_reason reports upper_bound/record_limit/scan_budget/response_budget.
 complete means this snapshot/current tail boundary was scanned, NOT capture completeness.
+evidence.summary explains query completion, artifact verification and source capture
+coverage together. An empty known-gap list does not prove lossless capture.
+Session status is a current source observation, not fixed snapshot coverage.
 Tail does not wait: when has_more=false, reuse next_cursor later for new data.
 An exhausted snapshot stays fixed; omit --cursor to see new data in a new snapshot.
 JSON pages contain previews and record_ref; use get for full original record JSON.
@@ -294,6 +310,8 @@ struct Status {
     worker_exit_confirmed: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     management_closed_unix_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    shutdown: Option<capture::Shutdown>,
 }
 impl Status {
     fn new(session: &Path) -> Self {
@@ -325,6 +343,7 @@ impl Status {
             last_stream_error: None,
             worker_exit_confirmed: None,
             management_closed_unix_ms: None,
+            shutdown: None,
         }
     }
     fn terminal(&self) -> bool {

@@ -18,8 +18,25 @@ enum TimeFormat {
     Rfc3339,
 }
 
+#[derive(Clone, Copy)]
+enum DisplayTime {
+    Received,
+    Device,
+    Both,
+}
+impl DisplayTime {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Received => "received",
+            Self::Device => "device",
+            Self::Both => "both",
+        }
+    }
+}
+
 pub(super) struct TextOptions {
     format: TimeFormat,
+    display_time: Option<DisplayTime>,
     zone: TimeZone,
     local_unavailable: bool,
     process_width: usize,
@@ -50,6 +67,15 @@ impl ObservedTime {
 
 impl TextOptions {
     pub(super) fn parse(flags: &mut BTreeMap<String, String>) -> Result<Self> {
+        let display_time = flags
+            .remove("--display-time")
+            .map(|value| match value.as_str() {
+                "received" => Ok(DisplayTime::Received),
+                "device" => Ok(DisplayTime::Device),
+                "both" => Ok(DisplayTime::Both),
+                _ => Err(usage("--display-time must be received, device or both")),
+            })
+            .transpose()?;
         let format = match flags
             .remove("--time-format")
             .as_deref()
@@ -91,6 +117,7 @@ impl TextOptions {
         };
         Ok(Self {
             format,
+            display_time,
             zone,
             local_unavailable,
             process_width,
@@ -106,7 +133,47 @@ impl TextOptions {
         self.process_names_truncated.get()
     }
 
+    /// Describe a rendering policy, not an assertion that every record has the
+    /// same clock available. Filtering retains its independent time basis.
+    pub(super) fn presentation(&self, device_time: bool) -> serde_json::Value {
+        let mode = self.display_time.unwrap_or(if device_time {
+            DisplayTime::Device
+        } else {
+            DisplayTime::Received
+        });
+        let mut policy = serde_json::json!({"mode": mode.name()});
+        if matches!(mode, DisplayTime::Received | DisplayTime::Both) {
+            policy["received"] = serde_json::json!(
+                "persisted observed_unix_ms; host observation, not device event time; unavailable if missing"
+            );
+        }
+        if matches!(mode, DisplayTime::Device | DisplayTime::Both) {
+            policy["device"] = serde_json::json!(
+                "exact protobuf epoch, else unconverted device-text without an absolute instant, else unavailable; availability varies by record"
+            );
+        }
+        serde_json::json!({
+            "display_time_requested": self.display_time.map(DisplayTime::name),
+            "effective_time_policy": policy,
+            "process_width": self.process_width(),
+            "process_names_truncated": self.process_names_truncated(),
+        })
+    }
+
     fn time_prefix(&self, entry: &LogEntry, device: bool) -> String {
+        match self.display_time {
+            None => self.clock_prefix(entry, device, false),
+            Some(DisplayTime::Received) => self.clock_prefix(entry, false, true),
+            Some(DisplayTime::Device) => self.clock_prefix(entry, true, true),
+            Some(DisplayTime::Both) => format!(
+                "{} | {}",
+                self.clock_prefix(entry, false, true),
+                self.clock_prefix(entry, true, true)
+            ),
+        }
+    }
+
+    fn clock_prefix(&self, entry: &LogEntry, device: bool, explicit: bool) -> String {
         let source = if device { "device" } else { "received" };
         let time = if device {
             entry.proto.as_ref().and_then(|p| {
@@ -127,20 +194,43 @@ impl TextOptions {
                 })
         };
         let Some(time) = time else {
+            if explicit {
+                return if device {
+                    entry
+                        .log_fields()
+                        .filter(|fields| !fields.time.is_empty())
+                        .map_or_else(
+                            || "[device-time-unavailable]".to_owned(),
+                            |fields| {
+                                format!(
+                                    "[device-text={:?}; no-absolute-time; unconverted]",
+                                    fields.time
+                                )
+                            },
+                        )
+                } else {
+                    "[received-time-unavailable]".to_owned()
+                };
+            }
             return entry.log_fields().map_or_else(
                 || format!("[{source}-time-unavailable]"),
                 |fields| format!("[{source}-time-unavailable; device-text={:?}]", fields.time),
             );
         };
+        let source_label = if explicit && !device {
+            "received; host-observation"
+        } else {
+            source
+        };
         if self.format == TimeFormat::Epoch {
-            return if device {
-                format!("{} [device]", time.epoch())
+            return if device || explicit {
+                format!("{} [{source_label}]", time.epoch())
             } else {
                 time.epoch()
             };
         }
         let Some(timestamp) = time.timestamp() else {
-            return format!("{} [{source}; calendar-unavailable]", time.epoch());
+            return format!("{} [{source_label}; calendar-unavailable]", time.epoch());
         };
         let mut zoned = timestamp.to_zoned(self.zone.clone());
         let mut note = if self.local_unavailable {
@@ -155,8 +245,8 @@ impl TextOptions {
             note = "; local-offset-unrepresentable; shown-in-utc";
         }
         let time = calendar(&zoned, time, self.format);
-        if device || !note.is_empty() {
-            format!("{time} [{source}{note}]")
+        if device || explicit || !note.is_empty() {
+            format!("{time} [{source_label}{note}]")
         } else {
             time
         }
@@ -309,6 +399,7 @@ mod tests {
     fn options(format: TimeFormat, zone: TimeZone) -> TextOptions {
         TextOptions {
             format,
+            display_time: None,
             zone,
             local_unavailable: false,
             process_width: 32,

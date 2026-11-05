@@ -1793,11 +1793,31 @@ mod linux {
             std::thread::sleep(Duration::from_millis(10));
         };
         assert!(
-            matches!(exit.code(), Some(0 | 130)),
+            matches!(exit.code(), Some(130)),
             "SIGINT did not exit gracefully: {exit}; {}",
-            fs::read_to_string(diagnostics).unwrap()
+            fs::read_to_string(&diagnostics).unwrap()
         );
-        assert!(!entries(&fs::read_to_string(output).unwrap()).is_empty());
+        let reports: Vec<Value> = fs::read_to_string(diagnostics)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let status = reports.iter().find(|r| r["type"] == "status").unwrap();
+        assert_eq!(status["state"], "completed");
+        assert_eq!(status["shutdown"]["trigger"], "interrupted");
+        assert_eq!(status["shutdown"]["cleanup"], "confirmed");
+        assert_eq!(status["shutdown"]["footer_write"], "confirmed");
+        assert_eq!(reports.last().unwrap()["error"]["code"], "interrupted");
+        let bytes = fs::read(output).unwrap();
+        let document = ciallogcat::document::load(
+            bytes.as_slice(),
+            1024 * 1024,
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+        .unwrap();
+        assert!(!document.entries.is_empty());
+        assert_eq!(status["entries"], document.entries.len());
+        assert_eq!(status["bytes"], bytes.len());
         s.assert_reaped();
     }
 
