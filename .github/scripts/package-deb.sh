@@ -3,8 +3,9 @@ set -euo pipefail
 
 : "${RELEASE_TAG:?RELEASE_TAG is required}"
 desktop-file-validate assets/linux/ciallogcat.desktop
-archive="ciallogcat-${RELEASE_TAG}-linux-x86_64.deb"
-cargo deb --no-build --locked --output "target/release-dist/$archive"
+asset_tag="${RELEASE_TAG#gui-}"
+archive="ciallogcat-${asset_tag}-linux-x86_64.deb"
+cargo deb -p ciallogcat --no-build --locked --output "target/release-dist/$archive"
 dpkg-deb --info "target/release-dist/$archive"
 test "$(dpkg-deb --field "target/release-dist/$archive" Package)" = ciallogcat
 test "$(dpkg-deb --field "target/release-dist/$archive" Architecture)" = amd64

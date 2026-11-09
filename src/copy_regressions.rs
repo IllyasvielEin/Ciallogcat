@@ -126,6 +126,8 @@ fn newer_copy_cancel_button_and_text_copy_supersede_old_preparation() {
 #[test]
 fn background_oversize_never_publishes_partial_clipboard_text() {
     let mut h = Harness::new(false);
+    // English UI: also covers the translated copy error.
+    h.app.language = Language::En;
     for _ in 0..300 {
         h.app.append_entry(LogEntry::marker("x".repeat(64 * 1024)));
     }

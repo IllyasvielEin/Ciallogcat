@@ -24,27 +24,27 @@ impl Drop for State {
     }
 }
 
-fn probe_label(probe: Probe) -> &'static str {
+fn probe_label(probe: Probe) -> String {
     match probe {
-        Probe::AdbFeatures => "ADB 能力",
-        Probe::LogcatHelp => "设备 logcat 选项",
-        Probe::BufferSizes => "设备 buffer 容量",
-        Probe::Statistics => "设备日志统计",
-        Probe::PruneRules => "设备裁剪规则",
-        Probe::AndroidSdk => "Android API",
-        Probe::AndroidRelease => "Android 版本",
-        Probe::BuildFingerprint => "系统构建标识",
+        Probe::AdbFeatures => "ADB features".to_owned(),
+        Probe::LogcatHelp => tr!("logcat 选项"),
+        Probe::BufferSizes => tr!("buffer 容量"),
+        Probe::Statistics => tr!("logd 统计"),
+        Probe::PruneRules => tr!("logd prune 规则"),
+        Probe::AndroidSdk => "Android API".to_owned(),
+        Probe::AndroidRelease => tr!("Android 版本"),
+        Probe::BuildFingerprint => "Build fingerprint".to_owned(),
     }
 }
 
-fn status_label(status: ProbeStatus) -> &'static str {
+fn status_label(status: ProbeStatus) -> String {
     match status {
-        ProbeStatus::Success => "成功",
-        ProbeStatus::PermissionDenied => "无权限",
-        ProbeStatus::Unsupported => "不支持",
-        ProbeStatus::TimedOut => "超时",
-        ProbeStatus::Cancelled => "已取消",
-        ProbeStatus::Unknown => "未知 / 未成功",
+        ProbeStatus::Success => tr!("成功"),
+        ProbeStatus::PermissionDenied => tr!("无权限"),
+        ProbeStatus::Unsupported => tr!("不支持"),
+        ProbeStatus::TimedOut => tr!("超时"),
+        ProbeStatus::Cancelled => tr!("已取消"),
+        ProbeStatus::Unknown => tr!("未知 / 未成功"),
     }
 }
 
@@ -62,7 +62,7 @@ impl CiallogcatApp {
         }
         let (Some(adb), Some(serial)) = (self.adb_path.clone(), self.selected_device.clone())
         else {
-            self.diagnostics.error = Some("请选择设备并配置 ADB 后查询。已有报告仍可查看。".into());
+            self.diagnostics.error = Some(tr!("请选择设备并配置 ADB 后查询。已有报告仍可查看。"));
             return;
         };
         let buffers = self.buffers.clone();
@@ -71,9 +71,11 @@ impl CiallogcatApp {
         let worker_serial = serial.clone();
         let wake = wake_signal(ctx);
         let (sender, receiver) = mpsc::sync_channel(1);
+        let language = crate::i18n::current();
         let spawned = std::thread::Builder::new()
             .name("device-diagnostics".into())
             .spawn(move || {
+                crate::i18n::set(language);
                 let result = diagnostics::collect(
                     &adb,
                     &worker_serial,
@@ -93,7 +95,9 @@ impl CiallogcatApp {
                     receiver,
                 });
             }
-            Err(error) => self.diagnostics.error = Some(format!("无法启动诊断：{error}")),
+            Err(error) => {
+                self.diagnostics.error = Some(tr!("无法启动诊断：%{error}", error = error))
+            }
         }
     }
 
@@ -110,7 +114,7 @@ impl CiallogcatApp {
             .and_then(|job| match job.receiver.try_recv() {
                 Ok(result) => Some(result),
                 Err(mpsc::TryRecvError::Empty) => None,
-                Err(mpsc::TryRecvError::Disconnected) => Some(Err("诊断工作线程意外结束".into())),
+                Err(mpsc::TryRecvError::Disconnected) => Some(Err(tr!("诊断工作线程意外结束"))),
             });
         if let Some(result) = result {
             self.diagnostics.job = None;
@@ -136,30 +140,30 @@ impl CiallogcatApp {
         }
         let mut open = true;
         let mut refresh = false;
-        egui::Window::new("只读设备诊断").id(egui::Id::new("device_diagnostics"))
+        egui::Window::new(tr!("只读设备诊断")).id(egui::Id::new("device_diagnostics"))
             .open(&mut open).default_width(660.0).resizable(true).show(ctx, |ui| {
                 ui.horizontal_wrapped(|ui| {
-                    refresh = ui.add_enabled(self.diagnostics.job.is_none() && self.selected_device.is_some(), egui::Button::new("重新查询")).clicked();
+                    refresh = ui.add_enabled(self.diagnostics.job.is_none() && self.selected_device.is_some(), egui::Button::new(tr!("重新查询"))).clicked();
                     if let Some(job) = &self.diagnostics.job {
                         ui.spinner();
-                        ui.label(format!("查询 {} · 总期限 10 秒", job.serial));
-                        if ui.button("取消查询").clicked() { job.cancellation.cancel(); }
+                        ui.label(tr!("查询 %{serial} · 总期限 10 秒", serial = job.serial));
+                        if ui.button(tr!("取消查询")).clicked() { job.cancellation.cancel(); }
                     }
                     if let Some(report) = &self.diagnostics.report
-                        && ui.button("复制诊断报告").clicked() {
+                        && ui.button(tr!("复制诊断报告")).clicked() {
                         let text = serde_json::to_string_pretty(report.as_ref()).expect("diagnostic JSON");
                         self.cancel_copy();
                         ctx.copy_text(text);
                     }
                 });
-                ui.label(format!("本机留存预算 {} MiB，不含队列、快照、剪贴板或总 RSS；设备 logd 容量见下方。", self.memory_limit_mib));
+                ui.label(tr!("本机日志内存预算 %{limit} MiB，不含队列、快照、剪贴板或总 RSS；设备 logd buffer 容量见下方。", limit = self.memory_limit_mib));
                 if let Some(error) = &self.diagnostics.error { ui.label(error); }
                 if let Some(report) = &self.diagnostics.report {
-                    ui.label(format!("报告来源：{} · 观察时间 {} · {} ms", report.serial,
-                        report.finished_unix_ms.map_or_else(|| "未知".into(), |time| time.to_string()), report.elapsed_ms));
-                    if self.selected_device.as_deref() != Some(report.serial.as_str()) { ui.label("这是另一设备的历史报告。切换设备后请重新查询。"); }
-                    ui.label(if report.complete { "各项查询已完成。" } else { "部分查询未完成或输出受限；下方逐项保留结果。" });
-                    ui.label("输出分别保留主机 stdout / stderr；旧 ADB 通道可能已在设备端合并。帮助中未列出的选项仍可能被设备接受。");
+                    ui.label(tr!("设备 %{serial} · 完成于 %{time} · 耗时 %{elapsed} ms", serial = report.serial,
+                        time = report.finished_unix_ms.map_or_else(|| tr!("未知"), |time| time.to_string()), elapsed = report.elapsed_ms));
+                    if self.selected_device.as_deref() != Some(report.serial.as_str()) { ui.label(tr!("这是另一设备的历史报告。切换设备后请重新查询。")); }
+                    ui.label(if report.complete { tr!("各项查询已完成。") } else { tr!("部分查询未完成或输出受限；下方逐项保留结果。") });
+                    ui.label(tr!("输出分别保留主机 stdout / stderr；旧 ADB 通道可能已在设备端合并。帮助中未列出的选项仍可能被设备接受。"));
                     egui::ScrollArea::vertical().max_height(380.0).show(ui, |ui| {
                         for observation in &report.observations {
                             egui::CollapsingHeader::new(format!("{} · {}", probe_label(observation.probe), status_label(observation.status)))
@@ -167,8 +171,8 @@ impl CiallogcatApp {
                                     if let Some(error) = &observation.error { ui.label(error); }
                                     for (label,output) in [("stdout",&observation.stdout),("stderr",&observation.stderr)] {
                                         if !output.text.is_empty() || output.truncated || output.read_error.is_some() {
-                                            ui.label(format!("{label} · 保留 {} / 观察到 {} 字节{}{}",output.retained_bytes,output.observed_bytes,
-                                                if output.truncated { " · 已截断" } else { "" }, if output.lossy_utf8 { " · 显示发生 UTF-8 替换" } else { "" }));
+                                            ui.label(tr!("%{label} · 保留 %{retained} / 实际 %{observed} 字节%{truncated}%{lossy}", label = label, retained = output.retained_bytes, observed = output.observed_bytes,
+                                                truncated = if output.truncated { tr!(" · 已截断") } else { String::new() }, lossy = if output.lossy_utf8 { tr!(" · 显示发生 UTF-8 替换") } else { String::new() }));
                                             ui.add(egui::Label::new(RichText::new(&output.text).monospace()).selectable(true).wrap());
                                             if let Some(error) = &output.read_error { ui.label(error); }
                                         }

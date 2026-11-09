@@ -75,7 +75,7 @@ fn crash_navigation_reveals_filtered_unknown_process_with_original_context() {
     assert_eq!(h.app.context_view.as_ref().unwrap().rows, [0, 1, 2]);
     assert_eq!(h.app.package, "com.only.known");
     assert_eq!(h.app.entries[1].copy_text(), original);
-    assert!(h.labels.iter().any(|(label, _)| label == "Java 崩溃线索"));
+    assert!(h.labels.iter().any(|(label, _)| label == "疑似 Java 崩溃"));
 }
 
 #[test]
@@ -541,14 +541,14 @@ fn history_scope_is_selectable_from_capture_menu_and_applies_after_submenu() {
     let mut h = Harness::new(false);
     h.resize(900.0, 560.0);
     h.click_rendered_label("采集设置");
-    h.click_rendered_label("最近 N 条后跟随");
-    h.click_rendered_label("最近 N 条快照");
+    h.click_rendered_label("最近 N 条后持续采集（-T）");
+    h.click_rendered_label("最近 N 条快照（-t）");
     assert!(h.app.scope_draft.parse().unwrap().is_dump());
     h.click_rendered_label("应用");
     assert!(h.app.capture_scope.is_dump());
     h.click_rendered_label("采集设置");
-    h.click_rendered_label("最近 N 条快照");
-    h.click_rendered_label("当前 buffer 快照");
+    h.click_rendered_label("最近 N 条快照（-t）");
+    h.click_rendered_label("当前 buffer 快照（-d）");
     h.click_rendered_label("应用");
     assert_eq!(h.app.capture_scope.logcat_args(), vec!["-d"]);
 }
@@ -576,7 +576,15 @@ fn native_structural_rows_share_kind_aware_table_details_accessibility_and_copy(
 
     let ctx = egui::Context::default();
     ctx.enable_accesskit();
-    let mut app = CiallogcatApp::with_config(&ctx, AppConfig::default(), None);
+    // English UI: the accessible row wording is asserted below.
+    let mut app = CiallogcatApp::with_config(
+        &ctx,
+        AppConfig {
+            language: Some(Language::En),
+            ..Default::default()
+        },
+        None,
+    );
     app.follow_logs = false;
     app.show_details = false;
     let mut session = Session::new();
@@ -654,7 +662,7 @@ fn native_structural_rows_share_kind_aware_table_details_accessibility_and_copy(
         assert!(
             h.labels
                 .iter()
-                .any(|(label, _)| label == &format!("[{kind}] · 非日志记录；无日志元字段"))
+                .any(|(label, _)| label == &format!("[{kind}] · not a log record; no log fields"))
         );
         h.frame(vec![egui::Event::Copy]);
         assert_eq!(h.copied, [format!("[{kind}] {}", messages[index])]);

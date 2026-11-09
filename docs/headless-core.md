@@ -1,18 +1,28 @@
 # Headless shared core
 
-The desktop application and other Rust consumers now share one library in the
-existing `ciallogcat` package. The default `gui` feature preserves the desktop
-binary. Disable default features to build the library and standalone CLI without
-`eframe`, `egui`, window-system or GPU dependencies. Add `--lib` to check only the
-library:
+The desktop GUI (`ciallogcat`) and CLI (`ciallogcat-cli`) are independently
+versioned workspace packages. Both depend on the internal `ciallogcat-core`
+package at `crates/core`; its Rust crate name remains `ciallogcat`. The core and
+CLI have no GUI feature or dependency on `eframe`, `egui`, window systems or GPUs.
+Their manifests reference the existing source and test files without moving them.
 
 ```sh
-cargo check --locked --no-default-features --lib
-cargo test --locked --no-default-features
-cargo tree --locked --no-default-features
+cargo check --locked -p ciallogcat-core --lib
+cargo test --locked -p ciallogcat-core -p ciallogcat-cli
+cargo tree --locked -p ciallogcat-cli
 ```
 
-A Rust consumer can depend on this package with `default-features = false`.
+A Rust consumer can use a path dependency on the core package:
+
+```toml
+[dependencies]
+ciallogcat = { package = "ciallogcat-core", path = "../ciallogcat/crates/core" }
+```
+
+The core is unpublished. Its package version is independent of GUI/CLI product
+versions and native archive/protocol versions; release tags pin the complete
+workspace commit, including the exact core source used by each build.
+
 The library exposes:
 
 - `model`: log levels, buffer selection, log entries and complete-record text

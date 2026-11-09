@@ -31,7 +31,7 @@
 
 Ciallogcat 专注于 Android 应用调试。桌面应用 `ciallogcat` 通过 ADB 读取实时 Logcat，并在本地筛选。独立的 `ciallogcat-cli` 为脚本和 Agent 输出规范化 JSONL，无需打开窗口。
 
-桌面应用可通过 **文件** 菜单或拖放打开 JSONL 文件，无需 ADB。文件视图只读；另存和筛选导出使用同一种原生文档格式。当前不支持多设备并排显示，主要操作使用中文，技术字段保留惯用名称。文件功能见[使用说明](docs/file-workflow.md)。
+桌面应用可通过 **文件** 菜单或拖放打开 JSONL 文件，无需 ADB。文件视图只读；另存和筛选导出使用同一种原生文档格式。当前不支持多设备并排显示。界面支持英文与简体中文（**视图 → 设置… → 外观**）；新安装默认英文，从旧版本升级的设置保持中文；两种语言都保留惯用的技术字段名。文件功能见[使用说明](docs/file-workflow.md)。
 
 ## 安装
 
@@ -79,11 +79,11 @@ cd Ciallogcat
 cargo run --locked --release --bin ciallogcat
 
 # 仅构建 CLI，不引入 GUI 依赖
-cargo build --locked --release --no-default-features --bin ciallogcat-cli
+cargo build --locked --release -p ciallogcat-cli
 ./target/release/ciallogcat-cli --help
 ```
 
-只构建 GUI 而不启动可使用 `cargo build --locked --release --bin ciallogcat`。可执行文件位于 `target/release/`，Windows 下带 `.exe` 后缀。Rust 项目也可以关闭默认 feature，使用[共享核心](docs/headless-core.md)。
+只构建 GUI 而不启动可使用 `cargo build --locked --release --bin ciallogcat`。可执行文件位于 `target/release/`，Windows 下带 `.exe` 后缀。Rust 项目也可以使用独立的无 GUI [共享核心](docs/headless-core.md)包。GUI 与 CLI 分别管理版本，标签使用 `gui-v…` / `cli-v…`，见[发布指南](docs/release.md)。
 
 ## 桌面端使用
 
@@ -91,7 +91,7 @@ cargo build --locked --release --no-default-features --bin ciallogcat-cli
 2. 选择或输入包名，设置最低级别并输入关键词。`.*` 切换正则表达式，**Aa** 切换大小写匹配。**筛选方案** 保存组合，关键词历史保留最近搜索。
 3. 点击日志行查看完整消息。**Shift+点击** 连选，**Ctrl+点击** 增减选中行，**Ctrl+C** 复制。**Ctrl+F** 或 **/** 聚焦搜索。
 4. 浏览或选择日志会暂停自动跟随，但不会停止采集。按 **Ctrl+End** 或点击“**回到最新**”恢复跟随。
-5. 在 **视图** 调整主题、行高、详情和日志内存预算。预算草稿仅在点击 **应用预算** 后生效。
+5. 在 **视图 → 设置…**（**Ctrl+,**）调整界面语言、主题（可跟随系统）、行高、详情和日志内存预算。预算草稿仅在点击 **应用预算** 后生效。**F1** 查看全部快捷键。
 6. **文件 → 打开日志**（Ctrl+O）读取已有 JSONL；**另存保留日志**（Ctrl+Shift+S）或**导出当前筛选结果**保存固定快照。当前使用路径输入与拖放，保存目标须为新文件。
 
 一些实用细节：
@@ -100,7 +100,7 @@ cargo build --locked --release --no-default-features --bin ciallogcat-cli
 - 设备发现失败时保留上次成功列表与当前选择。快照中的离线或设备缺失不会单独停止仍在运行的日志流，“暂停”仍可使用。
 - 实际日志流退出后按 1、2、4 秒最多重连三次；暂停或关闭会取消重连。重新采集须等待旧进程与输出排空确认，超过 5 秒未确认则报错并阻止新启动。
 - 缓冲区默认 `main + system + crash`，修改后点击“**应用**”生效。启动与重启使用 `-T 1`，不会回补历史，期间可能有缺口。
-- 包名筛选包含 `com.example.app:sync` 等子进程。GUI 进程名来自近期 `ps` 推定，并非已核实的身份；查询失败或过期后不再使用，也不会用后来的快照回填历史未知行。未识别或短命进程可能被该筛选隐藏，清除包名限制即可检查它们的日志。结构分隔行与未解析文本可在默认 Verbose 阈值下匹配消息条件；包名、Tag 或更严格的级别条件会排除这些没有日志元字段的记录，不将其计为未知进程。
+- 包名筛选包含 `com.example.app:sync` 等子进程。GUI 进程名来自近期 `ps` 推测，并非已核实的身份；查询失败或过期后不再使用，也不会用后来的快照回填历史未知行。未识别或短命进程可能被该筛选隐藏，清除包名限制即可检查它们的日志。结构分隔行与未解析文本可在默认 Verbose 阈值下匹配消息条件；包名、Tag 或更严格的级别条件会排除这些没有日志元字段的记录，不将其计为未知进程。
 - 正则无效时显示错误，修正后恢复结果。**清空视图** 确认后仅清除本地记录，不清除设备上的 Logcat 缓冲区。
 
 ### 内存保留
@@ -186,12 +186,12 @@ Agent 集成可使用 `capture/start` 和 `query/get/context`，沿用 GUI 可�
 
 ```sh
 cargo fmt --all --check
-cargo test --locked
-cargo test --locked --no-default-features
-cargo clippy --locked --all-targets -- -D warnings
-cargo clippy --locked --no-default-features --all-targets -- -D warnings
+cargo test --locked --workspace
+cargo test --locked -p ciallogcat-cli -p ciallogcat-core
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo clippy --locked -p ciallogcat-cli -p ciallogcat-core --all-targets -- -D warnings
 cargo build --locked --release
-cargo build --locked --release --no-default-features --bin ciallogcat-cli
+cargo build --locked --release -p ciallogcat-cli
 ```
 
 Mock ADB 测试在 Linux 上需要 Python 3，无需 Android 设备。详见[测试指南](docs/adb-testing.md)与 [CLI 验证指南](docs/cli.md#validation-and-packaging)。**Checks** 工作流在 Pull Request、推送 `main` 和手动触发时运行；Windows 采集与会话生命周期已配置原生 Rust fake-ADB fixture；本机交叉编译不等于 Windows 运行验证。原发布工作流仍仅在推送版本标签时运行。发布前请阅读[发布指南](docs/release.md)。

@@ -16,6 +16,7 @@ mod diagnostics_ui;
 mod file_ui;
 mod font_fallback;
 mod history;
+mod i18n;
 mod log_table_ui;
 #[cfg(test)]
 mod performance;
@@ -23,6 +24,7 @@ mod process_watch;
 mod reading;
 mod reading_ui;
 mod selection;
+mod settings_ui;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -33,7 +35,10 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 use adb::{BackendEvent, DeviceInfo, LogcatEvent, LogcatHandle};
-use config::AppConfig;
+use config::{AppConfig, ThemeChoice};
+use i18n::{Language, tr};
+
+rust_i18n::i18n!("locales");
 use eframe::egui::{
     self, Align, Color32, FontFamily, FontId, Layout, RichText, TextFormat, TextStyle,
     text::LayoutJob,
@@ -45,6 +50,23 @@ use model::{Level, LogBuffer, LogEntry, LogEntryKind, ProcessSource, SavedFilter
 use regex::Regex;
 
 const MIB: usize = 1024 * 1024;
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("Ctrl+F 或 /", "聚焦消息筛选"),
+    ("↑ ↓ Home End", "选择日志"),
+    ("Shift+单击 / Shift+↑↓", "选择范围"),
+    ("Ctrl+单击", "切换单行选择"),
+    ("Ctrl+A", "全选筛选结果"),
+    ("Ctrl+C", "复制选中日志"),
+    ("Ctrl+End", "回到最新并跟随"),
+    ("Ctrl+Enter", "查看 / 退出上下文"),
+    ("F3 / Shift+F3", "下一个 / 上一个详情命中"),
+    ("F8", "下一个疑似崩溃 / ANR"),
+    ("Ctrl+O", "打开日志文件"),
+    ("Ctrl+Shift+S", "另存保留日志"),
+    ("F1", "显示本帮助"),
+    ("Ctrl+,", "打开设置"),
+    ("Esc", "退出输入或选择"),
+];
 const DEVICE_POLL_INTERVAL: Duration = Duration::from_secs(2);
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(750);
 // A host ps sample can only suggest a recent name, never prove PID identity.
@@ -94,6 +116,10 @@ fn wake_signal(ctx: &egui::Context) -> WakeSignal {
 }
 
 fn main() -> eframe::Result {
+    if std::env::args().nth(1).as_deref() == Some("--version") {
+        println!("Ciallogcat GUI {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     let mut options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 820.0])
@@ -153,16 +179,16 @@ enum CaptureState {
 }
 
 impl CaptureState {
-    fn label(&self) -> &str {
+    fn label(&self) -> String {
         match self {
-            Self::NoAdb => "未找到 ADB",
-            Self::WaitingForDevice => "等待设备",
-            Self::Connecting => "正在启动 Logcat",
-            Self::Running => "实时 Logcat",
-            Self::Stopping => "正在停止并接收剩余日志",
-            Self::Reconnecting { .. } => "等待自动重连",
-            Self::Paused => "已暂停采集",
-            Self::Error(error) => error,
+            Self::NoAdb => tr!("未找到 ADB"),
+            Self::WaitingForDevice => tr!("等待设备"),
+            Self::Connecting => tr!("正在启动 Logcat"),
+            Self::Running => tr!("实时 Logcat"),
+            Self::Stopping => tr!("正在停止并接收剩余日志"),
+            Self::Reconnecting { .. } => tr!("等待自动重连"),
+            Self::Paused => tr!("已暂停采集"),
+            Self::Error(error) => i18n::localize_message(error),
         }
     }
 
@@ -237,6 +263,8 @@ struct CiallogcatApp {
     context_view: Option<reading::ContextView>,
 
     dark: bool,
+    theme: ThemeChoice,
+    language: Language,
     row_height: f32,
     show_details: bool,
     follow_logs: bool,
@@ -279,6 +307,9 @@ struct CiallogcatApp {
     query_history_pending: bool,
     query_history_open: bool,
     show_save_filter: bool,
+    show_shortcuts: bool,
+    show_settings: bool,
+    settings_page: settings_ui::Page,
     save_filter_name: String,
     save_filter_focused: bool,
     config_dirty_since: Option<Instant>,
@@ -292,7 +323,10 @@ impl CiallogcatApp {
 
     fn with_config(ctx: &egui::Context, config: AppConfig, adb_path: Option<PathBuf>) -> Self {
         configure_fonts(ctx);
-        configure_style(ctx, config.dark);
+        let theme = config.theme_choice();
+        apply_theme(ctx, theme);
+        let language = config.language();
+        i18n::set(language);
 
         let (filter_tx, filter_rx) = filter::spawn_filter_worker(wake_signal(ctx));
 
@@ -371,7 +405,9 @@ impl CiallogcatApp {
             detail_search: reading::DetailState::new(wake_signal(ctx)),
             context_view: None,
 
-            dark: config.dark,
+            dark: theme != ThemeChoice::Light,
+            theme,
+            language,
             row_height: config.row_height,
             show_details: config.show_details,
             follow_logs: true,
@@ -418,6 +454,9 @@ impl CiallogcatApp {
             query_history_pending: false,
             query_history_open: false,
             show_save_filter: false,
+            show_shortcuts: false,
+            show_settings: false,
+            settings_page: settings_ui::Page::Appearance,
             save_filter_name: String::new(),
             save_filter_focused: false,
             config_dirty_since: None,
@@ -609,7 +648,9 @@ impl CiallogcatApp {
             CopyTarget::Row(index) => Some(index),
         };
         if last.is_some_and(|index| self.classification_pending(index)) {
-            self.copy_notice = Some("Selection is still being checked. Copy again when filtering catches up; nothing was copied.".to_owned());
+            self.copy_notice = Some(tr!(
+                "所选日志仍在检查筛选；请在筛选完成后重新复制，本次未复制任何内容。"
+            ));
             return;
         }
         let background = match target {
@@ -680,7 +721,7 @@ impl CiallogcatApp {
             .is_some_and(|(_, stamp)| stamp != self.copy_stamp())
         {
             self.cancel_copy();
-            self.copy_notice = Some("选择或来源已变化，复制准备已取消；剪贴板保持不变。".into());
+            self.copy_notice = Some(tr!("选择或来源已变化，复制准备已取消；剪贴板保持不变。"));
             return;
         }
         if let Some(prepared) = self.copy_worker.take()
@@ -712,8 +753,9 @@ impl CiallogcatApp {
         self.memory_limit_draft = None;
         if self.files.document.is_some() && self.files.document_bytes > memory_budget_bytes(applied)
         {
-            self.files.notice =
-                Some("当前文件超出此预算；请先关闭文件。离线文件不会被静默裁剪。".into());
+            self.files.notice = Some(tr!(
+                "当前文件超出此预算；请先关闭文件。离线文件不会被静默裁剪。"
+            ));
             return;
         }
         if applied == self.memory_limit_mib {
@@ -830,7 +872,7 @@ impl CiallogcatApp {
             .retain(|(_, absolute)| *absolute >= self.dropped_entries);
         if expired_details {
             self.detail_lines = None;
-            self.copy_notice = Some("Selected log expired from the retained history.".to_owned());
+            self.copy_notice = Some(tr!("所选日志已从保留历史中移除。"));
         }
         if self.selected.is_none() {
             self.focus_log_selection = false;
@@ -981,7 +1023,7 @@ impl CiallogcatApp {
                                         .stream_started(segment, self.live_session.last_seq());
                                 } else {
                                     self.halt_capture(
-                                        "日志 segment 计数已耗尽，采集已停止。".to_owned(),
+                                        tr!("日志 segment 计数已耗尽，采集已停止。").to_owned(),
                                     );
                                 }
                             }
@@ -1011,7 +1053,9 @@ impl CiallogcatApp {
                             }
                             let Some(identity) = self.live_session.next_record(observed_unix_ms)
                             else {
-                                self.halt_capture("无法分配唯一日志身份，采集已停止。".to_owned());
+                                self.halt_capture(
+                                    tr!("无法分配唯一日志身份，采集已停止。").to_owned(),
+                                );
                                 continue;
                             };
                             entry.provenance = Some(identity);
@@ -1026,15 +1070,15 @@ impl CiallogcatApp {
                             let message = error
                                 .or_else(|| self.last_capture_error.take())
                                 .unwrap_or_else(|| match code {
-                                    Some(code) => format!("Logcat stopped ({code})"),
-                                    None => "Logcat stopped".to_owned(),
+                                    Some(code) => tr!("Logcat 已停止（%{code}）", code = code),
+                                    None => tr!("Logcat 已停止"),
                                 });
                             if self.accepts_capture_data(session_id) {
                                 if completed_snapshot && !self.capture_controller.is_stopping() {
                                     self.capture_facts
                                         .snapshot_completed(self.live_session.last_seq());
                                     self.files.notice =
-                                        Some("历史快照已完成；未开启持续跟随。".into());
+                                        Some(tr!("历史快照已完成；未开启持续跟随。"));
                                 }
                                 self.capture_facts.exited(
                                     code,
@@ -1333,7 +1377,7 @@ impl CiallogcatApp {
             self.process_query_pending = false;
             self.last_capture_error = None;
             let Some(attempt) = self.live_session.begin_attempt() else {
-                self.halt_capture("日志 attempt 计数已耗尽，采集已停止。".to_owned());
+                self.halt_capture(tr!("日志 attempt 计数已耗尽，采集已停止。").to_owned());
                 return;
             };
             self.capture_facts.begin_attempt_with_scope(
@@ -1665,6 +1709,8 @@ impl CiallogcatApp {
             use_regex: self.use_regex,
             case_sensitive: self.case_sensitive,
             dark: self.dark,
+            theme: Some(self.theme),
+            language: Some(self.language),
             row_height: self.row_height,
             show_details: self.show_details,
             saved_filters: self.saved_filters.clone(),
@@ -1676,7 +1722,7 @@ impl CiallogcatApp {
         self.config_dirty_since = None;
         match self.app_config().save() {
             Ok(()) => self.config_error = None,
-            Err(error) => self.config_error = Some(format!("Failed to save settings: {error}")),
+            Err(error) => self.config_error = Some(tr!("设置保存失败：%{error}", error = error)),
         }
     }
 
@@ -1692,7 +1738,7 @@ impl CiallogcatApp {
         egui::Panel::top("toolbar").exact_size(44.0).show(root_ui, |ui| {
             ui.horizontal_centered(|ui| {
                 ui.spacing_mut().item_spacing.x = if compact { 4.0 } else { 8.0 };
-                    let device_label = ui.label("设备");
+                    let device_label = ui.label(tr!("设备"));
 
                     let selected_label = self
                         .selected_device
@@ -1703,11 +1749,11 @@ impl CiallogcatApp {
                         .map(DeviceInfo::display_name)
                         .unwrap_or_else(|| {
                             if let Some(serial) = &self.selected_device {
-                                format!("{serial} · 未发现")
+                                tr!("%{serial} · 未连接", serial = serial)
                             } else if self.devices.is_empty() {
-                                "无设备".to_owned()
+                                tr!("无设备").to_owned()
                             } else {
-                                "选择设备".to_owned()
+                                tr!("选择设备").to_owned()
                             }
                         });
                     // ComboBox::width is a minimum; constrain its child layout so a
@@ -1723,7 +1769,7 @@ impl CiallogcatApp {
                                 .selected_text(&selected_label)
                                 .show_ui(ui, |ui| {
                                     if self.devices.is_empty() {
-                                        ui.add_enabled(false, egui::Button::new("无设备"));
+                                        ui.add_enabled(false, egui::Button::new(tr!("无设备")));
                                     }
                                     for device in &self.devices {
                                         let response = ui.add_enabled(
@@ -1747,8 +1793,8 @@ impl CiallogcatApp {
                         },
                     );
                     if ui
-                        .add_enabled(!self.device_query_pending, egui::Button::new("↻ 刷新"))
-                        .on_hover_text("刷新设备")
+                        .add_enabled(!self.device_query_pending, egui::Button::new(tr!("↻ 刷新")))
+                        .on_hover_text(tr!("刷新设备"))
                         .clicked()
                     {
                         self.refresh_devices(&ctx);
@@ -1756,21 +1802,21 @@ impl CiallogcatApp {
 
                 let capture_requested = matches!(self.capture_controller.intent(), CaptureIntent::Capture(_));
                 let can_start = !self.capture_controller.is_stopping() && self.files.document.is_none() && self.selected_device_available();
-                if ui.add_enabled(capture_requested || can_start, egui::Button::new(if capture_requested { "暂停采集" } else { "开始采集" }))
-                    .on_hover_text("暂停会停止采集并接收剩余日志；再次开始使用当前采集设置，停止期间的日志不保证回补").clicked() {
+                if ui.add_enabled(capture_requested || can_start, egui::Button::new(if capture_requested { tr!("暂停采集") } else { tr!("开始采集") }))
+                    .on_hover_text(tr!("暂停会停止采集并接收剩余日志；再次开始使用当前采集设置，停止期间的日志不保证回补")).clicked() {
                     if capture_requested { self.pause_capture(); } else { self.start_capture(&ctx); }
                 }
-                if ui.add_enabled(self.selected_device.is_some(), egui::Button::new("断开"))
-                    .on_hover_text("结束当前设备会话，保留已有日志；重新选择设备后可再次采集").clicked() {
+                if ui.add_enabled(self.selected_device.is_some(), egui::Button::new(tr!("断开")))
+                    .on_hover_text(tr!("结束当前设备会话，保留已有日志；重新选择设备后可再次采集")).clicked() {
                     self.close_capture();
                 }
                 ui.separator();
 
-                egui::containers::menu::MenuButton::new("采集设置")
+                egui::containers::menu::MenuButton::new(tr!("采集设置"))
                     .config(egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside))
                     .ui(ui, |ui| {
                     ui.set_max_width(420.0);
-                    if ui.button("只读设备诊断…").clicked() { self.open_diagnostics(&ctx); ui.close(); }
+                    if ui.button(tr!("只读设备诊断…")).clicked() { self.open_diagnostics(&ctx); ui.close(); }
                     ui.separator();
                     self.scope_draft.ui(ui);
                     ui.separator();
@@ -1785,91 +1831,49 @@ impl CiallogcatApp {
                         }
                     }
                     ui.separator();
-                    ui.label("影响后续采集；已有日志保留");
-                    if ui.add_enabled(!self.buffer_draft.is_empty(), egui::Button::new("应用")).clicked() {
+                    ui.label(tr!("影响后续采集；已有日志保留"));
+                    if ui.add_enabled(!self.buffer_draft.is_empty(), egui::Button::new(tr!("应用"))).clicked() {
                         self.apply_buffers(&ctx);
                         ui.close();
                     }
                 });
-                    let view = egui::containers::menu::MenuButton::new("视图")
+                    egui::containers::menu::MenuButton::new(tr!("视图"))
                         .config(egui::containers::menu::MenuConfig::new()
                             .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside))
                         .ui(ui, |ui| {
                         ui.set_max_width(360.0);
-                        if ui.add_enabled(self.entries.incident_count() > 0 && !self.filter_pending && self.filter_dirty_since.is_none(), egui::Button::new(format!("下一条崩溃 / ANR 线索（{}） · F8", self.entries.incident_count())))
-                            .on_hover_text("在全部保留日志中定位已知签名并打开前后上下文；包含筛选外记录，不能替代故障诊断").clicked() {
+                        if ui.add_enabled(self.entries.incident_count() > 0 && !self.filter_pending && self.filter_dirty_since.is_none(), egui::Button::new(tr!("下一个疑似崩溃 / ANR（%{count}）", count = self.entries.incident_count())).shortcut_text("F8"))
+                            .on_hover_text(tr!("在全部保留日志中按已知签名定位疑似崩溃 / ANR，并打开前后上下文；包含被筛选隐藏的记录，不能替代故障诊断")).clicked() {
                             self.jump_to_incident();
                             ui.close();
                         }
                         ui.separator();
-                        let mut draft = self.memory_limit_draft.unwrap_or(self.memory_limit_mib);
-                        ui.horizontal(|ui| {
-                            ui.label("日志内存预算");
-                            ui.add(egui::DragValue::new(&mut draft).range(16..=4096).suffix(" MiB"));
-                        });
-                        self.memory_limit_draft = Some(draft);
-                        ui.add(egui::Label::new("仅估算保留日志；不含快照、队列、剪贴板及进程总内存。").wrap());
-                        if self.entries.memory_bytes() > memory_budget_bytes(draft) {
-                            ui.colored_label(budget_warning_color(ui.visuals()), "应用后立即移除最旧日志，降至预算约 90%；无法撤销。");
-                        }
-                        ui.horizontal(|ui| {
-                            if ui.button("应用预算").clicked() {
-                                self.apply_memory_budget(draft);
-                                ui.close();
-                            }
-                            if ui.button("取消修改").clicked() {
-                                self.memory_limit_draft = None;
-                                ui.close();
-                            }
-                        });
-                        ui.separator();
                         if ui
-                            .checkbox(&mut self.show_details, "选中时显示详情")
+                            .checkbox(&mut self.show_details, tr!("选中时显示详情"))
                             .changed()
                         {
                             self.mark_config_dirty();
                         }
-                        if ui
-                            .add(
-                                egui::Slider::new(&mut self.row_height, 21.0..=34.0)
-                                    .text("行高"),
-                            )
-                            .changed()
-                        {
-                            self.mark_config_dirty();
-                        }
-                        if ui.checkbox(&mut self.dark, "深色主题").changed() {
-                            configure_style(&ctx, self.dark);
-                            self.mark_config_dirty();
-                        }
                         ui.separator();
-                        ui.collapsing("快捷键", |ui| {
-                            egui::Grid::new("view_shortcuts")
-                                .num_columns(2)
-                                .min_row_height(18.0)
-                                .spacing(egui::vec2(16.0, 4.0))
-                                .show(ui, |ui| {
-                            for (keys, action) in [
-                                ("Ctrl+F 或 /", "聚焦消息筛选"),
-                                ("↑ ↓ Home End", "选择日志"),
-                                ("Ctrl+C", "复制选中日志"),
-                                ("Shift+单击 / Shift+↑↓", "选择范围"),
-                                ("Ctrl+单击", "切换单行选择"),
-                                ("Ctrl+A", "全选筛选结果"),
-                                ("Esc", "退出输入或选择"),
-                            ] {
-                                ui.label(keys);
-                                ui.label(action);
-                                ui.end_row();
-                            }
-                            });
-                        });
+                        if ui
+                            .add(egui::Button::new(tr!("快捷键…")).shortcut_text("F1"))
+                            .clicked()
+                        {
+                            self.show_shortcuts = true;
+                            ui.close();
+                        }
+                        if ui
+                            .add(egui::Button::new(tr!("设置…")).shortcut_text("Ctrl+,"))
+                            .clicked()
+                        {
+                            self.open_settings(None);
+                            ui.close();
+                        }
                     });
-                    if view.1.is_none() { self.memory_limit_draft = None; }
                 self.file_menu(ui);
                     egui::ComboBox::from_id_salt("saved_filters")
                         .width(if compact { 80.0 } else { 112.0 })
-                        .selected_text("筛选方案")
+                        .selected_text(tr!("筛选方案"))
                         .show_ui(ui, |ui| {
                             for (index, saved) in self.saved_filters.iter().enumerate() {
                                 ui.horizontal(|ui| {
@@ -1879,7 +1883,7 @@ impl CiallogcatApp {
                                     }
                                     if ui
                                         .button("×")
-                                        .on_hover_text("删除筛选方案")
+                                        .on_hover_text(tr!("删除筛选方案"))
                                         .clicked()
                                     {
                                         delete_saved = Some(index);
@@ -1889,7 +1893,7 @@ impl CiallogcatApp {
                             if !self.saved_filters.is_empty() {
                                 ui.separator();
                             }
-                            if ui.button("保存当前筛选…").clicked() {
+                            if ui.button(tr!("保存当前筛选…")).clicked() {
                                 self.show_save_filter = true;
                                 ui.close();
                             }
@@ -1897,8 +1901,8 @@ impl CiallogcatApp {
 
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if ui
-                            .add_enabled(!self.entries.is_empty() && self.files.document.is_none(), egui::Button::new("清空视图"))
-                            .on_hover_text("清空本地保留日志；确认后无法恢复，不影响设备日志")
+                            .add_enabled(!self.entries.is_empty() && self.files.document.is_none(), egui::Button::new(tr!("清空视图")))
+                            .on_hover_text(tr!("清空本地保留日志；确认后无法恢复，不影响设备日志"))
                             .clicked()
                         {
                             self.pending_clear = true;
@@ -1906,11 +1910,11 @@ impl CiallogcatApp {
                         ui.separator();
                         if ui
                             .button(if self.follow_logs {
-                                "暂停跟随"
+                                tr!("暂停跟随")
                             } else {
-                                "↓ 回到最新"
+                                tr!("↓ 回到最新")
                             })
-                            .on_hover_text("只控制视图滚动，浏览时继续采集；Ctrl+End 回到最新")
+                            .on_hover_text(tr!("只控制视图滚动，浏览时继续采集；Ctrl+End 回到最新"))
                             .clicked()
                         {
                             if self.follow_logs {
@@ -1923,7 +1927,7 @@ impl CiallogcatApp {
                             }
                         }
                         if matches!(self.capture_state, CaptureState::Error(_))
-                            && ui.button("重试采集").clicked()
+                            && ui.button(tr!("重试采集")).clicked()
                         {
                             self.retry_capture(&ctx);
                         }
@@ -1939,12 +1943,13 @@ impl CiallogcatApp {
                     let package_response = ui.add_sized(
                         [if compact { 160.0 } else { 190.0 }, 28.0],
                         egui::TextEdit::singleline(&mut self.package)
-                            .hint_text("包名 · 全部进程")
+                            .hint_text(tr!("包名 · 全部进程"))
+                            .vertical_align(Align::Center)
                             .font(TextStyle::Monospace)
                             .id(egui::Id::new("package_filter")),
                     );
                     ctx.accesskit_node_builder(package_response.id, |node| {
-                        node.set_label("包名筛选");
+                        node.set_label(tr!("包名筛选"));
                     });
                     filter_changed |= package_response.changed();
                     if package_response.gained_focus() {
@@ -1967,7 +1972,7 @@ impl CiallogcatApp {
                         .show(|ui| {
                             ui.set_min_width(304.0);
                             if ui
-                                .selectable_label(self.package.trim().is_empty(), "全部进程")
+                                .selectable_label(self.package.trim().is_empty(), tr!("全部进程"))
                                 .clicked()
                             {
                                 package_choice = Some(String::new());
@@ -1993,17 +1998,23 @@ impl CiallogcatApp {
                                         }
                                     }
                                     if !found_package {
-                                        ui.label(RichText::new("没有匹配的已安装应用").weak());
+                                        ui.label(RichText::new(tr!("没有匹配的已安装应用")).weak());
                                     }
                                 });
 
                             ui.separator();
+                            if !self.package.trim().is_empty() {
+                                ui.collapsing(tr!("进程变化"), |ui| {
+                                    self.process_changes_ui(ui)
+                                });
+                                ui.separator();
+                            }
                             if self.package_query_pending {
                                 ui.horizontal(|ui| {
                                     ui.spinner();
-                                    ui.label(RichText::new("正在加载包列表…").weak());
+                                    ui.label(RichText::new(tr!("正在加载包列表…")).weak());
                                 });
-                            } else if ui.button("刷新包列表").clicked() {
+                            } else if ui.button(tr!("刷新包列表")).clicked() {
                                 refresh_packages = true;
                             }
                         });
@@ -2019,12 +2030,13 @@ impl CiallogcatApp {
                     let query_response = ui.add_sized(
                         [query_width, 28.0],
                         egui::TextEdit::singleline(&mut self.query)
-                            .hint_text("筛选消息 · / 聚焦")
+                            .hint_text(tr!("筛选消息 · / 聚焦"))
+                            .vertical_align(Align::Center)
                             .font(TextStyle::Monospace)
                             .id(egui::Id::new("query_shortcut")),
                     );
                     ctx.accesskit_node_builder(query_response.id, |node| {
-                        node.set_label("消息筛选");
+                        node.set_label(tr!("消息筛选"));
                     });
                     filter_changed |= query_response.changed();
                     if query_response.gained_focus() {
@@ -2060,7 +2072,7 @@ impl CiallogcatApp {
                         .show(|ui| {
                             ui.set_max_width(360.0);
                             if self.filter_history.is_empty() {
-                                ui.label("暂无筛选历史");
+                                ui.label(tr!("暂无筛选历史"));
                             }
                             egui::ScrollArea::vertical()
                                 .max_height(300.0)
@@ -2084,7 +2096,7 @@ impl CiallogcatApp {
                                             }
                                             if ui
                                                 .button("×")
-                                                .on_hover_text("删除此条历史")
+                                                .on_hover_text(tr!("删除此条历史"))
                                                 .clicked()
                                             {
                                                 delete_history = Some(index);
@@ -2094,7 +2106,7 @@ impl CiallogcatApp {
                                 });
                             if !self.filter_history.is_empty() {
                                 ui.separator();
-                                if ui.button("清空历史").clicked() {
+                                if ui.button(tr!("清空历史")).clicked() {
                                     clear_history = true;
                                     ui.close();
                                 }
@@ -2123,13 +2135,13 @@ impl CiallogcatApp {
                     }
                     let regex_response = ui
                         .toggle_value(&mut self.use_regex, ".*")
-                        .on_hover_text("使用正则表达式");
+                        .on_hover_text(tr!("使用正则"));
                     regex_response.widget_info(|| {
                         egui::WidgetInfo::selected(
                             egui::WidgetType::Checkbox,
                             regex_response.enabled(),
                             self.use_regex,
-                            "使用正则表达式",
+                            tr!("使用正则"),
                         )
                     });
                     if regex_response.clicked() {
@@ -2138,13 +2150,13 @@ impl CiallogcatApp {
                     filter_changed |= regex_response.changed();
                     let case_response = ui
                         .toggle_value(&mut self.case_sensitive, "Aa")
-                        .on_hover_text("区分大小写");
+                        .on_hover_text(tr!("区分大小写"));
                     case_response.widget_info(|| {
                         egui::WidgetInfo::selected(
                             egui::WidgetType::Checkbox,
                             case_response.enabled(),
                             self.case_sensitive,
-                            "区分大小写",
+                            tr!("区分大小写"),
                         )
                     });
                     if case_response.clicked() {
@@ -2165,28 +2177,28 @@ impl CiallogcatApp {
                     )
                     .ui(ui, |ui| {
                         ui.set_min_width(260.0);
-                        ui.label("Tag 字面子串 · 区分大小写");
-                        ui.label("包含");
+                        ui.label(tr!("Tag 子串匹配（不支持正则）· 区分大小写"));
+                        ui.label(tr!("包含"));
                         let include = ui.add(
                             egui::TextEdit::singleline(&mut self.tag_include)
                                 .id(egui::Id::new("tag_include"))
-                                .hint_text("留空不限"),
+                                .hint_text(tr!("留空不限")),
                         );
                         ctx.accesskit_node_builder(include.id, |node| {
-                            node.set_label("Tag contains")
+                            node.set_label(tr!("Tag 包含"))
                         });
-                        ui.label("排除");
+                        ui.label(tr!("排除"));
                         let exclude = ui.add(
                             egui::TextEdit::singleline(&mut self.tag_exclude)
                                 .id(egui::Id::new("tag_exclude"))
-                                .hint_text("留空不排除"),
+                                .hint_text(tr!("留空不排除")),
                         );
                         ctx.accesskit_node_builder(exclude.id, |node| {
-                            node.set_label("Tag excludes")
+                            node.set_label(tr!("Tag 排除"))
                         });
                         filter_changed |= include.changed() || exclude.changed();
-                        ui.label("与包名、级别及消息条件同时生效；排除优先。");
-                        if ui.button("清除 Tag 条件").clicked() {
+                        ui.label(tr!("与包名、级别及消息条件同时生效；排除优先。"));
+                        if ui.button(tr!("清除 Tag 条件")).clicked() {
                             self.tag_include.clear();
                             self.tag_exclude.clear();
                             filter_changed = true;
@@ -2207,13 +2219,13 @@ impl CiallogcatApp {
                                     ),
                                 ),
                             )
-                            .on_hover_text(format!("{level:?} 及以上"));
+                            .on_hover_text(tr!("%{level} 及以上", level = format!("{level:?}")));
                         response.widget_info(|| {
                             egui::WidgetInfo::selected(
                                 egui::WidgetType::RadioButton,
                                 response.enabled(),
                                 self.min_level == level,
-                                format!("最低级别：{level:?} 及以上"),
+                                tr!("最低级别：%{level} 及以上", level = format!("{level:?}")),
                             )
                         });
                         if response.clicked() {
@@ -2266,9 +2278,9 @@ impl CiallogcatApp {
                 ui.horizontal(|ui| {
                     ui.label(
                         RichText::new(if checking {
-                            "日志详情 · 正在检查筛选…"
+                            tr!("日志详情 · 正在检查筛选…")
                         } else {
-                            "日志详情"
+                            tr!("日志详情")
                         })
                         .strong(),
                     );
@@ -2277,7 +2289,7 @@ impl CiallogcatApp {
                             self.context_view.is_none()
                                 && !self.filter_pending
                                 && self.filter_dirty_since.is_none(),
-                            egui::Button::new("查看上下文"),
+                            egui::Button::new(tr!("查看上下文")),
                         )
                         .clicked()
                     {
@@ -2285,19 +2297,19 @@ impl CiallogcatApp {
                     }
                     if self.detail_search.pending {
                         ui.spinner();
-                        ui.label("正在定位命中…");
+                        ui.label(tr!("正在定位命中…"));
                     } else if self.detail_search.key.is_some() {
                         let has_hits = !self.detail_search.hits.is_empty();
                         if ui
-                            .add_enabled(has_hits, egui::Button::new("上一个"))
-                            .on_hover_text("上一处消息命中")
+                            .add_enabled(has_hits, egui::Button::new(tr!("上一个")))
+                            .on_hover_text(tr!("上一处消息命中"))
                             .clicked()
                         {
                             self.move_detail_hit(true);
                         }
                         if ui
-                            .add_enabled(has_hits, egui::Button::new("下一个"))
-                            .on_hover_text("下一处消息命中；包括预览之外的内容")
+                            .add_enabled(has_hits, egui::Button::new(tr!("下一个")))
+                            .on_hover_text(tr!("下一处消息命中；包括预览之外的内容"))
                             .clicked()
                         {
                             self.move_detail_hit(false);
@@ -2312,16 +2324,16 @@ impl CiallogcatApp {
                             "{current}/{}{}",
                             self.detail_search.hits.len(),
                             if self.detail_search.capped {
-                                "+（定位上限）"
+                                tr!("+（定位上限）")
                             } else {
-                                ""
+                                String::new()
                             }
                         ));
                     }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if ui
-                            .button("复制")
-                            .on_hover_text("复制完整日志 · Ctrl+C")
+                            .button(tr!("复制"))
+                            .on_hover_text(tr!("复制完整日志 · Ctrl+C"))
                             .clicked()
                         {
                             copy_requested = true;
@@ -2331,17 +2343,19 @@ impl CiallogcatApp {
                 let entry = &self.entries[index];
                 ui.horizontal(|ui| {
                     if let Some((label, tooltip, _)) = &reference {
-                        reference_requested =
-                            ui.small_button("复制引用").on_hover_text(tooltip).clicked();
+                        reference_requested = ui
+                            .small_button(tr!("复制引用"))
+                            .on_hover_text(tooltip)
+                            .clicked();
                         ui.add(egui::Label::new(RichText::new(label).weak()).truncate());
                     }
                     if let Some(hint) = ciallogcat::incident::classify(entry) {
                         ui.label(
-                            RichText::new(hint.label()).color(Color32::from_rgb(220, 135, 64)),
+                            RichText::new(tr!(hint.label())).color(Color32::from_rgb(220, 135, 64)),
                         )
-                        .on_hover_text(format!(
-                            "匹配依据：{}。\n这是排查线索；原文与上下文保留。",
-                            hint.reason()
+                        .on_hover_text(tr!(
+                            "匹配依据：%{reason}。\n这是排查线索；原文与上下文保留。",
+                            reason = tr!(hint.reason())
                         ));
                     }
                     ui.add(
@@ -2354,14 +2368,17 @@ impl CiallogcatApp {
                                     fields.tid,
                                     preview_message(fields.process_name()),
                                     if fields.process_source == Some(ProcessSource::PsSnapshot) {
-                                        " (ps 推定)"
+                                        tr!(" (ps 推测)")
                                     } else {
-                                        ""
+                                        String::new()
                                     },
                                     preview_message(fields.tag)
                                 )
                             } else {
-                                format!("[{}] · 非日志记录；无日志元字段", entry.kind.label())
+                                tr!(
+                                    "[%{kind}] · 非日志记录；无日志元字段",
+                                    kind = entry.kind.label()
+                                )
                             })
                             .weak()
                             .monospace(),
@@ -2469,6 +2486,8 @@ impl CiallogcatApp {
         let ctx = root_ui.ctx().clone();
         let interaction_blocked = self.files.is_modal()
             || self.show_save_filter
+            || self.show_shortcuts
+            || self.show_settings
             || self.pending_clear
             || self.pending_device.is_some()
             // File diagnostics float over the table. Their clicks must not
@@ -2563,20 +2582,20 @@ impl CiallogcatApp {
             if matches.is_empty() {
                 ui.centered_and_justified(|ui| {
                     ui.label(if self.filter_pending || self.filter_dirty_since.is_some() {
-                        "正在筛选日志…"
+                        tr!("正在筛选日志…")
                     } else if self.filter_error.is_some() {
-                        "正则表达式无效。请修改消息条件，或关闭 .*。"
+                        tr!("正则无效。请修改消息条件，或关闭 .*。")
                     } else if !entries.is_empty() {
-                        "没有匹配日志。请检查包名、Tag 包含/排除、最低级别及消息筛选条件。"
+                        tr!("没有匹配日志。请检查包名、Tag 包含/排除、最低级别及消息筛选条件。")
                     } else if self.files.document.is_some() {
-                        "文件中没有日志记录。可以打开其他文件或选择设备开始采集。"
+                        tr!("文件中没有日志记录。可以打开其他文件或选择设备开始采集。")
                     } else {
                         match self.capture_state {
-                            CaptureState::NoAdb => "安装 Android platform-tools 后，点击刷新以查找 ADB。\n也可通过文件 / Ctrl+O 打开原生 JSONL，无需设备。",
-                            CaptureState::WaitingForDevice => "连接并授权 Android 设备，然后在上方选择。\n也可通过文件 / Ctrl+O 打开原生 JSONL，无需设备。",
-                            CaptureState::Error(_) => "采集已停止。点击重试采集继续。",
-                            CaptureState::Paused => "采集已暂停。点击开始采集继续接收日志。",
-                            _ => "正在等待所选设备的日志…",
+                            CaptureState::NoAdb => tr!("安装 Android platform-tools 后，点击刷新以查找 ADB。\n也可通过文件 / Ctrl+O 打开原生 JSONL，无需设备。"),
+                            CaptureState::WaitingForDevice => tr!("连接并授权 Android 设备，然后在上方选择。\n也可通过文件 / Ctrl+O 打开原生 JSONL，无需设备。"),
+                            CaptureState::Error(_) => tr!("采集已停止。点击重试采集继续。"),
+                            CaptureState::Paused => tr!("采集已暂停。点击开始采集继续接收日志。"),
+                            _ => tr!("正在等待所选设备的日志…"),
                         }
                     });
                 });
@@ -2589,11 +2608,11 @@ impl CiallogcatApp {
             let table_node = ui.unique_id();
             ctx.accesskit_node_builder(table_node, |node| {
                 node.set_role(egui::accesskit::Role::Table);
-                node.set_label("Filtered logs");
+                node.set_label(tr!("筛选后的日志"));
                 node.set_row_count(matches.len() + 1);
                 node.set_column_count(6);
                 node.set_multiselectable();
-                node.set_description("Use arrow keys to select logs. Select a row for complete details; Copy full log includes the complete message.");
+                node.set_description(tr!("使用方向键选择日志。选中一行可查看完整详情；“复制完整日志”包含完整消息。"));
             });
             let reset_columns = self.log_columns.prepare(compact);
             let widths = self.log_columns.widths(compact);
@@ -2723,14 +2742,14 @@ impl CiallogcatApp {
                         response.widget_info(|| egui::WidgetInfo::selected(
                             egui::WidgetType::SelectableLabel, true, is_selected,
                             if let Some(fields) = fields {
-                                format!("Log row {}. Time {}. Level {:?}. PID / TID {}. Process {}{}. Tag {}. Message {}{}",
-                                    match_index + 1, values[0], fields.level, values[2], values[3],
-                                    if fields.process_source == Some(ProcessSource::PsSnapshot) { " (sampled ps hint, unverified)" } else { "" },
-                                    values[4], values[5],
-                                    if truncated { ". Preview truncated. Select for full details or use Copy full log." } else { "" })
+                                tr!("第 %{row} 行日志。时间 %{time}。级别 %{level}。PID / TID %{pid}。进程 %{process}%{hint}。Tag %{tag}。消息 %{message}%{truncated}",
+                                    row = match_index + 1, time = values[0], level = format!("{:?}", fields.level), pid = values[2], process = values[3],
+                                    hint = if fields.process_source == Some(ProcessSource::PsSnapshot) { tr!("（ps 采样推测，未核实）") } else { String::new() },
+                                    tag = values[4], message = values[5],
+                                    truncated = if truncated { tr!("。预览已截断；选中可查看完整详情，或使用“复制完整日志”。") } else { String::new() })
                             } else {
-                                format!("{} row {}. Message {}{}", entry.kind.label(), match_index + 1, raw_preview,
-                                    if truncated { ". Preview truncated. Select for full details or use Copy full log." } else { "" })
+                                tr!("%{kind} 记录第 %{row} 行。消息 %{message}%{truncated}", kind = entry.kind.label(), row = match_index + 1, message = raw_preview,
+                                    truncated = if truncated { tr!("。预览已截断；选中可查看完整详情，或使用“复制完整日志”。") } else { String::new() })
                             },
                         ));
                         ctx.accesskit_node_builder(row_id, |node| {
@@ -2756,21 +2775,21 @@ impl CiallogcatApp {
                             }
                         }
                         response.context_menu(|ui| {
-                            if ui.add_enabled(self.context_view.is_none() && !self.filter_pending && self.filter_dirty_since.is_none(), egui::Button::new("查看上下文")).clicked() { context_requested = Some(entry_index); ui.close(); }
+                            if ui.add_enabled(self.context_view.is_none() && !self.filter_pending && self.filter_dirty_since.is_none(), egui::Button::new(tr!("查看上下文"))).clicked() { context_requested = Some(entry_index); ui.close(); }
                             if fields.is_some_and(|fields| fields.process_source == Some(ProcessSource::PsSnapshot)) {
-                                ui.label("进程名来自近期 ps 快照，仅为推定；不能证明历史 PID 归属。");
+                                ui.label(tr!("进程名来自近期 ps 快照，仅为推测；不能证明历史 PID 归属。"));
                                 ui.separator();
                             }
-                            if selection.contains(entry_index) && ui.button("Copy selected logs").clicked() {
+                            if selection.contains(entry_index) && ui.button(tr!("复制选中日志")).clicked() {
                                 copy_requested = Some(CopyTarget::Selection);
                                 ui.close();
                             }
-                            if ui.button("Copy full log").clicked() {
+                            if ui.button(tr!("复制完整日志")).clicked() {
                                 copy_requested = Some(CopyTarget::Row(entry_index));
                                 ui.close();
                             }
                             if let Some(process) = fields.and_then(|fields| fields.process)
-                                && ui.button("Filter this process").clicked()
+                                && ui.button(tr!("仅看此进程")).clicked()
                             {
                                 filter_process = Some(process.to_owned());
                                 ui.close();
@@ -2832,68 +2851,69 @@ impl CiallogcatApp {
                             .size(10.0),
                     );
                     if self.files.document.is_some() {
-                        ui.label(RichText::new("文件 · 只读").color(readable_metadata_color(ui.visuals())).size(12.0));
+                        ui.label(RichText::new(tr!("文件 · 只读")).color(readable_metadata_color(ui.visuals())).size(12.0));
                     } else if let CaptureState::Error(error) = &self.capture_state {
-                        Self::status_diagnostic(ui, "capture_diagnostic", "采集错误", error);
+                        Self::status_diagnostic(ui, "capture_diagnostic", &tr!("采集错误"), &i18n::localize_message(error));
                     } else if let CaptureState::Reconnecting { deadline, retry, error } = &self.capture_state {
                         let seconds = deadline.saturating_duration_since(Instant::now()).as_secs_f32().ceil() as u32;
-                        let label = if self.selected_device_available() { format!("{seconds}s 后重连 {retry}/3") } else { format!("等待设备以重连 {retry}/3") };
+                        let label = if self.selected_device_available() { tr!("%{seconds}s 后重连 %{retry}/3", seconds = seconds, retry = retry) } else { tr!("等待设备重连 %{retry}/3", retry = retry) };
                         Self::status_diagnostic(ui, "capture_reconnect", &label, error);
                     } else {
                         ui.label(RichText::new(self.capture_state.label()).color(readable_metadata_color(ui.visuals())).size(12.0));
                     }
                     ui.separator();
                     let dropped = if self.dropped_entries > 0 {
-                        format!(" · 已移除 {} 条", format_count(self.dropped_entries))
+                        tr!(" · 已移除 %{count} 条", count = format_count(self.dropped_entries))
                     } else {
                         String::new()
                     };
                     ui.label(
-                        RichText::new(format!(
-                            "{} 条日志 · {:.0}/秒{dropped}",
-                            format_count(self.entries.len()),
-                            self.logs_per_second
+                        RichText::new(tr!(
+                            "%{count} 条日志 · %{rate}/秒%{dropped}",
+                            count = format_count(self.entries.len()),
+                            rate = self.logs_per_second : {:.0},
+                            dropped = dropped
                         ))
                         .color(readable_metadata_color(ui.visuals()))
                         .size(12.0),
                     );
-                    ui.label(RichText::new(format!("{} 条匹配", format_count(self.matches.len()))).color(readable_metadata_color(ui.visuals())).size(12.0))
-                        .on_hover_text(format!("保留日志 ≈ {:.1} / {} MiB", self.entries.memory_bytes() as f64 / MIB as f64, self.memory_limit_mib));
+                    ui.label(RichText::new(tr!("%{count} 条匹配", count = format_count(self.matches.len()))).color(readable_metadata_color(ui.visuals())).size(12.0))
+                        .on_hover_text(tr!("保留日志 ≈ %{used} / %{limit} MiB", used = self.entries.memory_bytes() as f64 / MIB as f64 : {:.1}, limit = self.memory_limit_mib));
                     // Independent compact indicators keep one long diagnostic from
                     // hiding counts or an unrelated settings/query failure.
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if self.copy_pending.is_some() {
-                            if ui.small_button("取消复制").clicked() {
+                            if ui.small_button(tr!("取消复制")).clicked() {
                                 self.cancel_copy();
                             } else if self.copy_ready.is_some() {
-                                if ui.button("复制已准备好").on_hover_text("点击后才写入剪贴板；来源、筛选或选择变化会取消。").clicked() {
+                                if ui.button(tr!("复制已准备好")).on_hover_text(tr!("点击后才写入剪贴板；来源、筛选或选择变化会取消。")).clicked() {
                                     self.commit_prepared_copy(ui.ctx());
                                 }
                             } else {
-                                ui.spinner().on_hover_text("正在准备完整日志；完成后需点击复制，不会自动覆盖剪贴板。");
+                                ui.spinner().on_hover_text(tr!("正在准备完整日志；完成后需点击复制，不会自动覆盖剪贴板。"));
                             }
                         }
                         if let Some(error) = &self.filter_error {
-                            Self::status_diagnostic(ui, "filter_diagnostic", "筛选错误", error);
+                            Self::status_diagnostic(ui, "filter_diagnostic", &tr!("筛选错误"), error);
                         } else if self.filter_pending || self.filter_dirty_since.is_some() {
-                            ui.spinner().on_hover_text("筛选中，当前结果可能尚未完整");
+                            ui.spinner().on_hover_text(tr!("筛选中，当前结果可能尚未完整"));
                         }
                         if let Some(error) = &self.device_query_error {
-                            Self::status_diagnostic(ui, "device_diagnostic", "设备发现错误", error);
+                            Self::status_diagnostic(ui, "device_diagnostic", &tr!("设备发现错误"), error);
                         } else if self.selected_device.is_some() && !self.selected_device_available() {
-                            Self::status_diagnostic(ui, "device_observation", "设备未就绪", "设备列表当前未报告所选设备就绪；保留选择，已有采集会继续，直到日志流退出或手动暂停。");
+                            Self::status_diagnostic(ui, "device_observation", &tr!("设备未就绪"), &tr!("设备列表当前未报告所选设备就绪；保留选择，已有采集会继续，直到日志流退出或手动暂停。"));
                         }
                         if let Some(error) = &self.process_query_error {
-                            Self::status_diagnostic(ui, "process_diagnostic", "进程查询错误", error);
+                            Self::status_diagnostic(ui, "process_diagnostic", &tr!("进程查询错误"), error);
                         }
                         if let Some(notice) = self.copy_notice.as_ref() {
-                            Self::status_diagnostic(ui, "copy_notice", "复制 / 历史", notice);
+                            Self::status_diagnostic(ui, "copy_notice", &tr!("复制 / 历史"), notice);
                         }
                         if let Some(error) = self.config_error.as_ref() {
                             Self::status_diagnostic(
                                 ui,
                                 "settings_diagnostic",
-                                "设置保存失败",
+                                &tr!("设置保存失败"),
                                 error,
                             );
                         }
@@ -2901,7 +2921,7 @@ impl CiallogcatApp {
                             Self::status_diagnostic(
                                 ui,
                                 "package_diagnostic",
-                                "包列表查询错误",
+                                &tr!("包列表查询错误"),
                                 error,
                             );
                         }
@@ -2912,7 +2932,9 @@ impl CiallogcatApp {
 
     fn status_diagnostic(ui: &mut egui::Ui, id: &'static str, label: &str, diagnostic: &str) {
         ui.push_id(id, |ui| {
-            let response = ui.small_button(label).on_hover_text("查看并复制完整诊断");
+            let response = ui
+                .small_button(label)
+                .on_hover_text(tr!("查看并复制完整诊断"));
             if response.clicked() {
                 response.request_focus();
             }
@@ -2923,7 +2945,7 @@ impl CiallogcatApp {
                 .show(|ui| {
                     ui.set_max_width(520.0);
                     ui.label(RichText::new(label).strong());
-                    if ui.button("复制诊断").clicked() {
+                    if ui.button(tr!("复制诊断")).clicked() {
                         ui.ctx().copy_text(diagnostic.to_owned());
                     }
                     ui.separator();
@@ -2952,16 +2974,19 @@ impl CiallogcatApp {
         let mut cancel =
             ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
         let response = egui::Modal::new(egui::Id::new("clear_logs_confirmation")).show(ctx, |ui| {
-            ui.heading("清空本地保留日志？");
+            ui.heading(tr!("清空本地保留日志？"));
             if let Some(serial) = &self.pending_device {
-                ui.label(format!("切换到 {serial} 会清空当前本地保留日志。"));
+                ui.label(tr!(
+                    "切换到 %{serial} 会清空当前本地保留日志。",
+                    serial = serial
+                ));
             } else {
-                ui.label("清空所有本地保留日志，确认后无法恢复。采集状态不变。");
+                ui.label(tr!("清空所有本地保留日志，确认后无法恢复。采集状态不变。"));
             }
-            ui.label("不会清空设备上的日志，也不会重新补回这些历史记录。");
+            ui.label(tr!("不会清空设备上的日志，也不会重新补回这些历史记录。"));
             ui.horizontal(|ui| {
-                cancel |= ui.button("Cancel").clicked();
-                confirm = ui.button("清空并继续").clicked();
+                cancel |= ui.button(tr!("取消")).clicked();
+                confirm = ui.button(tr!("清空并继续")).clicked();
             });
         });
         if cancel || response.should_close() {
@@ -2981,57 +3006,68 @@ impl CiallogcatApp {
         if self.package.trim().is_empty() {
             return;
         }
+        let scope_notice = self.capture_attempt_scope
+            != ciallogcat::capture_scope::CaptureScope::default()
+            && self.files.document.is_none();
+        // Only take a row when something may actually be hidden; process
+        // changes stay reachable from the package suggestions popup.
+        if self.unresolved_count == 0 && !scope_notice {
+            return;
+        }
         egui::Panel::top("unresolved_notice").show(root_ui, |ui| {
             ui.horizontal_wrapped(|ui| {
-                if self.capture_attempt_scope != ciallogcat::capture_scope::CaptureScope::default()
-                    && self.files.document.is_none()
-                {
-                    ui.label("历史采集不套用当前 ps 名称；未知归属可能被包名筛选隐藏。");
+                if scope_notice {
+                    ui.label(tr!("历史采集不套用当前 ps 名称；未知归属可能被包名筛选隐藏。"));
                 }
-                ui.label(format!(
-                    "包名基于近期 ps 推定；{} 条已解析日志归属未知，可能被隐藏（含崩溃）。",
-                    self.unresolved_count
-                ));
-                if ui.button("清除包名限制以查看").clicked() {
+                if self.unresolved_count > 0 {
+                    ui.label(tr!(
+                        "包名基于近期 ps 推测；%{count} 条已解析日志归属未知，可能被隐藏（含崩溃）。",
+                        count = self.unresolved_count
+                    ));
+                }
+                if ui.button(tr!("清除包名限制以查看")).clicked() {
                     self.package.clear();
                     self.schedule_filter();
                     self.mark_config_dirty();
                 }
-                ui.menu_button("进程变化", |ui| {
-                    ui.set_max_width(440.0);
-                    ui.label("来自定期 ps 快照；出现/消失是主机观察，不是精确启动/退出时间。");
-                    if self.process_watch.package != self.package.trim()
-                        || !self.process_watch.current_known
-                    {
-                        ui.label("等待当前应用的新进程快照；未知不等于没有进程。");
-                    }
-                    if self.process_watch.truncated_sample {
-                        ui.label("本次最多跟踪 128 个进程，已达上限。");
-                    }
-                    if self.process_watch.package == self.package.trim() {
-                        egui::ScrollArea::vertical()
-                            .max_height(220.0)
-                            .show(ui, |ui| {
-                                for change in self.process_watch.recent.iter().rev() {
-                                    ui.label(format!(
-                                        "{} · PID {} · {}{}",
-                                        change.label(),
-                                        change.pid,
-                                        change.name,
-                                        if change.name_truncated { "…" } else { "" }
-                                    ));
-                                }
-                            });
-                        if self.process_watch.omitted_changes > 0 {
-                            ui.label(format!(
-                                "另有 {} 条较早观察已从此列表移除。",
-                                self.process_watch.omitted_changes
-                            ));
-                        }
-                    }
-                });
+                ui.menu_button(tr!("进程变化"), |ui| self.process_changes_ui(ui));
             });
         });
+    }
+
+    fn process_changes_ui(&self, ui: &mut egui::Ui) {
+        ui.set_max_width(440.0);
+        ui.label(tr!(
+            "来自定期 ps 快照；出现/消失是主机侧观测，不是精确的启动/退出时间。"
+        ));
+        if self.process_watch.package != self.package.trim() || !self.process_watch.current_known {
+            ui.label(tr!("等待当前应用的新进程快照；未知不等于没有进程。"));
+        }
+        if self.process_watch.truncated_sample {
+            ui.label(tr!("本次最多跟踪 128 个进程，已达上限。"));
+        }
+        if self.process_watch.package == self.package.trim() {
+            egui::ScrollArea::vertical()
+                .id_salt("process_changes")
+                .max_height(220.0)
+                .show(ui, |ui| {
+                    for change in self.process_watch.recent.iter().rev() {
+                        ui.label(format!(
+                            "{} · PID {} · {}{}",
+                            tr!(change.label()),
+                            change.pid,
+                            change.name,
+                            if change.name_truncated { "…" } else { "" }
+                        ));
+                    }
+                });
+            if self.process_watch.omitted_changes > 0 {
+                ui.label(tr!(
+                    "另有 %{count} 条较早观察已从此列表移除。",
+                    count = self.process_watch.omitted_changes
+                ));
+            }
+        }
     }
 
     fn shortcuts(&mut self, ctx: &egui::Context) {
@@ -3039,8 +3075,20 @@ impl CiallogcatApp {
             || self.show_save_filter
             || self.pending_clear
             || self.pending_device.is_some()
+            || self.show_shortcuts
+            || self.show_settings
             || ctx.current_pass_index() != 0
         {
+            return;
+        }
+        if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::F1)) {
+            egui::Popup::close_all(ctx);
+            self.show_shortcuts = true;
+            return;
+        }
+        if ctx.input_mut(|input| input.consume_key(egui::Modifiers::COMMAND, egui::Key::Comma)) {
+            egui::Popup::close_all(ctx);
+            self.open_settings(None);
             return;
         }
         if self.context_view.is_some()
@@ -3211,10 +3259,49 @@ impl CiallogcatApp {
         }
     }
 
+    fn shortcuts_dialog(&mut self, ctx: &egui::Context) {
+        let mut close = ctx.input_mut(|input| {
+            input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)
+                || input.consume_key(egui::Modifiers::NONE, egui::Key::F1)
+        });
+        let response = egui::Modal::new(egui::Id::new("shortcuts_dialog")).show(ctx, |ui| {
+            ui.heading(tr!("键盘快捷键"));
+            ui.add_space(4.0);
+            egui::Grid::new("shortcut_help")
+                .num_columns(2)
+                .min_row_height(20.0)
+                .spacing(egui::vec2(24.0, 4.0))
+                .striped(true)
+                .show(ui, |ui| {
+                    for (keys, action) in SHORTCUTS {
+                        ui.label(RichText::new(tr!(*keys)).monospace());
+                        ui.label(tr!(*action));
+                        ui.end_row();
+                    }
+                });
+            ui.add_space(6.0);
+            ui.label(RichText::new(tr!("输入框聚焦时，方向键与快捷键优先用于编辑。")).weak());
+            ui.add_space(4.0);
+            close |= ui.button(tr!("关闭")).clicked();
+        });
+        if close || response.should_close() {
+            self.show_shortcuts = false;
+        }
+    }
+
     fn dialogs(&mut self, ctx: &egui::Context) {
         self.diagnostics_dialog(ctx);
         if self.files.is_modal() {
             self.file_dialogs(ctx);
+            return;
+        }
+        // Shortcut help can be opened from Settings and returns to it on close.
+        if self.show_shortcuts {
+            self.shortcuts_dialog(ctx);
+            return;
+        }
+        if self.show_settings {
+            self.settings_dialog(ctx);
             return;
         }
         if self.pending_clear || self.pending_device.is_some() {
@@ -3232,13 +3319,14 @@ impl CiallogcatApp {
             let mut save = false;
             let mut cancel = false;
             let modal = egui::Modal::new(egui::Id::new("save_filter_dialog")).show(ctx, |ui| {
-                ui.heading("Save filter");
-                ui.label("Name");
+                ui.heading(tr!("保存筛选方案"));
+                ui.label(tr!("名称"));
                 let response = ui.add_sized(
                     [320.0, 28.0],
                     egui::TextEdit::singleline(&mut self.save_filter_name)
                         .id(egui::Id::new("save_filter_name"))
-                        .hint_text("e.g. Network failures"),
+                        .hint_text(tr!("例如：网络失败"))
+                        .vertical_align(Align::Center),
                 );
                 if !self.save_filter_focused {
                     response.request_focus();
@@ -3249,7 +3337,7 @@ impl CiallogcatApp {
                     if ui
                         .add_enabled(
                             !self.save_filter_name.trim().is_empty(),
-                            egui::Button::new("Save"),
+                            egui::Button::new(tr!("保存")),
                         )
                         .clicked()
                         || (response.lost_focus()
@@ -3257,7 +3345,7 @@ impl CiallogcatApp {
                     {
                         save = true;
                     }
-                    if ui.button("Cancel").clicked() {
+                    if ui.button(tr!("取消")).clicked() {
                         cancel = true;
                     }
                 });
@@ -3284,7 +3372,8 @@ impl eframe::App for CiallogcatApp {
 
     fn ui(&mut self, root_ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = root_ui.ctx().clone();
-
+        i18n::set(self.language);
+        self.sync_theme(&ctx);
         self.file_shortcuts(&ctx);
         self.shortcuts(&ctx);
 
@@ -3295,6 +3384,8 @@ impl eframe::App for CiallogcatApp {
             || self.pending_clear
             || self.pending_device.is_some()
             || self.show_save_filter
+            || self.show_shortcuts
+            || self.show_settings
         {
             root_ui.disable();
         }
@@ -3358,19 +3449,30 @@ fn budget_warning_color(visuals: &egui::Visuals) -> Color32 {
     }
 }
 
+#[cfg(test)]
 fn configure_style(ctx: &egui::Context, dark: bool) {
-    ctx.set_theme(if dark {
-        egui::ThemePreference::Dark
-    } else {
-        egui::ThemePreference::Light
-    });
-    if dark {
-        ctx.set_visuals(egui::Visuals::dark());
-    } else {
-        ctx.set_visuals(egui::Visuals::light());
-    }
+    apply_theme(
+        ctx,
+        if dark {
+            ThemeChoice::Dark
+        } else {
+            ThemeChoice::Light
+        },
+    );
+}
 
-    ctx.global_style_mut(|style| {
+// Both theme styles are configured so "follow system" switches without a
+// restart; the preference only selects which one egui uses.
+fn apply_theme(ctx: &egui::Context, choice: ThemeChoice) {
+    ctx.set_theme(match choice {
+        ThemeChoice::System => egui::ThemePreference::System,
+        ThemeChoice::Dark => egui::ThemePreference::Dark,
+        ThemeChoice::Light => egui::ThemePreference::Light,
+    });
+    ctx.set_visuals_of(egui::Theme::Dark, egui::Visuals::dark());
+    ctx.set_visuals_of(egui::Theme::Light, egui::Visuals::light());
+
+    ctx.all_styles_mut(|style| {
         style.spacing.item_spacing = egui::vec2(8.0, 6.0);
         style.spacing.button_padding = egui::vec2(8.0, 5.0);
         style.spacing.interact_size.y = 27.0;
@@ -3601,6 +3703,9 @@ mod popup_regressions;
 
 #[cfg(test)]
 mod ui_test_support;
+
+#[cfg(all(test, feature = "ui-snapshot"))]
+mod ui_snapshots;
 
 #[cfg(test)]
 mod ui_audit_regressions;

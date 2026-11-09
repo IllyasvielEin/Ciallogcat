@@ -20,7 +20,7 @@ impl Drop for OwnedChild {
 fn fixture() -> &'static Path {
     static FIXTURE: OnceLock<PathBuf> = OnceLock::new();
     FIXTURE.get_or_init(|| {
-        let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
+        let directory = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
             .join("target/native-adb-integration")
             .join(format!("fixture-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&directory).unwrap();
@@ -30,7 +30,8 @@ fn fixture() -> &'static Path {
             Command::new(compiler)
                 .args(["--edition=2024", "--crate-name", "native_fake_adb"])
                 .arg(
-                    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/native_fake_adb.rs"),
+                    Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
+                        .join("tests/fixtures/native_fake_adb.rs"),
                 )
                 .arg("-o")
                 .arg(&executable)
@@ -62,7 +63,7 @@ struct Sandbox {
 }
 impl Sandbox {
     fn new(scenario: &'static str) -> Self {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        let root = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
             .join("target/native-adb-integration")
             .join(uuid::Uuid::new_v4().to_string());
         fs::create_dir_all(root.join("trace")).unwrap();

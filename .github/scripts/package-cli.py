@@ -19,14 +19,18 @@ def release_metadata() -> tuple[str, str, str]:
     platform = os.environ.get("RELEASE_PLATFORM", "")
     if platform not in ("linux-x86_64", "windows-x86_64"):
         raise ValueError("RELEASE_PLATFORM must be linux-x86_64 or windows-x86_64")
-    if not re.fullmatch(r"v[0-9]+\.[0-9]+(?:\.[0-9]+)?(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?", tag):
+    if not re.fullmatch(r"(?:cli-)?v[0-9]+\.[0-9]+(?:\.[0-9]+)?(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?", tag):
         raise ValueError("RELEASE_TAG must be a version tag")
     # Match the existing GUI release's full/short version-tag rules.
     metadata = json.loads(subprocess.check_output(
         ["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"],
         text=True,
     ))
-    version = next(item["version"] for item in metadata["packages"] if item["name"] == "ciallogcat")
+    package_name = "ciallogcat-cli" if any(item["name"] == "ciallogcat-cli" for item in metadata["packages"]) else "ciallogcat"
+    version = next(item["version"] for item in metadata["packages"] if item["name"] == package_name)
+    if package_name == "ciallogcat-cli" and not tag.startswith("cli-"):
+        raise ValueError("workspace CLI releases require cli-v tags")
+    tag = tag.removeprefix("cli-")
     allowed_tags = {f"v{version}"}
     if re.fullmatch(r"[0-9]+\.[0-9]+\.0", version):
         allowed_tags.add(f"v{version.rsplit('.', 1)[0]}")

@@ -5,11 +5,22 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::i18n::Language;
 use crate::model::{Level, LogBuffer, SavedFilter};
 
 #[cfg(not(target_os = "windows"))]
 const APP_DIR: &str = "ciallogcat";
 const CONFIG_FILE: &str = "config.json";
+
+/// Window theme. Absent in configs written before the settings panel; those
+/// keep their legacy `dark` choice (see [`AppConfig::theme_choice`]).
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThemeChoice {
+    System,
+    Dark,
+    Light,
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default)]
@@ -22,6 +33,9 @@ pub struct AppConfig {
     pub use_regex: bool,
     pub case_sensitive: bool,
     pub dark: bool,
+    pub theme: Option<ThemeChoice>,
+    /// `None` only for configs written before the setting existed.
+    pub language: Option<Language>,
     pub row_height: f32,
     pub show_details: bool,
     pub saved_filters: Vec<SavedFilter>,
@@ -42,6 +56,8 @@ impl Default for AppConfig {
             use_regex: false,
             case_sensitive: false,
             dark: true,
+            theme: None,
+            language: None,
             row_height: 25.0,
             show_details: true,
             saved_filters: Vec::new(),
@@ -54,15 +70,38 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
+    pub fn theme_choice(&self) -> ThemeChoice {
+        self.theme.unwrap_or(if self.dark {
+            ThemeChoice::Dark
+        } else {
+            ThemeChoice::Light
+        })
+    }
+
+    pub fn language(&self) -> Language {
+        self.language.unwrap_or_else(Language::legacy)
+    }
+
     pub fn load() -> Self {
-        let Some(path) = config_path() else {
-            return Self::default();
+        Self::load_from(config_path())
+    }
+
+    fn load_from(path: Option<PathBuf>) -> Self {
+        // A first run (no settings file yet) starts in English.
+        let first_run = || Self {
+            language: Some(Language::En),
+            ..Self::default()
+        };
+        let Some(path) = path else {
+            return first_run();
         };
         let contents = fs::read_to_string(&path);
         let Ok(contents) = contents else {
-            return Self::default();
+            return first_run();
         };
         let mut config: Self = serde_json::from_str(&contents).unwrap_or_default();
+        // An existing file without the field predates the language setting.
+        config.language.get_or_insert_with(Language::legacy);
         config.row_height = config.row_height.clamp(21.0, 34.0);
         config.memory_limit_mib = config.memory_limit_mib.clamp(16, 4096);
         LogBuffer::normalize(&mut config.buffers);
@@ -145,6 +184,41 @@ mod tests {
         assert!(config.tag_include.is_empty() && config.tag_exclude.is_empty());
         let filter: SavedFilter = serde_json::from_str(r#"{"name":"partial","package":"","min_level":"Info","query":"","regex":false,"case_sensitive":false}"#).unwrap();
         assert!(filter.tag_include.is_empty() && filter.tag_exclude.is_empty());
+    }
+
+    #[test]
+    fn first_run_is_english_and_upgraded_configs_keep_chinese() {
+        let dir = std::env::temp_dir().join(format!("ciallogcat-lang-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(CONFIG_FILE);
+        let _ = fs::remove_file(&path);
+        assert_eq!(
+            AppConfig::load_from(Some(path.clone())).language(),
+            Language::En
+        );
+        assert_eq!(AppConfig::load_from(None).language(), Language::En);
+        fs::write(&path, r#"{"dark":false}"#).unwrap();
+        assert_eq!(
+            AppConfig::load_from(Some(path.clone())).language(),
+            Language::ZhCn
+        );
+        fs::write(&path, r#"{"language":"en"}"#).unwrap();
+        assert_eq!(
+            AppConfig::load_from(Some(path.clone())).language(),
+            Language::En
+        );
+        fs::write(&path, r#"{"language":"zh-CN"}"#).unwrap();
+        assert_eq!(
+            AppConfig::load_from(Some(path.clone())).language(),
+            Language::ZhCn
+        );
+        let saved = AppConfig {
+            language: Some(Language::En),
+            ..AppConfig::default()
+        };
+        let json = serde_json::to_string(&saved).unwrap();
+        assert!(json.contains(r#""language":"en""#), "{json}");
+        fs::remove_dir_all(&dir).unwrap();
     }
 }
 

@@ -39,7 +39,7 @@ fn clear_cancel_escape_and_backdrop_preserve_both_original_follow_states() {
                     let pos = if dismissal == 0 {
                         h.labels
                             .iter()
-                            .find(|(label, _)| label == "Cancel")
+                            .find(|(label, _)| label == "取消")
                             .unwrap()
                             .1
                     } else {

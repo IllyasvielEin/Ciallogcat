@@ -242,21 +242,24 @@ fn applying_budget_trims_once_and_keeps_only_applied_config() {
 fn budget_cancel_escape_outside_and_reopen_discard_draft_using_real_input() {
     let (ctx, app) = app(10);
     let mut h = Harness::from_app(ctx, app, egui::vec2(1280.0, 820.0));
-    h.click_rendered_label("视图");
+    open_memory_settings(&mut h);
     h.app.memory_limit_draft = Some(16);
     h.click_rendered_label("取消修改");
     assert_eq!(h.app.memory_limit_mib, 300);
     assert_eq!(h.app.entries.len(), 10);
-    h.click_rendered_label("视图");
+    open_memory_settings(&mut h);
     assert_eq!(h.app.memory_limit_draft, Some(300));
     h.app.memory_limit_draft = Some(32);
     h.key(egui::Key::Escape, egui::Modifiers::NONE);
+    assert!(!h.app.show_settings);
     assert!(h.app.memory_limit_draft.is_none());
-    h.click_rendered_label("视图");
+    open_memory_settings(&mut h);
     h.app.memory_limit_draft = Some(64);
-    h.click(egui::pos2(800.0, 500.0));
+    // Outside the centred modal: the backdrop closes Settings.
+    h.click(egui::pos2(20.0, 400.0));
+    assert!(!h.app.show_settings);
     assert!(h.app.memory_limit_draft.is_none());
-    h.click_rendered_label("视图");
+    open_memory_settings(&mut h);
     assert_eq!(h.app.memory_limit_draft, Some(300));
     h.app.memory_limit_draft = Some(64);
     h.click_rendered_label("应用预算");
@@ -337,22 +340,16 @@ fn all_four_copy_entrypoints_block_pending_membership_and_copy_only_on_retry() {
                 click_copy_label(
                     &mut h,
                     if route == 2 {
-                        "Copy selected logs"
+                        "复制选中日志"
                     } else {
-                        "Copy full log"
+                        "复制完整日志"
                     },
                 );
             }
             _ => unreachable!(),
         }
         assert!(h.copied.is_empty());
-        assert!(
-            h.app
-                .copy_notice
-                .as_ref()
-                .unwrap()
-                .contains("still being checked")
-        );
+        assert!(h.app.copy_notice.as_ref().unwrap().contains("仍在检查筛选"));
         let ready = result(&h.app, 2);
         h.app.accept_filter_result(ready);
         h.frame(vec![]);
@@ -369,6 +366,8 @@ fn all_four_copy_entrypoints_block_pending_membership_and_copy_only_on_retry() {
 #[test]
 fn oversized_single_and_multirow_copy_never_emit_partial_clipboard_commands() {
     let (ctx, mut app) = app(1);
+    app.language = Language::En;
+    crate::i18n::set(Language::En);
     app.append_entry(LogEntry::marker("x".repeat(copy::MAX_COPY_BYTES)));
     app.selection.select_all(&app.matches);
     assert!(copy(&mut app, &ctx, CopyTarget::Row(1)).is_empty());
@@ -450,18 +449,18 @@ fn held_pointer_target_stays_at_same_screen_position_through_prefix_trim() {
 fn budget_value_real_typing_and_dragging_do_not_apply_or_close_the_menu() {
     let (ctx, app) = app(10);
     let mut h = Harness::from_app(ctx, app, egui::vec2(1280.0, 820.0));
-    h.click_rendered_label("视图");
+    open_memory_settings(&mut h);
     h.click_rendered_label("300");
     assert!(
         h.app.memory_limit_draft.is_some(),
-        "click must enter editing, not close View"
+        "click must enter editing, not close Settings"
     );
     h.frame(vec![egui::Event::Text("16".to_owned())]);
     assert_eq!(h.app.memory_limit_draft, Some(16));
     assert_eq!(h.app.memory_limit_mib, 300);
     assert_eq!(h.app.app_config().memory_limit_mib, 300);
     h.click_rendered_label("取消修改");
-    h.click_rendered_label("视图");
+    open_memory_settings(&mut h);
     assert_eq!(h.app.memory_limit_draft, Some(300));
     let pos = h
         .labels
@@ -472,11 +471,14 @@ fn budget_value_real_typing_and_dragging_do_not_apply_or_close_the_menu() {
     h.pointer(pos, true);
     h.frame(vec![egui::Event::PointerMoved(pos - egui::vec2(30.0, 0.0))]);
     h.pointer(pos - egui::vec2(30.0, 0.0), false);
-    let dragged = h.app.memory_limit_draft.expect("drag must keep View open");
+    let dragged = h
+        .app
+        .memory_limit_draft
+        .expect("drag must keep Settings open");
     assert!(dragged < 300);
     assert_eq!(h.app.memory_limit_mib, 300);
     h.click_rendered_label("取消修改");
-    h.click_rendered_label("视图");
+    open_memory_settings(&mut h);
     h.click_rendered_label("300");
     h.frame(vec![egui::Event::Text("32".to_owned())]);
     h.key(egui::Key::Enter, egui::Modifiers::NONE);
@@ -485,4 +487,14 @@ fn budget_value_real_typing_and_dragging_do_not_apply_or_close_the_menu() {
     h.click_rendered_label("应用预算");
     assert_eq!(h.app.memory_limit_mib, 32);
     assert_eq!(h.app.app_config().memory_limit_mib, 32);
+}
+
+/// Open Settings on the memory page through real input (View → 设置…).
+fn open_memory_settings(h: &mut Harness) {
+    if !h.app.show_settings {
+        h.click_rendered_label("视图");
+        h.click_rendered_label("设置…");
+        assert!(h.app.show_settings);
+    }
+    h.click_rendered_label("内存");
 }

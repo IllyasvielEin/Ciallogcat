@@ -70,6 +70,18 @@ class PackageCliTests(unittest.TestCase):
                         f"{digest}  {archive.name}\n",
                     )
 
+    def test_workspace_cli_version_is_independent_of_gui(self):
+        metadata = json.dumps({"packages": [
+            {"name": "ciallogcat", "version": "1.3.1"},
+            {"name": "ciallogcat-cli", "version": "1.3.2"},
+        ]})
+        with patch.object(PACKAGER.subprocess, "check_output", return_value=metadata):
+            with patch.dict(os.environ, RELEASE_TAG="cli-v1.3.2", RELEASE_PLATFORM="linux-x86_64"):
+                self.assertEqual(PACKAGER.release_metadata(), ("v1.3.2", "linux-x86_64", "1.3.2"))
+            for tag in ("gui-v1.3.1", "cli-v1.3.1", "v1.3.2"):
+                with patch.dict(os.environ, RELEASE_TAG=tag, RELEASE_PLATFORM="linux-x86_64"), self.assertRaises(ValueError):
+                    PACKAGER.release_metadata()
+
     def test_invalid_platform_tag_and_version_fail_closed(self):
         for tag, platform in (("v1.0", "macos-arm64"), ("../v1.0", "linux-x86_64"), ("v2.0", "windows-x86_64")):
             with self.subTest(tag=tag, platform=platform), patch.dict(

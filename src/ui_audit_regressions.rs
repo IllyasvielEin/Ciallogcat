@@ -144,7 +144,7 @@ fn filter_controls_have_meaningful_accessible_names_and_states() {
     for dark in [true, false] {
         let mut h = harness(dark);
         for name in [
-            "使用正则表达式",
+            "使用正则",
             "区分大小写",
             "包名筛选",
             "消息筛选",
@@ -162,7 +162,7 @@ fn filter_controls_have_meaningful_accessible_names_and_states() {
         let node = h
             .accessible_nodes
             .iter()
-            .find(|(_, node)| node.label() == Some("使用正则表达式"))
+            .find(|(_, node)| node.label() == Some("使用正则"))
             .unwrap();
         assert_eq!(node.1.toggled(), Some(egui::accesskit::Toggled::True));
         h.key(egui::Key::Space, egui::Modifiers::NONE);

@@ -23,7 +23,7 @@ impl Sandbox {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        let root = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
             .join("target/adb-integration")
             .join(format!("{scenario}-{}-{unique}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
@@ -33,7 +33,8 @@ impl Sandbox {
         // spaces. Writing a new executable while sibling tests spawn workers
         // can transiently fail exec with ETXTBSY on Linux.
         symlink(
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake_adb.py"),
+            Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
+                .join("tests/fixtures/fake_adb.py"),
             &adb,
         )
         .unwrap();

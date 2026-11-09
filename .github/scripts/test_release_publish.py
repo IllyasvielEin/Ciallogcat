@@ -95,6 +95,21 @@ class PublishTests(ReleaseFixture):
         self.assertEqual({Path(arg).name for arg in upload if arg.startswith(str(self.dist))}, expected_assets(self.plan))
         self.assertFalse(any("--generate-notes" in args for args in self.commands))
 
+    def test_gui_only_release_publishes_six_assets_and_becomes_latest(self):
+        tag = "gui-v1.3.1"
+        self.plan = {"tag": tag, "version": "1.3.1", "scope": "gui"}
+        self.plan_file = self.root / f"docs/releases/{tag}.json"
+        self.plan_file.write_text(json.dumps(self.plan))
+        (self.root / f"docs/releases/{tag}.md").write_text("GUI patch notes")
+        for path in self.dist.iterdir():
+            path.unlink()
+        self.write_assets()
+        publisher.publish(self.root, self.dist, tag, "owner/repo", self.commit)
+        self.assertEqual(len(self.remote), 6)
+        self.assertTrue(all(name.startswith("ciallogcat-v1.3.1-") for name in self.remote))
+        self.assertIn("--latest=true", self.commands[-1])
+        self.assertEqual(self.release["name"], "Ciallogcat GUI v1.3.1")
+
     def test_partial_draft_can_be_resumed(self):
         self.remote[next(iter(expected_assets(self.plan)))] = b"old incomplete upload"
         self.publish()

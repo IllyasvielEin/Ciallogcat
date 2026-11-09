@@ -7,6 +7,7 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 
+use crate::i18n::tr;
 use crate::log_store::LogStore;
 use ciallogcat::WakeSignal;
 
@@ -28,23 +29,20 @@ pub enum CopyError {
 
 impl fmt::Display for CopyError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InvalidSelection => formatter
-                .write_str("The selected logs are no longer available. Select the logs again."),
+        formatter.write_str(&match self {
+            Self::InvalidSelection => tr!("所选日志已不可用。请重新选择。"),
             Self::TooLarge {
                 limit_bytes,
                 minimum_bytes,
-            } => write!(
-                formatter,
-                "Selected logs need at least {minimum_bytes} bytes, exceeding the \
-                 clipboard limit of {limit_bytes} bytes. Select fewer rows."
+            } => tr!(
+                "所选日志至少需要 %{minimum} 字节，超过剪贴板上限 %{limit} 字节。请减少选择的行数。",
+                minimum = minimum_bytes,
+                limit = limit_bytes
             ),
-            Self::SizeOverflow => formatter
-                .write_str("The selected logs are too large to size safely. Select fewer rows."),
-            Self::AllocationFailed => formatter
-                .write_str("There is not enough memory to copy these logs. Select fewer rows."),
-            Self::Cancelled => formatter.write_str("Copy preparation was cancelled."),
-        }
+            Self::SizeOverflow => tr!("所选日志过大，无法安全计算大小。请减少选择的行数。"),
+            Self::AllocationFailed => tr!("内存不足，无法复制这些日志。请减少选择的行数。"),
+            Self::Cancelled => tr!("已取消复制准备。"),
+        })
     }
 }
 

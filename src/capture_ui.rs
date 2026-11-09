@@ -46,22 +46,22 @@ impl ScopeDraft {
 
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         const MODES: [&str; 5] = [
-            "最近 N 条后跟随",
-            "指定时间后跟随",
-            "最近 N 条快照",
-            "指定时间后快照",
-            "当前 buffer 快照",
+            "最近 N 条后持续采集（-T）",
+            "指定时间后持续采集（-T）",
+            "最近 N 条快照（-t）",
+            "指定时间后快照（-t）",
+            "当前 buffer 快照（-d）",
         ];
         // A submenu participates in the parent menu's open/close lifecycle.
         // A separate ComboBox popup replaces that parent and disappears with it.
-        ui.menu_button(MODES[self.mode], |ui| {
+        ui.menu_button(tr!(MODES[self.mode]), |ui| {
             for (mode, label) in MODES.iter().enumerate() {
-                ui.selectable_value(&mut self.mode, mode, *label);
+                ui.selectable_value(&mut self.mode, mode, tr!(*label));
             }
         });
         if matches!(self.mode, 0 | 2) {
             ui.horizontal(|ui| {
-                ui.label("历史条数");
+                ui.label(tr!("历史条数"));
                 ui.add(
                     egui::TextEdit::singleline(&mut self.count)
                         .desired_width(150.0)
@@ -73,13 +73,19 @@ impl ScopeDraft {
                 egui::TextEdit::singleline(&mut self.time)
                     .desired_width(310.0)
                     .char_limit(29)
-                    .hint_text("2026-10-24 08:00:00.000 或 Unix 秒.小数"),
+                    .hint_text(tr!(
+                        "2026-10-24 08:00:00.000 或 Unix 时间戳（秒，可带小数）"
+                    )),
             );
-            ui.label("使用设备时间；Unix 秒必须有小数点。不是精确续传游标。");
+            ui.label(tr!(
+                "按设备时间；Unix 时间戳须带小数点。不是精确的断点续传位置。"
+            ));
         }
         if self.mode >= 2 {
-            ui.label("快照最多 15 秒 / 100,000 条；新增存储使用留存预算 90% 以内的剩余空间，上限 64 MiB。");
-            ui.label("任一预算先到即停止，已有日志保留；设备历史可能已被淘汰。");
+            ui.label(tr!("快照最多 15 秒 / 100,000 条；新增日志使用日志内存预算 90% 以内的剩余空间，上限 64 MiB。"));
+            ui.label(tr!(
+                "任一预算先到即停止，已有日志保留；设备历史可能已被淘汰。"
+            ));
         }
         if let Err(error) = self.parse() {
             ui.colored_label(Color32::from_rgb(220, 135, 64), error);
@@ -151,11 +157,14 @@ impl CiallogcatApp {
                 .stop_requested(reason, self.live_session.last_seq());
             self.set_capture_intent(CaptureIntent::Paused, false);
             let limit = match reason {
-                "snapshot_duration_limit" => "15 秒期限",
-                "snapshot_record_limit" => "100,000 条上限",
-                _ => "本机留存空间上限",
+                "snapshot_duration_limit" => tr!("15 秒期限"),
+                "snapshot_record_limit" => tr!("100,000 条上限"),
+                _ => tr!("日志内存预算上限"),
             };
-            self.files.notice = Some(format!("快照达到{limit}，正在停止并接收剩余诊断。"));
+            self.files.notice = Some(tr!(
+                "快照达到%{limit}，正在停止并接收剩余诊断。",
+                limit = limit
+            ));
         }
     }
 }

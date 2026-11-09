@@ -2,10 +2,11 @@ $ErrorActionPreference = 'Stop'
 if (-not $env:RELEASE_TAG -or $env:RELEASE_PLATFORM -notin @('linux-x86_64', 'windows-x86_64')) {
     throw 'RELEASE_TAG and a supported RELEASE_PLATFORM are required'
 }
-if ($env:RELEASE_TAG -notmatch '^v[0-9]+\.[0-9]+(?:\.[0-9]+)?(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$') {
+if ($env:RELEASE_TAG -notmatch '^(?:gui-)?v[0-9]+\.[0-9]+(?:\.[0-9]+)?(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$') {
     throw 'Invalid version tag'
 }
-$bundleName = "ciallogcat-$env:RELEASE_TAG-$env:RELEASE_PLATFORM"
+$assetTag = $env:RELEASE_TAG -replace '^gui-', ''
+$bundleName = "ciallogcat-$assetTag-$env:RELEASE_PLATFORM"
 $tempRoot = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { 'target/release-stage' }
 $stageRoot = Join-Path $tempRoot ([Guid]::NewGuid().ToString('N'))
 $stage = Join-Path $stageRoot $bundleName

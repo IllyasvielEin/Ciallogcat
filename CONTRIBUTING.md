@@ -2,17 +2,23 @@
 
 使用当前 Rust stable 工具链，构建依赖见 [README](README.md)。仓库保留 `Cargo.lock`，常规构建使用 `--locked`；更新依赖时一并提交锁文件。
 
+workspace 包：根目录 `ciallogcat` 为 GUI；`crates/cli` 为独立版本的 CLI；`crates/core` 为内部共享库（Rust crate 名仍为 `ciallogcat`）。manifest 显式引用现有 `src/` 和 `tests/`，源码与资源路径保持稳定；共用根目录 Cargo.lock 和 target。发布单个组件时只修改该组件版本，见[发布指南](docs/release.md)。
+
 新主机接手先读 [TODO](TODO.md) 和 [迁移指南](docs/migration.md)。
 
 提交前运行：
 
 ```bash
 cargo fmt --all --check
-cargo test --locked --all-targets
-cargo test --locked --no-default-features --all-targets
-cargo clippy --locked --all-targets -- -D warnings
-cargo clippy --locked --no-default-features --all-targets -- -D warnings
+cargo test --locked --workspace --all-targets
+cargo test --locked -p ciallogcat-cli -p ciallogcat-core --all-targets
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo clippy --locked -p ciallogcat-cli -p ciallogcat-core --all-targets -- -D warnings
 ```
+
+界面文案以简体中文原文为键写在 `tr!(…)` 中，并在 `locales/app.yml` 同时补充 `en` 与 `zh-CN`；`i18n` 测试会拒绝缺失或多余的条目，详见 [UI 设计与性能](docs/ui-review.md#界面语言)。
+
+无显示器（如 WSL）查看界面：`cargo test --features ui-snapshot --bin ciallogcat ui_snapshots -- --ignored --nocapture`，PNG 输出到 `target/ui-snapshots/`，详见 [UI 设计与性能](docs/ui-review.md#离屏截图)。
 
 Linux 上还应运行 fake ADB 协议自测与 CLI 打包契约测试（Python 3 标准库；DEB 归档检查需要 `dpkg-deb`）：
 

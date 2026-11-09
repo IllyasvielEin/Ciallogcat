@@ -35,7 +35,7 @@ The GUI and CLI DEBs can coexist. Remove just the CLI with
 Build just the CLI, without GUI dependencies:
 
 ```sh
-cargo build --locked --release --no-default-features --bin ciallogcat-cli
+cargo build --locked --release -p ciallogcat-cli
 ./target/release/ciallogcat-cli --help
 ./target/release/ciallogcat-cli --version
 ```
@@ -682,8 +682,8 @@ v1.0 tag, replaces published assets, or republishes the release. Existing asset
 bytes must match before a partial upload can proceed.
 
 ```sh
-cargo test --locked --no-default-features
-cargo clippy --locked --no-default-features --all-targets -- -D warnings
+cargo test --locked -p ciallogcat-cli -p ciallogcat-core
+cargo clippy --locked -p ciallogcat-cli -p ciallogcat-core --all-targets -- -D warnings
 python -m unittest discover -s .github/scripts -p test_package_cli.py
 ```
 

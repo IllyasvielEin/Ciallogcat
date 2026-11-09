@@ -111,10 +111,13 @@ impl Snapshot {
 
 impl CiallogcatApp {
     pub(super) fn file_menu(&mut self, ui: &mut egui::Ui) {
-        ui.menu_button("文件", |ui| {
+        ui.menu_button(tr!("文件"), |ui| {
             let ready = !self.files.busy();
             if ui
-                .add_enabled(ready, egui::Button::new("打开日志…    Ctrl+O"))
+                .add_enabled(
+                    ready,
+                    egui::Button::new(tr!("打开日志…")).shortcut_text("Ctrl+O"),
+                )
                 .clicked()
             {
                 self.file_dialog(Action::Open);
@@ -124,7 +127,7 @@ impl CiallogcatApp {
             if ui
                 .add_enabled(
                     ready && has_source,
-                    egui::Button::new("另存保留日志…    Ctrl+Shift+S"),
+                    egui::Button::new(tr!("另存保留日志…")).shortcut_text("Ctrl+Shift+S"),
                 )
                 .clicked()
             {
@@ -137,7 +140,7 @@ impl CiallogcatApp {
                         && has_source
                         && !self.filter_pending
                         && self.filter_dirty_since.is_none(),
-                    egui::Button::new("导出当前筛选结果…"),
+                    egui::Button::new(tr!("导出当前筛选结果…")),
                 )
                 .clicked()
             {
@@ -147,7 +150,7 @@ impl CiallogcatApp {
             if ui
                 .add_enabled(
                     ready && self.files.document.is_some(),
-                    egui::Button::new("关闭文件"),
+                    egui::Button::new(tr!("关闭文件")),
                 )
                 .clicked()
             {
@@ -163,8 +166,8 @@ impl CiallogcatApp {
                 ui.close();
             }
             ui.separator();
-            ui.label("可将 原生日志 JSONL 文件拖入窗口打开。");
-            ui.label("另存为新文件；不会覆盖已有文件。");
+            ui.label(tr!("可将原生 JSONL 日志文件拖入窗口打开。"));
+            ui.label(tr!("另存为新文件；不会覆盖已有文件。"));
         });
     }
 
@@ -229,7 +232,7 @@ impl CiallogcatApp {
             if dropped.len() == 1 {
                 self.start_file_job(Action::Open, dropped[0].path().to_path_buf(), ctx);
             } else {
-                self.files.notice = Some("请一次打开一个本地 JSONL 文件。".into());
+                self.files.notice = Some(tr!("请一次打开一个本地 JSONL 文件。"));
             }
         }
     }
@@ -238,7 +241,10 @@ impl CiallogcatApp {
         if let Some(document) = &self.files.document {
             return Ok(Snapshot::File(Arc::clone(document)));
         }
-        let serial = self.retained_device.clone().ok_or("没有可保存的设备会话")?;
+        let serial = self
+            .retained_device
+            .clone()
+            .ok_or(tr!("没有可保存的设备会话"))?;
         let mut header = DocumentHeader::live(self.live_session.id(), serial, self.buffers.clone());
         if let Some(report) = self.diagnostic_context() {
             header
@@ -340,13 +346,16 @@ impl CiallogcatApp {
         let worker_path = path.clone();
         let wake = wake_signal(ctx);
         let (sender, receiver) = mpsc::sync_channel(1);
+        let language = crate::i18n::current();
         let spawned = std::thread::Builder::new()
             .name("log-file".into())
             .spawn(move || {
+                // Messages formatted here follow the UI language at start.
+                crate::i18n::set(language);
                 let result = (|| -> Result<Completed, String> {
                     if action == Action::Open {
                         if !worker_path.metadata().map_err(|e| e.to_string())?.is_file() {
-                            return Err("请选择普通日志文件".into());
+                            return Err(tr!("请选择普通日志文件"));
                         }
                         let reader =
                             BufReader::new(File::open(&worker_path).map_err(|e| e.to_string())?);
@@ -405,7 +414,7 @@ impl CiallogcatApp {
                 self.file_operation_failed(
                     action,
                     path,
-                    format!("无法启动文件任务：{error}"),
+                    tr!("无法启动文件任务：%{error}", error = error),
                     false,
                 );
             }
@@ -422,13 +431,15 @@ impl CiallogcatApp {
         let status = if action == Action::SaveBeforeOpen {
             self.files.replace = None;
             self.files.candidate = None;
-            "当前日志已保留，采集已停止。重新保存不会自动打开原候选文件。"
+            tr!("当前日志已保留，采集已停止。重新保存不会自动打开原候选文件。")
         } else {
-            "当前日志已保留。"
+            tr!("当前日志已保留。")
         };
-        self.files.notice = Some(format!(
-            "文件操作未完成：{error}。{status} 路径：{}",
-            path.display()
+        self.files.notice = Some(tr!(
+            "文件操作未完成：%{error}。%{status} 路径：%{path}",
+            error = error,
+            status = status,
+            path = path.display()
         ));
         // Retain only an editable path/action, never an old snapshot or a latent
         // source replacement. The user must confirm again against the current view.
@@ -450,7 +461,7 @@ impl CiallogcatApp {
             .and_then(|job| match job.receiver.try_recv() {
                 Ok(result) => Some(result),
                 Err(mpsc::TryRecvError::Empty) => None,
-                Err(mpsc::TryRecvError::Disconnected) => Some(Err("文件任务意外结束".into())),
+                Err(mpsc::TryRecvError::Disconnected) => Some(Err(tr!("文件任务意外结束"))),
             });
         if let Some(result) = result {
             let job = self.files.job.take().expect("completed job");
@@ -463,14 +474,14 @@ impl CiallogcatApp {
                     }
                 }
                 Ok(Completed::Loaded(..)) => {
-                    self.files.notice = Some("已取消打开；当前日志保持不变。".into());
+                    self.files.notice = Some(tr!("已取消打开；当前日志保持不变。"));
                 }
                 Ok(Completed::Saved(summary)) => {
-                    self.files.notice = Some(format!(
-                        "已保存 {} 条记录（{} 字节）：{}",
-                        summary.records,
-                        summary.bytes,
-                        job.path.display()
+                    self.files.notice = Some(tr!(
+                        "已保存 %{records} 条记录（%{bytes} 字节）：%{path}",
+                        records = summary.records,
+                        bytes = summary.bytes,
+                        path = job.path.display()
                     ));
                     if job.action == Action::SaveBeforeOpen {
                         if job.cancel.load(Ordering::Acquire) {
@@ -480,7 +491,7 @@ impl CiallogcatApp {
                                 .notice
                                 .as_mut()
                                 .unwrap()
-                                .push_str("；已取消打开，原视图保持不变，采集已停止。");
+                                .push_str(&tr!("；已取消打开，原视图保持不变，采集已停止。"));
                         } else {
                             self.install_candidate();
                         }
@@ -506,8 +517,9 @@ impl CiallogcatApp {
             } else if matches!(self.capture_state, CaptureState::Error(_)) {
                 self.files.replace = None;
                 self.files.candidate = None;
-                self.files.notice =
-                    Some("无法确认旧采集停止，未替换当前日志。请先处理采集错误。".into());
+                self.files.notice = Some(tr!(
+                    "无法确认旧采集停止，未替换当前日志。请先处理采集错误。"
+                ));
             }
         }
         if self.files.job.is_some() {
@@ -524,7 +536,7 @@ impl CiallogcatApp {
         };
         if bytes > memory_budget_bytes(self.memory_limit_mib) {
             self.files.replace = None;
-            self.files.notice = Some("候选文件超出当前预算，未替换现有日志。".into());
+            self.files.notice = Some(tr!("候选文件超出当前预算，未替换现有日志。"));
             return;
         }
         self.clear_logs();
@@ -559,28 +571,30 @@ impl CiallogcatApp {
             ui.horizontal_wrapped(|ui| {
                 if let Some(document) = &self.files.document {
                     let completeness = if document.end.capture.completeness == "partial" {
-                        "已知不完整"
+                        tr!("已知不完整")
                     } else {
-                        "未知"
+                        tr!("未知")
                     };
-                    ui.label(format!(
-                        "文件 · {} · {} 条 · 采集完整性：{completeness}",
-                        self.files
+                    ui.label(tr!(
+                        "文件 · %{name} · %{count} 条 · 采集完整性：%{completeness}",
+                        name = self
+                            .files
                             .path
                             .as_ref()
                             .map(|p| p.file_name().unwrap_or_default().to_string_lossy())
                             .unwrap_or_default(),
-                        document.entries.len()
+                        count = document.entries.len(),
+                        completeness = completeness
                     ));
                 }
                 if let Some(job) = &self.files.job {
                     ui.spinner();
                     ui.label(if job.action == Action::Open {
-                        "正在验证并打开…"
+                        tr!("正在验证并打开…")
                     } else {
-                        "正在保存固定快照…"
+                        tr!("正在保存固定快照…")
                     });
-                    if ui.button("取消操作").clicked() {
+                    if ui.button(tr!("取消操作")).clicked() {
                         job.cancel.store(true, Ordering::Release);
                     }
                 }
@@ -594,12 +608,12 @@ impl CiallogcatApp {
                                 || (!self.filter_pending && self.filter_dirty_since.is_none());
                             retry = ui.add_enabled(
                                 !self.files.busy() && filter_ready && (*action == Action::Open || has_source),
-                                egui::Button::new("修改路径重试…"),
-                            ).on_hover_text("保留失败路径供修改；再次确认后使用当前视图，不会自动重试或覆盖已有文件。").clicked();
+                                egui::Button::new(tr!("修改路径重试…")),
+                            ).on_hover_text(tr!("保留失败路径供修改；再次确认后使用当前视图，不会自动重试或覆盖已有文件。")).clicked();
                         }
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            dismiss = ui.small_button("×").on_hover_text("关闭文件通知").clicked();
-                            Self::status_diagnostic(ui, "file_notice_diagnostic", "详情", notice);
+                            dismiss = ui.small_button("×").on_hover_text(tr!("关闭文件通知")).clicked();
+                            Self::status_diagnostic(ui, "file_notice_diagnostic", &tr!("详情"), notice);
                             ui.add(egui::Label::new(notice).truncate()).on_hover_text(notice);
                         });
                     });
@@ -622,26 +636,27 @@ impl CiallogcatApp {
             let modal = egui::Modal::new(egui::Id::new("log_file_path")).show(ctx, |ui| {
                 ui.set_width(540.0);
                 ui.heading(match dialog.action {
-                    Action::Open => "打开日志文件",
-                    Action::Export => "导出当前筛选结果",
-                    _ => "另存保留日志",
+                    Action::Open => tr!("打开日志文件"),
+                    Action::Export => tr!("导出当前筛选结果"),
+                    _ => tr!("另存保留日志"),
                 });
                 ui.label(if dialog.action == Action::Open {
-                    "输入本地 原生日志 JSONL 文件路径，也可取消后将文件拖入窗口。"
+                    tr!("输入本地原生 JSONL 日志文件路径，也可取消后将文件拖入窗口。")
                 } else {
-                    "输入新文件路径。保存固定快照，不包含后续到达的日志；已有文件不会被覆盖。"
+                    tr!("输入新文件路径。保存固定快照，不包含后续到达的日志；已有文件不会被覆盖。")
                 });
                 if dialog.action != Action::Open {
                     let retained = self.entries.len();
                     if dialog.action == Action::Export {
-                        ui.label(format!(
-                            "当前匹配 {} / 保留 {retained} 条；导出保留筛选条件及采集事实。",
-                            self.matches.len()
+                        ui.label(tr!(
+                            "当前匹配 %{matched} / 保留 %{retained} 条；导出保留筛选条件及采集事实。",
+                            matched = self.matches.len(),
+                            retained = retained
                         ));
                     } else {
-                        ui.label(format!("当前保留 {retained} 条；包括未匹配筛选的记录。"));
+                        ui.label(tr!("当前保留 %{retained} 条；包括未匹配筛选的记录。", retained = retained));
                     }
-                    ui.label("记录范围以点击保存时为准；已淘汰或清空的历史不会恢复。");
+                    ui.label(tr!("记录范围以点击保存时为准；已淘汰或清空的历史不会恢复。"));
                     let first = (!self.entries.is_empty())
                         .then(|| self.entries[0].provenance)
                         .flatten()
@@ -669,8 +684,10 @@ impl CiallogcatApp {
                                 .map(|record| record.seq)
                         });
                     if let (Some(first), Some(last)) = (first, last) {
-                        ui.label(format!(
-                            "来源保留范围：seq {first}–{last}；范围内可能有筛选或历史缺口。"
+                        ui.label(tr!(
+                            "来源保留范围：seq %{first}–%{last}；范围内可能有筛选或历史缺口。",
+                            first = first,
+                            last = last
                         ));
                     }
                 }
@@ -682,14 +699,14 @@ impl CiallogcatApp {
                 }
                 let enter = edit.lost_focus() && ctx.input(|i| i.key_pressed(egui::Key::Enter));
                 ui.horizontal(|ui| {
-                    cancel |= ui.button("取消").clicked();
+                    cancel |= ui.button(tr!("取消")).clicked();
                     submit = ui
                         .add_enabled(
                             !dialog.path.trim().is_empty(),
                             egui::Button::new(if dialog.action == Action::Open {
-                                "打开并验证"
+                                tr!("打开并验证")
                             } else {
-                                "保存"
+                                tr!("保存")
                             }),
                         )
                         .clicked()
@@ -712,10 +729,10 @@ impl CiallogcatApp {
             && job.action == Action::SaveBeforeOpen
         {
             egui::Modal::new(egui::Id::new("save_before_open_progress")).show(ctx, |ui| {
-                ui.heading("正在保存当前日志…");
+                ui.heading(tr!("正在保存当前日志…"));
                 ui.spinner();
-                ui.label("保存成功后打开文件。当前采集已停止。");
-                if ui.button("取消保存与打开").clicked() {
+                ui.label(tr!("保存成功后打开文件。当前采集已停止。"));
+                if ui.button(tr!("取消保存与打开")).clicked() {
                     job.cancel.store(true, Ordering::Release);
                 }
             });
@@ -726,15 +743,15 @@ impl CiallogcatApp {
             let mut cancel = false;
             let modal = egui::Modal::new(egui::Id::new("replace_log_document")).show(ctx, |ui| {
                 ui.set_width(540.0);
-                ui.heading("打开文件并替换当前视图？");
-                ui.label(format!("{} 已验证，共 {} 条记录。", path.display(), document.entries.len()));
-                if self.files.replace.is_some() { ui.spinner(); ui.label("等待当前采集停止并接收剩余日志…"); }
+                ui.heading(tr!("打开文件并替换当前视图？"));
+                ui.label(tr!("%{path} 已验证，共 %{count} 条记录。", path = path.display(), count = document.entries.len()));
+                if self.files.replace.is_some() { ui.spinner(); ui.label(tr!("等待当前采集停止并接收剩余日志…")); }
                 else {
-                    ui.label("替换后当前内存日志将被移除。可以先停止采集并保存，再打开文件；保存失败会保留原视图。");
+                    ui.label(tr!("替换后当前内存日志将被移除。可以先停止采集并保存，再打开文件；保存失败会保留原视图。"));
                     ui.horizontal(|ui| {
-                        cancel = ui.button("取消").clicked();
-                        if ui.button("保存后打开…").clicked() { choice = Some(Replace::Save); }
-                        if ui.button("直接替换").clicked() { choice = Some(Replace::Discard); }
+                        cancel = ui.button(tr!("取消")).clicked();
+                        if ui.button(tr!("保存后打开…")).clicked() { choice = Some(Replace::Save); }
+                        if ui.button(tr!("直接替换")).clicked() { choice = Some(Replace::Discard); }
                     });
                 }
             });

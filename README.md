@@ -31,7 +31,7 @@ Use the desktop app to browse live logs or offline files, or the CLI to capture 
 
 Ciallogcat focuses on Android app debugging. The desktop app, `ciallogcat`, reads live Logcat through ADB and filters locally. The separate `ciallogcat-cli` executable writes normalized JSONL for scripts and agents without opening a window.
 
-Open JSONL through **文件** or drag and drop, without ADB. File views are read-only; saving and filtered export use one native document format. The app does not show devices side by side, and uses Chinese for primary controls, while retaining conventional technical field names. See the [file workflow](docs/file-workflow.md).
+Open JSONL through **File** or drag and drop, without ADB. File views are read-only; saving and filtered export use one native document format. The app does not show devices side by side. The interface is available in English and Simplified Chinese (**View → Settings… → Appearance**); new installs start in English, and settings from earlier versions keep Chinese. Conventional technical field names are kept in both. See the [file workflow](docs/file-workflow.md).
 
 ## Install
 
@@ -79,29 +79,29 @@ cd Ciallogcat
 cargo run --locked --release --bin ciallogcat
 
 # Build only the CLI, without GUI dependencies
-cargo build --locked --release --no-default-features --bin ciallogcat-cli
+cargo build --locked --release -p ciallogcat-cli
 ./target/release/ciallogcat-cli --help
 ```
 
-To build the GUI without launching it, use `cargo build --locked --release --bin ciallogcat`. Binaries are in `target/release/`, with an `.exe` suffix on Windows. Rust consumers can also use the [shared core](docs/headless-core.md) with default features disabled.
+To build the GUI without launching it, use `cargo build --locked --release --bin ciallogcat`. Binaries are in `target/release/`, with an `.exe` suffix on Windows. Rust consumers can use the separate, headless [shared core](docs/headless-core.md) package. GUI and CLI have independent versions and component tags (`gui-v…` / `cli-v…`); see [releasing](docs/release.md).
 
 ## Desktop usage
 
-1. Launch `ciallogcat`, connect and authorize a device, then select it in **设备**. Selection is manual; use **刷新** (Refresh) if needed. Selecting an available device starts capture.
-2. Choose or enter a package name, set the minimum level, and enter a keyword. `.*` toggles regex and **Aa** toggles case sensitivity. **筛选方案** stores combinations; keyword history remembers recent searches.
+1. Launch `ciallogcat`, connect and authorize a device, then select it in **Device**. Selection is manual; use **Refresh** if needed. Selecting an available device starts capture.
+2. Choose or enter a package name, set the minimum level, and enter a keyword. `.*` toggles regex and **Aa** toggles case sensitivity. **Presets** stores combinations; keyword history remembers recent searches.
 3. Click a row for its full message. **Shift+click** selects a range, **Ctrl+click** toggles rows, and **Ctrl+C** copies. **Ctrl+F** or **/** focuses search.
-4. Browsing or selecting pauses live follow without stopping capture. Use **Ctrl+End** or **回到最新** to follow new logs again.
-5. Use **视图** for themes, row height, details, and the log memory budget. Budget edits take effect only after **应用预算**.
-6. **文件 → 打开日志** / **Ctrl+O** opens JSONL. **另存保留日志** / **Ctrl+Shift+S** saves retained rows, and **导出当前筛选结果** exports a filtered snapshot. File operations currently use path input or drag and drop; save to a new destination.
+4. Browsing or selecting pauses live follow without stopping capture. Use **Ctrl+End** or **↓ Latest** to follow new logs again.
+5. Use **View → Settings…** (**Ctrl+,**) for the language, theme (including follow-system), row height, details, and the log memory budget. Budget edits take effect only after **Apply budget**. **F1** lists every shortcut.
+6. **File → Open log…** / **Ctrl+O** opens JSONL. **Save retained logs…** / **Ctrl+Shift+S** saves retained rows, and **Export filtered results…** exports a filtered snapshot. File operations currently use path input or drag and drop; save to a new destination.
 
 A few useful details:
 
-- **暂停采集** (Pause) stops capture but keeps logs; **开始采集** (Start) resumes without backfilling the paused interval. **断开** (Close) also deselects the device. Same-device reconnects preserve retained logs; switching devices asks before clearing them.
+- **Pause capture** stops capture but keeps logs; **Start capture** resumes without backfilling the paused interval. **Disconnect** also deselects the device. Same-device reconnects preserve retained logs; switching devices asks before clearing them.
 - Device-discovery errors retain the last successful device list and your selection. An offline or missing-device snapshot does not stop a stream that is still running; Pause remains available.
 - An exited stream retries at 1, 2 and 4 seconds, up to three times; Pause or Close cancels retries. Restart waits for the old child and both output pipes to finish. A stop acknowledgement taking over five seconds blocks a new start and reports an error.
-- Buffers default to `main + system + crash`. Changes take effect after **应用** (Apply). Starts and restarts use `-T 1`, so they do not backfill history and may leave gaps.
+- Buffers default to `main + system + crash`. Changes take effect after **Apply** (under **Capture setup**). Starts and restarts use `-T 1`, so they do not backfill history and may leave gaps.
 - Package filtering includes subprocesses such as `com.example.app:sync`. GUI process names are recent `ps` hints, not verified identities; failed or expired samples are discarded, and later samples never fill unknown historical rows. Unknown or short-lived processes can be hidden by that filter; clear the package restriction to inspect their logs. Structural markers and unparsed text can match message-only filters with the default Verbose threshold. Package, tag or stricter level filters exclude these rows because they lack log metadata; they are not counted as unknown processes.
-- Invalid regex shows an error until corrected. **清空视图** removes local records after confirmation, never the device's Logcat buffers.
+- Invalid regex shows an error until corrected. **Clear** removes local records after confirmation, never the device's Logcat buffers.
 
 ### Memory retention
 
@@ -189,12 +189,12 @@ Desktop checks have exercised ordinary interaction on Linux X11 and nested Wayla
 
 ```sh
 cargo fmt --all --check
-cargo test --locked
-cargo test --locked --no-default-features
-cargo clippy --locked --all-targets -- -D warnings
-cargo clippy --locked --no-default-features --all-targets -- -D warnings
+cargo test --locked --workspace
+cargo test --locked -p ciallogcat-cli -p ciallogcat-core
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo clippy --locked -p ciallogcat-cli -p ciallogcat-core --all-targets -- -D warnings
 cargo build --locked --release
-cargo build --locked --release --no-default-features --bin ciallogcat-cli
+cargo build --locked --release -p ciallogcat-cli
 ```
 
 Mock ADB tests require Python 3 on Linux, not an Android device. See the [test guide](docs/adb-testing.md) and [CLI validation guide](docs/cli.md#validation-and-packaging). The **Checks** workflow runs on pull requests, pushes to `main`, and manual dispatch; a native Rust fake-ADB fixture is included for Windows capture/session lifecycles, while local cross-compilation does not establish Windows runtime results. The normal release workflow remains version-tag-only. A separate manual workflow can append only the CLI DEB/checksum to the immutable v1.0 release after clean-container validation. See the [release guide](docs/release.md) before publishing.
