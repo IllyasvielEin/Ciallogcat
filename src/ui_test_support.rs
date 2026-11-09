@@ -65,12 +65,16 @@ impl Harness {
                 ..Default::default()
             },
             |ui| {
+                crate::i18n::set(self.app.language);
+                self.app.sync_theme(&self.ctx);
                 self.app.file_shortcuts(&self.ctx);
                 self.app.shortcuts(&self.ctx);
                 if self.app.files.is_modal()
                     || self.app.pending_clear
                     || self.app.pending_device.is_some()
                     || self.app.show_save_filter
+                    || self.app.show_shortcuts
+                    || self.app.show_settings
                 {
                     ui.disable();
                 }

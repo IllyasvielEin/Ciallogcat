@@ -12,10 +12,10 @@ pub enum Hint {
 impl Hint {
     pub fn label(self) -> &'static str {
         match self {
-            Self::JavaFatal => "Java 崩溃线索",
-            Self::NativeSignal => "Native signal 线索",
-            Self::NativeTombstone => "Native tombstone 线索",
-            Self::Anr => "ANR 线索",
+            Self::JavaFatal => "疑似 Java 崩溃",
+            Self::NativeSignal => "疑似 Native 崩溃（signal）",
+            Self::NativeTombstone => "疑似 Native 崩溃（tombstone）",
+            Self::Anr => "疑似 ANR",
         }
     }
 

@@ -1,0 +1,912 @@
+_version: 2
+# Keys are the Simplified Chinese source text (gettext style).
+# Every key needs both locales; see i18n catalog tests.
+"未找到 ADB":
+  en: "ADB not found"
+  zh-CN: "未找到 ADB"
+"等待设备":
+  en: "Waiting for device"
+  zh-CN: "等待设备"
+"正在启动 Logcat":
+  en: "Starting Logcat"
+  zh-CN: "正在启动 Logcat"
+"实时 Logcat":
+  en: "Live Logcat"
+  zh-CN: "实时 Logcat"
+"正在停止并接收剩余日志":
+  en: "Stopping and receiving remaining logs"
+  zh-CN: "正在停止并接收剩余日志"
+"等待自动重连":
+  en: "Waiting to reconnect"
+  zh-CN: "等待自动重连"
+"已暂停采集":
+  en: "Capture paused"
+  zh-CN: "已暂停采集"
+"所选日志仍在检查筛选；请在筛选完成后重新复制，本次未复制任何内容。":
+  en: "The selection is still being checked against the filter. Copy again once filtering catches up; nothing was copied."
+  zh-CN: "所选日志仍在检查筛选；请在筛选完成后重新复制，本次未复制任何内容。"
+"选择或来源已变化，复制准备已取消；剪贴板保持不变。":
+  en: "Selection or source changed, so copy preparation was cancelled; the clipboard is unchanged."
+  zh-CN: "选择或来源已变化，复制准备已取消；剪贴板保持不变。"
+"当前文件超出此预算；请先关闭文件。离线文件不会被静默裁剪。":
+  en: "The open file exceeds this budget. Close the file first; offline files are never trimmed silently."
+  zh-CN: "当前文件超出此预算；请先关闭文件。离线文件不会被静默裁剪。"
+"所选日志已从保留历史中移除。":
+  en: "The selected log was removed from the retained history."
+  zh-CN: "所选日志已从保留历史中移除。"
+"日志 segment 计数已耗尽，采集已停止。":
+  en: "Log segment counter exhausted; capture stopped."
+  zh-CN: "日志 segment 计数已耗尽，采集已停止。"
+"无法分配唯一日志身份，采集已停止。":
+  en: "Could not allocate a unique log identity; capture stopped."
+  zh-CN: "无法分配唯一日志身份，采集已停止。"
+"Logcat 已停止（%{code}）":
+  en: "Logcat stopped (%{code})"
+  zh-CN: "Logcat 已停止（%{code}）"
+"Logcat 已停止":
+  en: "Logcat stopped"
+  zh-CN: "Logcat 已停止"
+"历史快照已完成；未开启持续跟随。":
+  en: "History snapshot complete; live following was not enabled."
+  zh-CN: "历史快照已完成；未开启持续跟随。"
+"日志 attempt 计数已耗尽，采集已停止。":
+  en: "Log attempt counter exhausted; capture stopped."
+  zh-CN: "日志 attempt 计数已耗尽，采集已停止。"
+"设置保存失败：%{error}":
+  en: "Failed to save settings: %{error}"
+  zh-CN: "设置保存失败：%{error}"
+"设备":
+  en: "Device"
+  zh-CN: "设备"
+"%{serial} · 未连接":
+  en: "%{serial} · not connected"
+  zh-CN: "%{serial} · 未连接"
+"无设备":
+  en: "No device"
+  zh-CN: "无设备"
+"选择设备":
+  en: "Select device"
+  zh-CN: "选择设备"
+"↻ 刷新":
+  en: "↻ Refresh"
+  zh-CN: "↻ 刷新"
+"刷新设备":
+  en: "Refresh devices"
+  zh-CN: "刷新设备"
+"暂停采集":
+  en: "Pause capture"
+  zh-CN: "暂停采集"
+"开始采集":
+  en: "Start capture"
+  zh-CN: "开始采集"
+"暂停会停止采集并接收剩余日志；再次开始使用当前采集设置，停止期间的日志不保证回补":
+  en: "Pausing stops capture and receives remaining logs. Starting again uses the current capture settings; logs from the stopped period are not guaranteed to be backfilled."
+  zh-CN: "暂停会停止采集并接收剩余日志；再次开始使用当前采集设置，停止期间的日志不保证回补"
+"断开":
+  en: "Disconnect"
+  zh-CN: "断开"
+"结束当前设备会话，保留已有日志；重新选择设备后可再次采集":
+  en: "End the current device session and keep existing logs. Select the device again to capture."
+  zh-CN: "结束当前设备会话，保留已有日志；重新选择设备后可再次采集"
+"采集设置":
+  en: "Capture setup"
+  zh-CN: "采集设置"
+"只读设备诊断…":
+  en: "Read-only device diagnostics…"
+  zh-CN: "只读设备诊断…"
+"影响后续采集；已有日志保留":
+  en: "Applies to later captures; existing logs are kept"
+  zh-CN: "影响后续采集；已有日志保留"
+"应用":
+  en: "Apply"
+  zh-CN: "应用"
+"视图":
+  en: "View"
+  zh-CN: "视图"
+"下一个疑似崩溃 / ANR（%{count}）":
+  en: "Next possible crash / ANR (%{count})"
+  zh-CN: "下一个疑似崩溃 / ANR（%{count}）"
+"在全部保留日志中按已知签名定位疑似崩溃 / ANR，并打开前后上下文；包含被筛选隐藏的记录，不能替代故障诊断":
+  en: "Find known signatures across all retained logs and open the surrounding context. Includes records hidden by filters; not a substitute for diagnosis."
+  zh-CN: "在全部保留日志中按已知签名定位疑似崩溃 / ANR，并打开前后上下文；包含被筛选隐藏的记录，不能替代故障诊断"
+"选中时显示详情":
+  en: "Show details on selection"
+  zh-CN: "选中时显示详情"
+"快捷键…":
+  en: "Shortcuts…"
+  zh-CN: "快捷键…"
+"设置…":
+  en: "Settings…"
+  zh-CN: "设置…"
+"筛选方案":
+  en: "Presets"
+  zh-CN: "筛选方案"
+"删除筛选方案":
+  en: "Delete preset"
+  zh-CN: "删除筛选方案"
+"保存当前筛选…":
+  en: "Save current filters as preset…"
+  zh-CN: "保存当前筛选…"
+"清空视图":
+  en: "Clear"
+  zh-CN: "清空视图"
+"清空本地保留日志；确认后无法恢复，不影响设备日志":
+  en: "Clear locally retained logs. Cannot be undone after confirming; device logs are unaffected."
+  zh-CN: "清空本地保留日志；确认后无法恢复，不影响设备日志"
+"暂停跟随":
+  en: "Pause scroll"
+  zh-CN: "暂停跟随"
+"↓ 回到最新":
+  en: "↓ Latest"
+  zh-CN: "↓ 回到最新"
+"只控制视图滚动，浏览时继续采集；Ctrl+End 回到最新":
+  en: "Only controls scrolling; capture continues while you browse. Ctrl+End jumps to latest."
+  zh-CN: "只控制视图滚动，浏览时继续采集；Ctrl+End 回到最新"
+"重试采集":
+  en: "Retry capture"
+  zh-CN: "重试采集"
+"包名 · 全部进程":
+  en: "Package · all processes"
+  zh-CN: "包名 · 全部进程"
+"包名筛选":
+  en: "Package filter"
+  zh-CN: "包名筛选"
+"全部进程":
+  en: "All processes"
+  zh-CN: "全部进程"
+"没有匹配的已安装应用":
+  en: "No matching installed apps"
+  zh-CN: "没有匹配的已安装应用"
+"进程变化":
+  en: "Process changes"
+  zh-CN: "进程变化"
+"正在加载包列表…":
+  en: "Loading packages…"
+  zh-CN: "正在加载包列表…"
+"刷新包列表":
+  en: "Refresh packages"
+  zh-CN: "刷新包列表"
+"筛选消息 · / 聚焦":
+  en: "Filter messages · / to focus"
+  zh-CN: "筛选消息 · / 聚焦"
+"消息筛选":
+  en: "Message filter"
+  zh-CN: "消息筛选"
+"暂无筛选历史":
+  en: "No filter history"
+  zh-CN: "暂无筛选历史"
+"删除此条历史":
+  en: "Delete this entry"
+  zh-CN: "删除此条历史"
+"清空历史":
+  en: "Clear history"
+  zh-CN: "清空历史"
+"使用正则":
+  en: "Use regex"
+  zh-CN: "使用正则"
+"区分大小写":
+  en: "Match case"
+  zh-CN: "区分大小写"
+"Tag 子串匹配（不支持正则）· 区分大小写":
+  en: "Tag substring match (no regex) · case-sensitive"
+  zh-CN: "Tag 子串匹配（不支持正则）· 区分大小写"
+"包含":
+  en: "Include"
+  zh-CN: "包含"
+"留空不限":
+  en: "Empty for any"
+  zh-CN: "留空不限"
+"Tag 包含":
+  en: "Tag contains"
+  zh-CN: "Tag 包含"
+"排除":
+  en: "Exclude"
+  zh-CN: "排除"
+"留空不排除":
+  en: "Empty for none"
+  zh-CN: "留空不排除"
+"Tag 排除":
+  en: "Tag excludes"
+  zh-CN: "Tag 排除"
+"与包名、级别及消息条件同时生效；排除优先。":
+  en: "Applies together with package, level and message filters; exclusion wins."
+  zh-CN: "与包名、级别及消息条件同时生效；排除优先。"
+"清除 Tag 条件":
+  en: "Clear Tag filters"
+  zh-CN: "清除 Tag 条件"
+"%{level} 及以上":
+  en: "%{level} and above"
+  zh-CN: "%{level} 及以上"
+"最低级别：%{level} 及以上":
+  en: "Minimum level: %{level} and above"
+  zh-CN: "最低级别：%{level} 及以上"
+"日志详情 · 正在检查筛选…":
+  en: "Log details · checking filter…"
+  zh-CN: "日志详情 · 正在检查筛选…"
+"日志详情":
+  en: "Log details"
+  zh-CN: "日志详情"
+"查看上下文":
+  en: "Show context"
+  zh-CN: "查看上下文"
+"正在定位命中…":
+  en: "Locating matches…"
+  zh-CN: "正在定位命中…"
+"上一个":
+  en: "Previous"
+  zh-CN: "上一个"
+"上一处消息命中":
+  en: "Previous message match"
+  zh-CN: "上一处消息命中"
+"下一个":
+  en: "Next"
+  zh-CN: "下一个"
+"下一处消息命中；包括预览之外的内容":
+  en: "Next message match, including text beyond the preview"
+  zh-CN: "下一处消息命中；包括预览之外的内容"
+"+（定位上限）":
+  en: "+ (locate limit)"
+  zh-CN: "+（定位上限）"
+"复制":
+  en: "Copy"
+  zh-CN: "复制"
+"复制完整日志 · Ctrl+C":
+  en: "Copy full log · Ctrl+C"
+  zh-CN: "复制完整日志 · Ctrl+C"
+"复制引用":
+  en: "Copy reference"
+  zh-CN: "复制引用"
+"匹配依据：%{reason}。\n这是排查线索；原文与上下文保留。":
+  en: "Matched on: %{reason}.\nThis is an investigation hint; the original text and context are kept."
+  zh-CN: "匹配依据：%{reason}。\n这是排查线索；原文与上下文保留。"
+" (ps 推测)":
+  en: " (ps estimate)"
+  zh-CN: " (ps 推测)"
+"[%{kind}] · 非日志记录；无日志元字段":
+  en: "[%{kind}] · not a log record; no log fields"
+  zh-CN: "[%{kind}] · 非日志记录；无日志元字段"
+"正在筛选日志…":
+  en: "Filtering logs…"
+  zh-CN: "正在筛选日志…"
+"正则无效。请修改消息条件，或关闭 .*。":
+  en: "Invalid regex. Edit the message filter or turn off .*."
+  zh-CN: "正则无效。请修改消息条件，或关闭 .*。"
+"没有匹配日志。请检查包名、Tag 包含/排除、最低级别及消息筛选条件。":
+  en: "No matching logs. Check the package, Tag include/exclude, minimum level and message filters."
+  zh-CN: "没有匹配日志。请检查包名、Tag 包含/排除、最低级别及消息筛选条件。"
+"文件中没有日志记录。可以打开其他文件或选择设备开始采集。":
+  en: "The file contains no log records. Open another file or select a device to start capturing."
+  zh-CN: "文件中没有日志记录。可以打开其他文件或选择设备开始采集。"
+"安装 Android platform-tools 后，点击刷新以查找 ADB。\n也可通过文件 / Ctrl+O 打开原生 JSONL，无需设备。":
+  en: "Install Android platform-tools, then click Refresh to find ADB.\nYou can also open a native JSONL file via File / Ctrl+O without a device."
+  zh-CN: "安装 Android platform-tools 后，点击刷新以查找 ADB。\n也可通过文件 / Ctrl+O 打开原生 JSONL，无需设备。"
+"连接并授权 Android 设备，然后在上方选择。\n也可通过文件 / Ctrl+O 打开原生 JSONL，无需设备。":
+  en: "Connect and authorize an Android device, then select it above.\nYou can also open a native JSONL file via File / Ctrl+O without a device."
+  zh-CN: "连接并授权 Android 设备，然后在上方选择。\n也可通过文件 / Ctrl+O 打开原生 JSONL，无需设备。"
+"采集已停止。点击重试采集继续。":
+  en: "Capture stopped. Click Retry capture to continue."
+  zh-CN: "采集已停止。点击重试采集继续。"
+"采集已暂停。点击开始采集继续接收日志。":
+  en: "Capture paused. Click Start capture to receive logs again."
+  zh-CN: "采集已暂停。点击开始采集继续接收日志。"
+"正在等待所选设备的日志…":
+  en: "Waiting for logs from the selected device…"
+  zh-CN: "正在等待所选设备的日志…"
+"筛选后的日志":
+  en: "Filtered logs"
+  zh-CN: "筛选后的日志"
+"使用方向键选择日志。选中一行可查看完整详情；“复制完整日志”包含完整消息。":
+  en: "Use arrow keys to select logs. Select a row for complete details; Copy full log includes the complete message."
+  zh-CN: "使用方向键选择日志。选中一行可查看完整详情；“复制完整日志”包含完整消息。"
+"第 %{row} 行日志。时间 %{time}。级别 %{level}。PID / TID %{pid}。进程 %{process}%{hint}。Tag %{tag}。消息 %{message}%{truncated}":
+  en: "Log row %{row}. Time %{time}. Level %{level}. PID / TID %{pid}. Process %{process}%{hint}. Tag %{tag}. Message %{message}%{truncated}"
+  zh-CN: "第 %{row} 行日志。时间 %{time}。级别 %{level}。PID / TID %{pid}。进程 %{process}%{hint}。Tag %{tag}。消息 %{message}%{truncated}"
+"（ps 采样推测，未核实）":
+  en: " (sampled ps hint, unverified)"
+  zh-CN: "（ps 采样推测，未核实）"
+"。预览已截断；选中可查看完整详情，或使用“复制完整日志”。":
+  en: ". Preview truncated. Select for full details or use Copy full log."
+  zh-CN: "。预览已截断；选中可查看完整详情，或使用“复制完整日志”。"
+"%{kind} 记录第 %{row} 行。消息 %{message}%{truncated}":
+  en: "%{kind} row %{row}. Message %{message}%{truncated}"
+  zh-CN: "%{kind} 记录第 %{row} 行。消息 %{message}%{truncated}"
+"进程名来自近期 ps 快照，仅为推测；不能证明历史 PID 归属。":
+  en: "The process name comes from a recent ps snapshot and is only an estimate; it does not prove historical PID ownership."
+  zh-CN: "进程名来自近期 ps 快照，仅为推测；不能证明历史 PID 归属。"
+"复制选中日志":
+  en: "Copy selected logs"
+  zh-CN: "复制选中日志"
+"复制完整日志":
+  en: "Copy full log"
+  zh-CN: "复制完整日志"
+"仅看此进程":
+  en: "Show only this process"
+  zh-CN: "仅看此进程"
+"文件 · 只读":
+  en: "File · read-only"
+  zh-CN: "文件 · 只读"
+"采集错误":
+  en: "Capture error"
+  zh-CN: "采集错误"
+"%{seconds}s 后重连 %{retry}/3":
+  en: "Reconnecting in %{seconds}s %{retry}/3"
+  zh-CN: "%{seconds}s 后重连 %{retry}/3"
+"等待设备重连 %{retry}/3":
+  en: "Waiting for device to reconnect %{retry}/3"
+  zh-CN: "等待设备重连 %{retry}/3"
+" · 已移除 %{count} 条":
+  en: " · %{count} removed"
+  zh-CN: " · 已移除 %{count} 条"
+"%{count} 条日志 · %{rate}/秒%{dropped}":
+  en: "%{count} logs · %{rate}/s%{dropped}"
+  zh-CN: "%{count} 条日志 · %{rate}/秒%{dropped}"
+"%{count} 条匹配":
+  en: "%{count} matches"
+  zh-CN: "%{count} 条匹配"
+"保留日志 ≈ %{used} / %{limit} MiB":
+  en: "Retained logs ≈ %{used} / %{limit} MiB"
+  zh-CN: "保留日志 ≈ %{used} / %{limit} MiB"
+"取消复制":
+  en: "Cancel copy"
+  zh-CN: "取消复制"
+"复制已准备好":
+  en: "Copy ready"
+  zh-CN: "复制已准备好"
+"点击后才写入剪贴板；来源、筛选或选择变化会取消。":
+  en: "Writes to the clipboard only when clicked; changes to source, filter or selection cancel it."
+  zh-CN: "点击后才写入剪贴板；来源、筛选或选择变化会取消。"
+"正在准备完整日志；完成后需点击复制，不会自动覆盖剪贴板。":
+  en: "Preparing complete logs; click Copy when ready. The clipboard is never overwritten automatically."
+  zh-CN: "正在准备完整日志；完成后需点击复制，不会自动覆盖剪贴板。"
+"筛选错误":
+  en: "Filter error"
+  zh-CN: "筛选错误"
+"筛选中，当前结果可能尚未完整":
+  en: "Filtering; current results may be incomplete"
+  zh-CN: "筛选中，当前结果可能尚未完整"
+"设备发现错误":
+  en: "Device discovery error"
+  zh-CN: "设备发现错误"
+"设备未就绪":
+  en: "Device not ready"
+  zh-CN: "设备未就绪"
+"设备列表当前未报告所选设备就绪；保留选择，已有采集会继续，直到日志流退出或手动暂停。":
+  en: "The device list does not currently report the selected device as ready. The selection is kept and an existing capture continues until the stream exits or you pause it."
+  zh-CN: "设备列表当前未报告所选设备就绪；保留选择，已有采集会继续，直到日志流退出或手动暂停。"
+"进程查询错误":
+  en: "Process query error"
+  zh-CN: "进程查询错误"
+"复制 / 历史":
+  en: "Copy / history"
+  zh-CN: "复制 / 历史"
+"设置保存失败":
+  en: "Settings save failed"
+  zh-CN: "设置保存失败"
+"包列表查询错误":
+  en: "Package list error"
+  zh-CN: "包列表查询错误"
+"查看并复制完整诊断":
+  en: "View and copy full diagnostic"
+  zh-CN: "查看并复制完整诊断"
+"复制诊断":
+  en: "Copy diagnostic"
+  zh-CN: "复制诊断"
+"清空本地保留日志？":
+  en: "Clear locally retained logs?"
+  zh-CN: "清空本地保留日志？"
+"切换到 %{serial} 会清空当前本地保留日志。":
+  en: "Switching to %{serial} clears the locally retained logs."
+  zh-CN: "切换到 %{serial} 会清空当前本地保留日志。"
+"清空所有本地保留日志，确认后无法恢复。采集状态不变。":
+  en: "Clear all locally retained logs. This cannot be undone; capture state is unchanged."
+  zh-CN: "清空所有本地保留日志，确认后无法恢复。采集状态不变。"
+"不会清空设备上的日志，也不会重新补回这些历史记录。":
+  en: "Device logs are not cleared, and these records will not be restored."
+  zh-CN: "不会清空设备上的日志，也不会重新补回这些历史记录。"
+"取消":
+  en: "Cancel"
+  zh-CN: "取消"
+"清空并继续":
+  en: "Clear and continue"
+  zh-CN: "清空并继续"
+"历史采集不套用当前 ps 名称；未知归属可能被包名筛选隐藏。":
+  en: "History captures do not use current ps names; logs with unknown ownership may be hidden by the package filter."
+  zh-CN: "历史采集不套用当前 ps 名称；未知归属可能被包名筛选隐藏。"
+"包名基于近期 ps 推测；%{count} 条已解析日志归属未知，可能被隐藏（含崩溃）。":
+  en: "Package ownership is estimated from recent ps samples; %{count} parsed logs have unknown ownership and may be hidden (including crashes)."
+  zh-CN: "包名基于近期 ps 推测；%{count} 条已解析日志归属未知，可能被隐藏（含崩溃）。"
+"清除包名限制以查看":
+  en: "Remove package filter to show them"
+  zh-CN: "清除包名限制以查看"
+"来自定期 ps 快照；出现/消失是主机侧观测，不是精确的启动/退出时间。":
+  en: "From periodic ps snapshots; appearing/disappearing are host observations, not exact start/exit times."
+  zh-CN: "来自定期 ps 快照；出现/消失是主机侧观测，不是精确的启动/退出时间。"
+"等待当前应用的新进程快照；未知不等于没有进程。":
+  en: "Waiting for a new process snapshot of the current app; unknown does not mean no process."
+  zh-CN: "等待当前应用的新进程快照；未知不等于没有进程。"
+"本次最多跟踪 128 个进程，已达上限。":
+  en: "Tracking at most 128 processes this time; limit reached."
+  zh-CN: "本次最多跟踪 128 个进程，已达上限。"
+"另有 %{count} 条较早观察已从此列表移除。":
+  en: "%{count} older observations were removed from this list."
+  zh-CN: "另有 %{count} 条较早观察已从此列表移除。"
+"键盘快捷键":
+  en: "Keyboard shortcuts"
+  zh-CN: "键盘快捷键"
+"输入框聚焦时，方向键与快捷键优先用于编辑。":
+  en: "While an input has focus, arrow keys and shortcuts edit text first."
+  zh-CN: "输入框聚焦时，方向键与快捷键优先用于编辑。"
+"关闭":
+  en: "Close"
+  zh-CN: "关闭"
+"保存筛选方案":
+  en: "Save filter preset"
+  zh-CN: "保存筛选方案"
+"名称":
+  en: "Name"
+  zh-CN: "名称"
+"例如：网络失败":
+  en: "e.g. Network failures"
+  zh-CN: "例如：网络失败"
+"保存":
+  en: "Save"
+  zh-CN: "保存"
+"文件":
+  en: "File"
+  zh-CN: "文件"
+"打开日志…":
+  en: "Open log…"
+  zh-CN: "打开日志…"
+"另存保留日志…":
+  en: "Save retained logs…"
+  zh-CN: "另存保留日志…"
+"导出当前筛选结果…":
+  en: "Export filtered results…"
+  zh-CN: "导出当前筛选结果…"
+"关闭文件":
+  en: "Close file"
+  zh-CN: "关闭文件"
+"可将原生 JSONL 日志文件拖入窗口打开。":
+  en: "Drop a native JSONL log file onto the window to open it."
+  zh-CN: "可将原生 JSONL 日志文件拖入窗口打开。"
+"另存为新文件；不会覆盖已有文件。":
+  en: "Saves to a new file; existing files are never overwritten."
+  zh-CN: "另存为新文件；不会覆盖已有文件。"
+"请一次打开一个本地 JSONL 文件。":
+  en: "Open one local JSONL file at a time."
+  zh-CN: "请一次打开一个本地 JSONL 文件。"
+"没有可保存的设备会话":
+  en: "No device session to save"
+  zh-CN: "没有可保存的设备会话"
+"请选择普通日志文件":
+  en: "Choose a regular log file"
+  zh-CN: "请选择普通日志文件"
+"无法启动文件任务：%{error}":
+  en: "Could not start file task: %{error}"
+  zh-CN: "无法启动文件任务：%{error}"
+"当前日志已保留，采集已停止。重新保存不会自动打开原候选文件。":
+  en: "Current logs are kept and capture has stopped. Saving again will not open the original candidate file."
+  zh-CN: "当前日志已保留，采集已停止。重新保存不会自动打开原候选文件。"
+"当前日志已保留。":
+  en: "Current logs are kept."
+  zh-CN: "当前日志已保留。"
+"文件操作未完成：%{error}。%{status} 路径：%{path}":
+  en: "File operation incomplete: %{error}. %{status} Path: %{path}"
+  zh-CN: "文件操作未完成：%{error}。%{status} 路径：%{path}"
+"文件任务意外结束":
+  en: "File task ended unexpectedly"
+  zh-CN: "文件任务意外结束"
+"已取消打开；当前日志保持不变。":
+  en: "Open cancelled; current logs are unchanged."
+  zh-CN: "已取消打开；当前日志保持不变。"
+"已保存 %{records} 条记录（%{bytes} 字节）：%{path}":
+  en: "Saved %{records} records (%{bytes} bytes): %{path}"
+  zh-CN: "已保存 %{records} 条记录（%{bytes} 字节）：%{path}"
+"；已取消打开，原视图保持不变，采集已停止。":
+  en: "; open cancelled, the current view is unchanged and capture has stopped."
+  zh-CN: "；已取消打开，原视图保持不变，采集已停止。"
+"无法确认旧采集停止，未替换当前日志。请先处理采集错误。":
+  en: "Could not confirm that the previous capture stopped, so current logs were not replaced. Resolve the capture error first."
+  zh-CN: "无法确认旧采集停止，未替换当前日志。请先处理采集错误。"
+"候选文件超出当前预算，未替换现有日志。":
+  en: "The candidate file exceeds the current budget; existing logs were not replaced."
+  zh-CN: "候选文件超出当前预算，未替换现有日志。"
+"已知不完整":
+  en: "known incomplete"
+  zh-CN: "已知不完整"
+"未知":
+  en: "unknown"
+  zh-CN: "未知"
+"文件 · %{name} · %{count} 条 · 采集完整性：%{completeness}":
+  en: "File · %{name} · %{count} records · capture completeness: %{completeness}"
+  zh-CN: "文件 · %{name} · %{count} 条 · 采集完整性：%{completeness}"
+"正在验证并打开…":
+  en: "Validating and opening…"
+  zh-CN: "正在验证并打开…"
+"正在保存固定快照…":
+  en: "Saving fixed snapshot…"
+  zh-CN: "正在保存固定快照…"
+"取消操作":
+  en: "Cancel operation"
+  zh-CN: "取消操作"
+"修改路径重试…":
+  en: "Edit path and retry…"
+  zh-CN: "修改路径重试…"
+"保留失败路径供修改；再次确认后使用当前视图，不会自动重试或覆盖已有文件。":
+  en: "Keeps the failed path for editing. After you confirm again, the current view is used; nothing retries automatically or overwrites an existing file."
+  zh-CN: "保留失败路径供修改；再次确认后使用当前视图，不会自动重试或覆盖已有文件。"
+"关闭文件通知":
+  en: "Dismiss file notice"
+  zh-CN: "关闭文件通知"
+"详情":
+  en: "Details"
+  zh-CN: "详情"
+"打开日志文件":
+  en: "Open log file"
+  zh-CN: "打开日志文件"
+"导出当前筛选结果":
+  en: "Export filtered results"
+  zh-CN: "导出当前筛选结果"
+"另存保留日志":
+  en: "Save retained logs"
+  zh-CN: "另存保留日志"
+"输入本地原生 JSONL 日志文件路径，也可取消后将文件拖入窗口。":
+  en: "Enter the path of a local native JSONL log file, or cancel and drop the file onto the window."
+  zh-CN: "输入本地原生 JSONL 日志文件路径，也可取消后将文件拖入窗口。"
+"输入新文件路径。保存固定快照，不包含后续到达的日志；已有文件不会被覆盖。":
+  en: "Enter a new file path. Saves a fixed snapshot without logs that arrive later; existing files are never overwritten."
+  zh-CN: "输入新文件路径。保存固定快照，不包含后续到达的日志；已有文件不会被覆盖。"
+"当前匹配 %{matched} / 保留 %{retained} 条；导出保留筛选条件及采集事实。":
+  en: "%{matched} matching / %{retained} retained; the export keeps the filter and capture facts."
+  zh-CN: "当前匹配 %{matched} / 保留 %{retained} 条；导出保留筛选条件及采集事实。"
+"当前保留 %{retained} 条；包括未匹配筛选的记录。":
+  en: "%{retained} retained, including records that do not match the filter."
+  zh-CN: "当前保留 %{retained} 条；包括未匹配筛选的记录。"
+"记录范围以点击保存时为准；已淘汰或清空的历史不会恢复。":
+  en: "The record range is fixed when you click Save; trimmed or cleared history is not restored."
+  zh-CN: "记录范围以点击保存时为准；已淘汰或清空的历史不会恢复。"
+"来源保留范围：seq %{first}–%{last}；范围内可能有筛选或历史缺口。":
+  en: "Retained source range: seq %{first}–%{last}; the range may contain filter or history gaps."
+  zh-CN: "来源保留范围：seq %{first}–%{last}；范围内可能有筛选或历史缺口。"
+"打开并验证":
+  en: "Open and validate"
+  zh-CN: "打开并验证"
+"正在保存当前日志…":
+  en: "Saving current logs…"
+  zh-CN: "正在保存当前日志…"
+"保存成功后打开文件。当前采集已停止。":
+  en: "The file opens after a successful save. Current capture has stopped."
+  zh-CN: "保存成功后打开文件。当前采集已停止。"
+"取消保存与打开":
+  en: "Cancel save and open"
+  zh-CN: "取消保存与打开"
+"打开文件并替换当前视图？":
+  en: "Open the file and replace the current view?"
+  zh-CN: "打开文件并替换当前视图？"
+"%{path} 已验证，共 %{count} 条记录。":
+  en: "%{path} validated, %{count} records."
+  zh-CN: "%{path} 已验证，共 %{count} 条记录。"
+"等待当前采集停止并接收剩余日志…":
+  en: "Waiting for the current capture to stop and receive remaining logs…"
+  zh-CN: "等待当前采集停止并接收剩余日志…"
+"替换后当前内存日志将被移除。可以先停止采集并保存，再打开文件；保存失败会保留原视图。":
+  en: "Replacing removes the current in-memory logs. You can stop capture and save first; a failed save keeps the current view."
+  zh-CN: "替换后当前内存日志将被移除。可以先停止采集并保存，再打开文件；保存失败会保留原视图。"
+"保存后打开…":
+  en: "Save, then open…"
+  zh-CN: "保存后打开…"
+"直接替换":
+  en: "Replace"
+  zh-CN: "直接替换"
+"logcat 选项":
+  en: "logcat options"
+  zh-CN: "logcat 选项"
+"buffer 容量":
+  en: "Buffer sizes"
+  zh-CN: "buffer 容量"
+"logd 统计":
+  en: "logd statistics"
+  zh-CN: "logd 统计"
+"logd prune 规则":
+  en: "logd prune rules"
+  zh-CN: "logd prune 规则"
+"Android 版本":
+  en: "Android version"
+  zh-CN: "Android 版本"
+"成功":
+  en: "Success"
+  zh-CN: "成功"
+"无权限":
+  en: "Permission denied"
+  zh-CN: "无权限"
+"不支持":
+  en: "Unsupported"
+  zh-CN: "不支持"
+"超时":
+  en: "Timed out"
+  zh-CN: "超时"
+"已取消":
+  en: "Cancelled"
+  zh-CN: "已取消"
+"未知 / 未成功":
+  en: "Unknown / unsuccessful"
+  zh-CN: "未知 / 未成功"
+"请选择设备并配置 ADB 后查询。已有报告仍可查看。":
+  en: "Select a device and configure ADB to query. Existing reports remain available."
+  zh-CN: "请选择设备并配置 ADB 后查询。已有报告仍可查看。"
+"无法启动诊断：%{error}":
+  en: "Could not start diagnostics: %{error}"
+  zh-CN: "无法启动诊断：%{error}"
+"诊断工作线程意外结束":
+  en: "Diagnostics worker ended unexpectedly"
+  zh-CN: "诊断工作线程意外结束"
+"只读设备诊断":
+  en: "Read-only device diagnostics"
+  zh-CN: "只读设备诊断"
+"重新查询":
+  en: "Query again"
+  zh-CN: "重新查询"
+"查询 %{serial} · 总期限 10 秒":
+  en: "Querying %{serial} · 10 s total limit"
+  zh-CN: "查询 %{serial} · 总期限 10 秒"
+"取消查询":
+  en: "Cancel query"
+  zh-CN: "取消查询"
+"复制诊断报告":
+  en: "Copy diagnostic report"
+  zh-CN: "复制诊断报告"
+"本机日志内存预算 %{limit} MiB，不含队列、快照、剪贴板或总 RSS；设备 logd buffer 容量见下方。":
+  en: "Local log memory budget %{limit} MiB, excluding queues, snapshots, clipboard and total RSS; device logd buffer sizes are shown below."
+  zh-CN: "本机日志内存预算 %{limit} MiB，不含队列、快照、剪贴板或总 RSS；设备 logd buffer 容量见下方。"
+"设备 %{serial} · 完成于 %{time} · 耗时 %{elapsed} ms":
+  en: "Device %{serial} · finished at %{time} · took %{elapsed} ms"
+  zh-CN: "设备 %{serial} · 完成于 %{time} · 耗时 %{elapsed} ms"
+"这是另一设备的历史报告。切换设备后请重新查询。":
+  en: "This report is from another device. Query again after switching devices."
+  zh-CN: "这是另一设备的历史报告。切换设备后请重新查询。"
+"各项查询已完成。":
+  en: "All queries completed."
+  zh-CN: "各项查询已完成。"
+"部分查询未完成或输出受限；下方逐项保留结果。":
+  en: "Some queries did not complete or output was limited; results are kept per item below."
+  zh-CN: "部分查询未完成或输出受限；下方逐项保留结果。"
+"输出分别保留主机 stdout / stderr；旧 ADB 通道可能已在设备端合并。帮助中未列出的选项仍可能被设备接受。":
+  en: "Host stdout and stderr are kept separately; older ADB channels may have merged them on the device. Options not listed in help may still be accepted by the device."
+  zh-CN: "输出分别保留主机 stdout / stderr；旧 ADB 通道可能已在设备端合并。帮助中未列出的选项仍可能被设备接受。"
+"%{label} · 保留 %{retained} / 实际 %{observed} 字节%{truncated}%{lossy}":
+  en: "%{label} · kept %{retained} / observed %{observed} bytes%{truncated}%{lossy}"
+  zh-CN: "%{label} · 保留 %{retained} / 实际 %{observed} 字节%{truncated}%{lossy}"
+" · 已截断":
+  en: " · truncated"
+  zh-CN: " · 已截断"
+" · 显示发生 UTF-8 替换":
+  en: " · UTF-8 replacement in display"
+  zh-CN: " · 显示发生 UTF-8 替换"
+"外观":
+  en: "Appearance"
+  zh-CN: "外观"
+"日志阅读":
+  en: "Reading"
+  zh-CN: "日志阅读"
+"内存":
+  en: "Memory"
+  zh-CN: "内存"
+"设置":
+  en: "Settings"
+  zh-CN: "设置"
+"键盘快捷键…":
+  en: "Keyboard shortcuts…"
+  zh-CN: "键盘快捷键…"
+"日志行高":
+  en: "Row height"
+  zh-CN: "日志行高"
+"日志内存预算":
+  en: "Log memory budget"
+  zh-CN: "日志内存预算"
+"仅估算保留日志；不含快照、队列、剪贴板及进程总内存。":
+  en: "Estimates retained logs only; excludes snapshots, queues, clipboard and total process memory."
+  zh-CN: "仅估算保留日志；不含快照、队列、剪贴板及进程总内存。"
+"当前保留 ≈ %{used} MiB":
+  en: "Currently retained ≈ %{used} MiB"
+  zh-CN: "当前保留 ≈ %{used} MiB"
+"应用后立即移除最旧日志，降至预算约 90%；无法撤销。":
+  en: "Applying removes the oldest logs immediately, down to about 90% of the budget. Cannot be undone."
+  zh-CN: "应用后立即移除最旧日志，降至预算约 90%；无法撤销。"
+"应用预算":
+  en: "Apply budget"
+  zh-CN: "应用预算"
+"取消修改":
+  en: "Discard changes"
+  zh-CN: "取消修改"
+"语言 / Language":
+  en: "语言 / Language"
+  zh-CN: "语言 / Language"
+"主题":
+  en: "Theme"
+  zh-CN: "主题"
+"跟随系统":
+  en: "Follow system"
+  zh-CN: "跟随系统"
+"深色":
+  en: "Dark"
+  zh-CN: "深色"
+"浅色":
+  en: "Light"
+  zh-CN: "浅色"
+"跟随系统时，随操作系统的深浅色设置即时切换。":
+  en: "When following the system, the theme switches with the OS light/dark setting."
+  zh-CN: "跟随系统时，随操作系统的深浅色设置即时切换。"
+"历史条数":
+  en: "History count"
+  zh-CN: "历史条数"
+"2026-10-24 08:00:00.000 或 Unix 时间戳（秒，可带小数）":
+  en: "2026-10-24 08:00:00.000 or a Unix timestamp in seconds"
+  zh-CN: "2026-10-24 08:00:00.000 或 Unix 时间戳（秒，可带小数）"
+"按设备时间；Unix 时间戳须带小数点。不是精确的断点续传位置。":
+  en: "Uses device time; a Unix timestamp must include a decimal point. Not an exact resume position."
+  zh-CN: "按设备时间；Unix 时间戳须带小数点。不是精确的断点续传位置。"
+"快照最多 15 秒 / 100,000 条；新增日志使用日志内存预算 90% 以内的剩余空间，上限 64 MiB。":
+  en: "Snapshots stop after 15 s / 100,000 records; new logs use the space left within 90% of the log memory budget, up to 64 MiB."
+  zh-CN: "快照最多 15 秒 / 100,000 条；新增日志使用日志内存预算 90% 以内的剩余空间，上限 64 MiB。"
+"任一预算先到即停止，已有日志保留；设备历史可能已被淘汰。":
+  en: "Stops at whichever budget is reached first; existing logs are kept. Device history may already have been pruned."
+  zh-CN: "任一预算先到即停止，已有日志保留；设备历史可能已被淘汰。"
+"15 秒期限":
+  en: "15 s limit"
+  zh-CN: "15 秒期限"
+"100,000 条上限":
+  en: "100,000-record limit"
+  zh-CN: "100,000 条上限"
+"日志内存预算上限":
+  en: "log memory budget limit"
+  zh-CN: "日志内存预算上限"
+"快照达到%{limit}，正在停止并接收剩余诊断。":
+  en: "Snapshot reached the %{limit}; stopping and receiving remaining diagnostics."
+  zh-CN: "快照达到%{limit}，正在停止并接收剩余诊断。"
+"保留日志中没有匹配已知崩溃 / ANR 签名的记录；这不证明没有故障。":
+  en: "No retained logs match a known crash / ANR signature; this does not prove there was no failure."
+  zh-CN: "保留日志中没有匹配已知崩溃 / ANR 签名的记录；这不证明没有故障。"
+"点击复制 session_id / seq 引用":
+  en: "Click to copy a session_id / seq reference"
+  zh-CN: "点击复制 session_id / seq 引用"
+"原日志已过期或不再匹配；已返回当前筛选结果。":
+  en: "The original log expired or no longer matches; returned to the current filtered results."
+  zh-CN: "原日志已过期或不再匹配；已返回当前筛选结果。"
+"返回筛选位置":
+  en: "Back to filtered position"
+  zh-CN: "返回筛选位置"
+"上下文 · %{count} 条 · 暂时显示前后各 50 条，不受筛选条件隐藏":
+  en: "Context · %{count} logs · showing up to 50 before and after, ignoring filters"
+  zh-CN: "上下文 · %{count} 条 · 暂时显示前后各 50 条，不受筛选条件隐藏"
+"原日志已过期":
+  en: "Original log expired"
+  zh-CN: "原日志已过期"
+"所选日志已不可用。请重新选择。":
+  en: "The selected logs are no longer available. Select the logs again."
+  zh-CN: "所选日志已不可用。请重新选择。"
+"所选日志至少需要 %{minimum} 字节，超过剪贴板上限 %{limit} 字节。请减少选择的行数。":
+  en: "Selected logs need at least %{minimum} bytes, exceeding the clipboard limit of %{limit} bytes. Select fewer rows."
+  zh-CN: "所选日志至少需要 %{minimum} 字节，超过剪贴板上限 %{limit} 字节。请减少选择的行数。"
+"所选日志过大，无法安全计算大小。请减少选择的行数。":
+  en: "The selected logs are too large to size safely. Select fewer rows."
+  zh-CN: "所选日志过大，无法安全计算大小。请减少选择的行数。"
+"内存不足，无法复制这些日志。请减少选择的行数。":
+  en: "There is not enough memory to copy these logs. Select fewer rows."
+  zh-CN: "内存不足，无法复制这些日志。请减少选择的行数。"
+"已取消复制准备。":
+  en: "Copy preparation was cancelled."
+  zh-CN: "已取消复制准备。"
+"Ctrl+F 或 /":
+  en: "Ctrl+F or /"
+  zh-CN: "Ctrl+F 或 /"
+"聚焦消息筛选":
+  en: "Focus message filter"
+  zh-CN: "聚焦消息筛选"
+"选择日志":
+  en: "Select logs"
+  zh-CN: "选择日志"
+"Shift+单击 / Shift+↑↓":
+  en: "Shift+click / Shift+↑↓"
+  zh-CN: "Shift+单击 / Shift+↑↓"
+"选择范围":
+  en: "Select range"
+  zh-CN: "选择范围"
+"Ctrl+单击":
+  en: "Ctrl+click"
+  zh-CN: "Ctrl+单击"
+"切换单行选择":
+  en: "Toggle one row"
+  zh-CN: "切换单行选择"
+"全选筛选结果":
+  en: "Select all filtered results"
+  zh-CN: "全选筛选结果"
+"回到最新并跟随":
+  en: "Jump to latest and follow"
+  zh-CN: "回到最新并跟随"
+"查看 / 退出上下文":
+  en: "Show / leave context"
+  zh-CN: "查看 / 退出上下文"
+"下一个 / 上一个详情命中":
+  en: "Next / previous detail match"
+  zh-CN: "下一个 / 上一个详情命中"
+"下一个疑似崩溃 / ANR":
+  en: "Next possible crash / ANR"
+  zh-CN: "下一个疑似崩溃 / ANR"
+"显示本帮助":
+  en: "Show this help"
+  zh-CN: "显示本帮助"
+"打开设置":
+  en: "Open settings"
+  zh-CN: "打开设置"
+"退出输入或选择":
+  en: "Leave input or selection"
+  zh-CN: "退出输入或选择"
+"最近 N 条后持续采集（-T）":
+  en: "Last N, then follow (-T)"
+  zh-CN: "最近 N 条后持续采集（-T）"
+"指定时间后持续采集（-T）":
+  en: "From a time, then follow (-T)"
+  zh-CN: "指定时间后持续采集（-T）"
+"最近 N 条快照（-t）":
+  en: "Snapshot of last N (-t)"
+  zh-CN: "最近 N 条快照（-t）"
+"指定时间后快照（-t）":
+  en: "Snapshot from a time (-t)"
+  zh-CN: "指定时间后快照（-t）"
+"当前 buffer 快照（-d）":
+  en: "Snapshot of current buffer (-d)"
+  zh-CN: "当前 buffer 快照（-d）"
+"首次观测到":
+  en: "First observed"
+  zh-CN: "首次观测到"
+"新出现":
+  en: "Appeared"
+  zh-CN: "新出现"
+"本次未观测到":
+  en: "Not observed this time"
+  zh-CN: "本次未观测到"
+"疑似 Java 崩溃":
+  en: "Possible Java crash"
+  zh-CN: "疑似 Java 崩溃"
+"疑似 Native 崩溃（signal）":
+  en: "Possible native crash (signal)"
+  zh-CN: "疑似 Native 崩溃（signal）"
+"疑似 Native 崩溃（tombstone）":
+  en: "Possible native crash (tombstone)"
+  zh-CN: "疑似 Native 崩溃（tombstone）"
+"疑似 ANR":
+  en: "Possible ANR"
+  zh-CN: "疑似 ANR"
+"AndroidRuntime，E/F，消息以 FATAL EXCEPTION: 开头":
+  en: "AndroidRuntime, E/F, message starts with FATAL EXCEPTION:"
+  zh-CN: "AndroidRuntime，E/F，消息以 FATAL EXCEPTION: 开头"
+"libc，F，消息以 Fatal signal 开头":
+  en: "libc, F, message starts with Fatal signal"
+  zh-CN: "libc，F，消息以 Fatal signal 开头"
+"DEBUG，F，消息以 *** *** *** 开头":
+  en: "DEBUG, F, message starts with *** *** ***"
+  zh-CN: "DEBUG，F，消息以 *** *** *** 开头"
+"ActivityManager，E/F，消息以 ANR in 开头":
+  en: "ActivityManager, E/F, message starts with ANR in"
+  zh-CN: "ActivityManager，E/F，消息以 ANR in 开头"
+"采集 attempt 计数已耗尽。":
+  en: "Capture attempt counter exhausted."
+  zh-CN: "采集 attempt 计数已耗尽。"
+"停止确认曾超时，旧采集现已退出；请手动重试。":
+  en: "A stop confirmation timed out earlier; the old capture has now exited. Retry manually."
+  zh-CN: "停止确认曾超时，旧采集现已退出；请手动重试。"
+"等待旧采集退出超过 5 秒；新采集不会启动。仍在等待停止确认。":
+  en: "Waited more than 5 s for the old capture to exit; a new capture will not start. Still waiting for stop confirmation."
+  zh-CN: "等待旧采集退出超过 5 秒；新采集不会启动。仍在等待停止确认。"
+"自动重连已尝试 3 次：":
+  en: "Automatic reconnect tried 3 times: "
+  zh-CN: "自动重连已尝试 3 次："
+"紧凑":
+  en: "Compact"
+  zh-CN: "紧凑"
+"标准":
+  en: "Standard"
+  zh-CN: "标准"
+"宽松":
+  en: "Relaxed"
+  zh-CN: "宽松"

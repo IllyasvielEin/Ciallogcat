@@ -19,9 +19,9 @@ pub(super) struct Change {
 impl Change {
     pub fn label(&self) -> &'static str {
         match self.kind {
-            "first_observed" => "首次观察到",
-            "appeared" => "观察到出现",
-            _ => "本次未再观察到",
+            "first_observed" => "首次观测到",
+            "appeared" => "新出现",
+            _ => "本次未观测到",
         }
     }
 }

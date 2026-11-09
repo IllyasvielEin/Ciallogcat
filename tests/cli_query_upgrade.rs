@@ -48,7 +48,7 @@ impl Output {
 }
 impl Sandbox {
     fn new() -> Self {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        let path = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
             .join("target/cli-query-upgrade")
             .join(uuid::Uuid::new_v4().to_string());
         fs::create_dir_all(&path).unwrap();

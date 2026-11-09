@@ -90,7 +90,8 @@ def publish(root: Path, directory: Path, tag: str, repo: str, commit: str):
     latest_endpoint = f"repos/{repo}/releases/latest"
     previous_latest = api(latest_endpoint, missing_ok=True)
     release = find_release(repo, tag)
-    title = f"Ciallogcat{' CLI' if plan['scope'] == 'cli' else ''} {tag}"
+    component = {"gui": " GUI", "cli": " CLI", "full": ""}[plan["scope"]]
+    title = f"Ciallogcat{component} v{plan['version']}"
     notes = str(root / "docs/releases" / f"{tag}.md")
     if release is None:
         gh("release", "create", tag, "--repo", repo, "--verify-tag", "--draft",
@@ -114,7 +115,7 @@ def publish(root: Path, directory: Path, tag: str, repo: str, commit: str):
     check_draft(api(endpoint))
     check_remote_assets(repo, release, expected, complete=True)
     prerelease = "-" in plan["version"].split("+", 1)[0]
-    latest = plan["scope"] == "full" and not prerelease
+    latest = plan["scope"] in ("gui", "full") and not prerelease
     gh("release", "edit", tag, "--repo", repo, "--draft=false",
        f"--prerelease={str(prerelease).lower()}", f"--latest={str(latest).lower()}")
     published = api(endpoint)

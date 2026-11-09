@@ -911,7 +911,7 @@ fn clear_button_cancel_confirm_and_device_confirm_use_real_input() {
     h.click_rendered_label("清空视图");
     assert!(h.app.pending_clear);
     assert_eq!(h.app.entries.len(), 1);
-    h.click_rendered_label("Cancel");
+    h.click_rendered_label("取消");
     assert!(!h.app.pending_clear);
     assert_eq!(h.app.entries.len(), 1);
     h.click_rendered_label("清空视图");

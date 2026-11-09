@@ -111,6 +111,45 @@ class ReleasePolicyTests(ReleaseFixture):
             policy.validate_assets(self.dist, self.plan)
 
 
+class ComponentReleaseTests(ReleaseFixture):
+    def setUp(self):
+        super().setUp()
+        (self.root / "Cargo.toml").write_text('[workspace]\nmembers=["crates/cli"]\n[package]\nname="ciallogcat"\nversion="1.3.1"\n')
+        (self.root / "crates/cli").mkdir(parents=True)
+        (self.root / "crates/cli/Cargo.toml").write_text('[package]\nname="ciallogcat-cli"\nversion="1.3.2"\n')
+        (self.root / "Cargo.lock").write_text('[[package]]\nname="ciallogcat"\nversion="1.3.1"\n[[package]]\nname="ciallogcat-cli"\nversion="1.3.2"\n')
+
+    def component_plan(self, component, version):
+        tag = f"{component}-v{version}"
+        plan = {"tag": tag, "version": version, "scope": component}
+        (self.root / f"docs/releases/{tag}.json").write_text(json.dumps(plan))
+        (self.root / f"docs/releases/{tag}.md").write_text("Component release notes")
+        return plan
+
+    def test_components_use_their_own_package_versions_and_six_assets(self):
+        for component, version, prefix in (("gui", "1.3.1", "ciallogcat"), ("cli", "1.3.2", "ciallogcat-cli")):
+            plan = self.component_plan(component, version)
+            self.assertEqual(policy.load_plan(self.root, plan["tag"]), plan)
+            assets = policy.expected_assets(plan)
+            self.assertEqual(len(assets), 6)
+            self.assertIn(f"{prefix}-v{version}-linux-x86_64.deb", assets)
+            self.assertTrue(all(name.startswith(f"{prefix}-v{version}-") for name in assets))
+
+    def test_component_scope_version_lock_and_legacy_tag_mismatches_fail(self):
+        plan = self.component_plan("gui", "1.3.1")
+        file = self.root / f"docs/releases/{plan['tag']}.json"
+        for change in ({"scope": "cli"}, {"scope": "full"}, {"version": "1.3.2"}):
+            file.write_text(json.dumps(plan | change))
+            with self.assertRaises(ValueError):
+                policy.load_plan(self.root, plan["tag"])
+        with self.assertRaises(ValueError):
+            policy.load_plan(self.root, "v1.3.1")
+        file.write_text(json.dumps(plan))
+        (self.root / "Cargo.lock").write_text('[[package]]\nname="ciallogcat"\nversion="1.3.2"')
+        with self.assertRaises(ValueError):
+            policy.load_plan(self.root, plan["tag"])
+
+
 class WorkflowGateTests(unittest.TestCase):
     def test_actual_publish_expression_accepts_only_required_successes(self):
         workflow = Path(__file__).parents[1] / "workflows/ci.yml"
@@ -133,11 +172,11 @@ class WorkflowGateTests(unittest.TestCase):
             return eval(" ".join(evaluated.split()), {"__builtins__": {}, "startsWith": str.startswith})
 
         states = ("success", "failure", "cancelled", "skipped")
-        for scope in ("cli", "full", "invalid", ""):
+        for scope in ("cli", "gui", "full", "invalid", ""):
             for preflight, cli, build in itertools.product(states, repeat=3):
-                expected = preflight == cli == "success" and (
-                    (scope == "cli" and build == "skipped") or
-                    (scope == "full" and build == "success")
+                expected = preflight == "success" and (
+                    (scope == "cli" and cli == "success" and build == "skipped") or
+                    (scope == "gui" and build == "success" and cli == "skipped")
                 )
                 with self.subTest(scope=scope, preflight=preflight, cli=cli, build=build):
                     self.assertEqual(accepts(scope, preflight, cli, build), expected)

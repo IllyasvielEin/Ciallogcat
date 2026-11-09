@@ -24,7 +24,7 @@ impl Sandbox {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        let root = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
             .join("target/cli-integration")
             .join(format!(
                 "{scenario}-{}-{stamp}-{}",

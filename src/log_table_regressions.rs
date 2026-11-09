@@ -92,6 +92,9 @@ fn real_table_resize_preserves_manual_process_and_adapts_untouched_tag() {
 #[test]
 fn visible_table_rows_expose_fields_selection_and_real_focus_activation() {
     let mut h = table();
+    // English UI: the row summary wording is asserted below.
+    h.app.language = Language::En;
+    h.frame(vec![]);
     let table = h
         .accessible_nodes
         .iter()

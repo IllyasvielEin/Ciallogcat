@@ -1,6 +1,6 @@
 //! Shared, headless Android Logcat backend.
 //!
-//! Build with `--no-default-features` to omit the desktop UI dependencies.
+//! The `ciallogcat-core` workspace package has no desktop UI dependencies.
 //! Consumers receive backend events through bounded channels. [`WakeSignal`] is
 //! a coalescible hint: drain queued results when notified, and schedule another
 //! drain if a local work budget is reached. Logcat entry notifications preserve

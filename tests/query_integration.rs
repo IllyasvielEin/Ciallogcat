@@ -30,7 +30,7 @@ impl Drop for ChildGuard {
 }
 impl Sandbox {
     fn new() -> Self {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        let root = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."))
             .join("target/query-integration")
             .join(uuid::Uuid::new_v4().to_string());
         fs::create_dir_all(&root).unwrap();

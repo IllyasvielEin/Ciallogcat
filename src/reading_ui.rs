@@ -7,8 +7,9 @@ impl CiallogcatApp {
             return;
         }
         let Some(index) = self.entries.next_incident(self.selected) else {
-            self.copy_notice =
-                Some("保留日志中没有匹配已知崩溃 / ANR 签名的记录；这不证明没有故障。".into());
+            self.copy_notice = Some(tr!(
+                "保留日志中没有匹配已知崩溃 / ANR 签名的记录；这不证明没有故障。"
+            ));
             return;
         };
         self.leave_context();
@@ -24,7 +25,7 @@ impl CiallogcatApp {
         if let Some(identity) = entry.provenance {
             return Some((
                 format!("seq #{} · segment {}", identity.seq, identity.segment),
-                format!("capture_session\nsession_id: {}\nseq: {}\nsegment: {}\nattempt: {}\nobserved_unix_ms: {}\n点击复制 session_id / seq 引用", identity.session_id, identity.seq, identity.segment, identity.attempt, identity.observed_unix_ms.map_or_else(|| "unknown".into(), |value| value.to_string())),
+                format!("capture_session\nsession_id: {}\nseq: {}\nsegment: {}\nattempt: {}\nobserved_unix_ms: {}\n{}", identity.session_id, identity.seq, identity.segment, identity.attempt, identity.observed_unix_ms.map_or_else(|| "unknown".into(), |value| value.to_string()), tr!("点击复制 session_id / seq 引用")),
                 serde_json::json!({"identity_scope":"capture_session","session_id":identity.session_id,"seq":identity.seq}).to_string(),
             ));
         }
@@ -93,7 +94,7 @@ impl CiallogcatApp {
         if let Some(index) = self.selected {
             self.selection.select(&self.matches, index, false, false);
         } else {
-            self.copy_notice = Some("原日志已过期或不再匹配；已返回当前筛选结果。".to_owned());
+            self.copy_notice = Some(tr!("原日志已过期或不再匹配；已返回当前筛选结果。").to_owned());
         }
         self.restore_scroll_offset = context
             .viewport
@@ -125,12 +126,13 @@ impl CiallogcatApp {
         let mut leave = false;
         egui::Panel::top("context_notice").show(root_ui, |ui| {
             ui.horizontal_wrapped(|ui| {
-                leave = ui.button("返回筛选位置").clicked();
-                ui.label(format!(
-                    "上下文 · {count} 条 · 暂时显示前后各 50 条，不受筛选条件隐藏"
+                leave = ui.button(tr!("返回筛选位置")).clicked();
+                ui.label(tr!(
+                    "上下文 · %{count} 条 · 暂时显示前后各 50 条，不受筛选条件隐藏",
+                    count = count
                 ));
                 if expired {
-                    ui.label("原日志已过期");
+                    ui.label(tr!("原日志已过期"));
                 }
             });
         });

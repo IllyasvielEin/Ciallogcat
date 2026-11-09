@@ -10,34 +10,53 @@ import tomllib
 
 
 def load_plan(root: Path, tag: str) -> dict:
-    if not re.fullmatch(r"v[0-9]+\.[0-9]+(?:\.[0-9]+)?(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?", tag):
+    match = re.fullmatch(r"(?:(gui|cli)-)?v([0-9]+\.[0-9]+(?:\.[0-9]+)?(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)", tag)
+    if not match:
         raise ValueError("invalid release tag")
-    version = tomllib.loads((root / "Cargo.toml").read_text(encoding="utf-8"))["package"]["version"]
-    allowed = {f"v{version}"}
+    component = match[1]
+    manifest = tomllib.loads((root / "Cargo.toml").read_text(encoding="utf-8"))
+    if component:
+        if component == "cli":
+            manifest = tomllib.loads((root / "crates/cli/Cargo.toml").read_text(encoding="utf-8"))
+    elif "workspace" in manifest:
+        raise ValueError("workspace releases require gui-v or cli-v tags")
+    package = manifest["package"]
+    version = package["version"]
+    allowed = {version}
     if re.fullmatch(r"[0-9]+\.[0-9]+\.0", version):
-        allowed.add(f"v{version.rsplit('.', 1)[0]}")
-    if tag not in allowed:
+        allowed.add(version.rsplit(".", 1)[0])
+    if match[2] not in allowed:
         raise ValueError("release tag does not match Cargo version")
     lock = tomllib.loads((root / "Cargo.lock").read_text(encoding="utf-8"))
-    if [p["version"] for p in lock["package"] if p["name"] == "ciallogcat"] != [version]:
+    if [p["version"] for p in lock["package"] if p["name"] == package["name"]] != [version]:
         raise ValueError("Cargo.lock does not match Cargo version")
     plan = json.loads((root / "docs/releases" / f"{tag}.json").read_text(encoding="utf-8"))
     if not isinstance(plan, dict) or set(plan) != {"tag", "version", "scope"}:
         raise ValueError("release plan must contain exactly tag, version and scope")
-    if plan["tag"] != tag or plan["version"] != version or plan["scope"] not in ("cli", "full"):
+    if plan["tag"] != tag or plan["scope"] not in ("gui", "cli", "full"):
         raise ValueError("release plan has an invalid tag, version or scope")
+    if plan["version"] != version or (component and plan["scope"] != component):
+        raise ValueError("tag component/version does not match release plan")
+    if not component and plan["scope"] == "gui":
+        raise ValueError("GUI-only releases require a gui-v tag")
     notes = root / "docs/releases" / f"{tag}.md"
     if not notes.read_text(encoding="utf-8").strip():
         raise ValueError("release notes must not be empty")
     return plan
 
 
+def asset_tag(plan: dict) -> str:
+    # Component is already present in the executable/package name.
+    return re.sub(r"^(gui|cli)-", "", plan["tag"])
+
+
 def expected_assets(plan: dict) -> set[str]:
-    if plan["scope"] not in ("cli", "full"):
+    prefixes = {"gui": ["ciallogcat"], "cli": ["ciallogcat-cli"],
+                "full": ["ciallogcat", "ciallogcat-cli"]}.get(plan["scope"])
+    if prefixes is None:
         raise ValueError("unsupported release scope")
-    prefixes = ["ciallogcat-cli"] if plan["scope"] == "cli" else ["ciallogcat", "ciallogcat-cli"]
     packages = {
-        f"{prefix}-{plan['tag']}-{platform}.{extension}"
+        f"{prefix}-{asset_tag(plan)}-{platform}.{extension}"
         for prefix in prefixes
         for platform, extension in (
             ("linux-x86_64", "tar.gz"),

@@ -3,8 +3,8 @@ name: Release
 on:
   push:
     tags:
-      - 'v[0-9]*.[0-9]*.[0-9]*'
-      - 'v[0-9]*.[0-9]*'
+      - 'gui-v[0-9]*.[0-9]*.[0-9]*'
+      - 'cli-v[0-9]*.[0-9]*.[0-9]*'
 
 permissions:
   contents: read
@@ -39,7 +39,7 @@ jobs:
   build:
     name: Check and package (${{ matrix.platform }})
     needs: preflight
-    if: needs.preflight.outputs.scope == 'full'
+    if: needs.preflight.outputs.scope == 'gui'
     strategy:
       fail-fast: false
       matrix:
@@ -69,11 +69,21 @@ jobs:
       - name: Formatting
         run: cargo fmt --all --check
       - name: Tests
-        run: cargo test --locked
+        run: cargo test --locked -p ciallogcat -p ciallogcat-core
       - name: Clippy
-        run: cargo clippy --locked --all-targets -- -D warnings
+        run: cargo clippy --locked -p ciallogcat -p ciallogcat-core --all-targets -- -D warnings
       - name: Release build
-        run: cargo build --locked --release
+        run: cargo build --locked --release -p ciallogcat
+      - name: Verify GUI version without a display
+        shell: pwsh
+        env:
+          EXPECTED_VERSION: ${{ needs.preflight.outputs.version }}
+        run: |
+          $binary = if ($IsWindows) { './target/release/ciallogcat.exe' } else { './target/release/ciallogcat' }
+          $reported = & $binary --version
+          if ($LASTEXITCODE -ne 0 -or $reported -cne "Ciallogcat GUI $env:EXPECTED_VERSION") {
+            throw 'GUI binary version does not match the release plan'
+          }
       - name: Package
         shell: pwsh
         env:
@@ -99,6 +109,7 @@ jobs:
   cli:
     name: Check and package headless CLI (${{ matrix.platform }})
     needs: preflight
+    if: needs.preflight.outputs.scope == 'cli'
     strategy:
       fail-fast: false
       matrix:
@@ -127,11 +138,11 @@ jobs:
       - name: Formatting
         run: cargo fmt --all --check
       - name: Headless tests
-        run: cargo test --locked --no-default-features
+        run: cargo test --locked -p ciallogcat-cli -p ciallogcat-core
       - name: Headless Clippy
-        run: cargo clippy --locked --no-default-features --all-targets -- -D warnings
+        run: cargo clippy --locked -p ciallogcat-cli -p ciallogcat-core --all-targets -- -D warnings
       - name: CLI release build
-        run: cargo build --locked --release --no-default-features --bin ciallogcat-cli
+        run: cargo build --locked --release -p ciallogcat-cli
       - name: CLI smoke test
         shell: pwsh
         env:
@@ -168,7 +179,7 @@ jobs:
             -v "$PWD/target/cli-release-dist:/packages:ro" \
             -v "$PWD/.github/scripts/verify-cli-deb.sh:/verify-cli-deb.sh:ro" \
             -e DEBIAN_FRONTEND=noninteractive \
-            ubuntu:24.04 bash /verify-cli-deb.sh "/packages/ciallogcat-cli-${RELEASE_TAG}-linux-x86_64.deb"
+            ubuntu:24.04 bash /verify-cli-deb.sh "/packages/ciallogcat-cli-${RELEASE_TAG#cli-}-linux-x86_64.deb"
       - uses: actions/upload-artifact@v6
         with:
           name: cli-${{ matrix.platform }}
@@ -183,10 +194,10 @@ jobs:
       ${{
         always() && !cancelled() &&
         github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') &&
-        needs.preflight.result == 'success' && needs.cli.result == 'success' &&
+        needs.preflight.result == 'success' &&
         (
-          (needs.preflight.outputs.scope == 'cli' && needs.build.result == 'skipped') ||
-          (needs.preflight.outputs.scope == 'full' && needs.build.result == 'success')
+          (needs.preflight.outputs.scope == 'cli' && needs.cli.result == 'success' && needs.build.result == 'skipped') ||
+          (needs.preflight.outputs.scope == 'gui' && needs.build.result == 'success' && needs.cli.result == 'skipped')
         )
       }}
     runs-on: ubuntu-24.04
@@ -201,20 +212,22 @@ jobs:
         with:
           python-version: '3.12'
       - uses: actions/download-artifact@v7
+        if: needs.preflight.outputs.scope == 'cli'
         with:
           name: cli-linux-x86_64
           path: dist
       - uses: actions/download-artifact@v7
+        if: needs.preflight.outputs.scope == 'cli'
         with:
           name: cli-windows-x86_64
           path: dist
       - uses: actions/download-artifact@v7
-        if: needs.preflight.outputs.scope == 'full'
+        if: needs.preflight.outputs.scope == 'gui'
         with:
           name: linux-x86_64
           path: dist
       - uses: actions/download-artifact@v7
-        if: needs.preflight.outputs.scope == 'full'
+        if: needs.preflight.outputs.scope == 'gui'
         with:
           name: windows-x86_64
           path: dist

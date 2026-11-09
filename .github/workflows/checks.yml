@@ -58,9 +58,9 @@ jobs:
       - name: Release policy tests
         run: python -B -m unittest discover -s .github/scripts -p 'test_release_*.py'
       - name: Headless tests
-        run: cargo test --locked --no-default-features --all-targets
+        run: cargo test --locked -p ciallogcat-cli -p ciallogcat-core --all-targets
       - name: Headless Clippy
-        run: cargo clippy --locked --no-default-features --all-targets -- -D warnings
+        run: cargo clippy --locked -p ciallogcat-cli -p ciallogcat-core --all-targets -- -D warnings
       - name: Upload test diagnostics
         if: failure()
         uses: actions/upload-artifact@v6
@@ -102,7 +102,7 @@ jobs:
       - name: Native X11 window startup smoke test
         run: xvfb-run -a env WINIT_UNIX_BACKEND=x11 LIBGL_ALWAYS_SOFTWARE=1 python3 -B tools/native-gui-smoke.py
       - name: Default-feature Clippy
-        run: cargo clippy --locked --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Upload test diagnostics
         if: failure()
         uses: actions/upload-artifact@v6
@@ -135,11 +135,11 @@ jobs:
           key: checks-windows
           cache-on-failure: true
       - name: Default-feature and native ADB lifecycle tests
-        run: cargo test --locked --all-targets
+        run: cargo test --locked --workspace --all-targets
       - name: Default-feature Clippy
-        run: cargo clippy --locked --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Headless CLI build
-        run: cargo build --locked --no-default-features --bin ciallogcat-cli
+        run: cargo build --locked -p ciallogcat-cli
       - name: Headless CLI smoke test
         shell: pwsh
         run: |
