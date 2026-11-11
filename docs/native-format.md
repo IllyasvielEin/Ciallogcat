@@ -119,7 +119,9 @@ For non-protobuf records (and the decoded view of protobuf records):
   no fabricated PID, level, Tag, device time, process attribution, or event kind.
 
 `process`, when present, contains `name` and a nullable `source`. The current
-known sources are `ps_snapshot` and `device_process_cache`: sampled or device PID-cache hints, not verified process-instance or
+known sources are `ps_snapshot`, `device_process_cache` and `log_lifecycle`
+(framework lifecycle lines in the same stream: ActivityManager `Start proc` until
+`has died`, AndroidRuntime `Process:`): sampled, device PID-cache or log-derived hints, not verified process-instance or
 package ownership. Unknown future source strings are preserved, while the
 current UI's typed attribution stays unknown. A process name alone is not proof
 of exact attribution. No later sample fills unknown historical rows.

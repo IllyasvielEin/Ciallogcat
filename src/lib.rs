@@ -20,6 +20,7 @@ pub mod incident;
 pub mod json_input;
 pub mod log_store;
 pub mod model;
+pub mod process_names;
 pub mod protobuf;
 pub mod session;
 mod wake_signal;

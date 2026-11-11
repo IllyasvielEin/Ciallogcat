@@ -610,6 +610,7 @@ impl WireRecord {
             entry.process_source = match process.source.as_deref() {
                 Some("ps_snapshot") => Some(ProcessSource::PsSnapshot),
                 Some("device_process_cache") => Some(ProcessSource::DeviceProcessCache),
+                Some("log_lifecycle") => Some(ProcessSource::LogLifecycle),
                 _ => None,
             };
             meta.process_source = process.source;
@@ -673,6 +674,7 @@ impl WireRecord {
                     .map(|source| match source {
                         ProcessSource::PsSnapshot => "ps_snapshot".into(),
                         ProcessSource::DeviceProcessCache => "device_process_cache".into(),
+                        ProcessSource::LogLifecycle => "log_lifecycle".into(),
                     })
                     .or_else(|| meta.process_source.clone()),
                 extra: meta.process_extra.clone(),
