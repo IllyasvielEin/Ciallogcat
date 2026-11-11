@@ -1,6 +1,6 @@
 # TODO 与 Agent 交接
 
-更新：2026-10-29。这里是后续工作的唯一队列。先读本文，再读 [架构与方向](docs/development-plan.md)、[验证状态](docs/validation.md) 和 [迁移指南](docs/migration.md)。
+更新：2026-11-11（v1.4.0：Agent 循环体验与生命周期进程名）；此前 2026-10-29。这里是后续工作的唯一队列。先读本文，再读 [架构与方向](docs/development-plan.md)、[验证状态](docs/validation.md) 和 [迁移指南](docs/migration.md)。
 
 ## 当前状态与约定
 
@@ -54,11 +54,42 @@
 - [ ] 设备验收包含 shell_v2 stdout/stderr/exit、`00 0a 0d 1a ff` 字节、framing、NUL/进程名缓存、buffer 权限、授权/拔插/重启、半帧停止与回收；不自动降级、不清空或调整 logd 掩盖问题。
 - [ ] 最终构建实机 30–60 分钟 RSS/吞吐/延迟/丢弃量；记录 host/adb/SDK/fingerprint、命令、预算、格式/profile、产品 hash。text/proto 两次 dump 不假设 ring buffer 内容完全相同。详细方法见 [protobuf 设备矩阵](docs/logcat-protobuf.md#11-可重复的设备验收矩阵)。
 
-## 4. 可选方向（需求成立再排期）
+## 4. Agent 循环体验（2026-11-11，随 v1.4.0 发布）
+
+已完成（`tests/agent_loop.rs` 及既有 query/CLI 回归；fmt、双配置 Clippy、workspace 全量测试、Python 示例/fixture 测试通过，均为 mock，无真机）：
+
+- token 瘦身：`c5`/`r3`，base64url + 128 位截断 HMAC，载荷只带来源绑定摘要；ref 约 974→260 字节，cursor 约 1.6 KB→0.7 KB。旧 token 拒绝。
+- `--preview-bytes` 默认 512；全局 `--help` 改为约 2 KB 的索引加 Agent 循环示例，各子命令只显示自身帮助。
+- `--package` 遇到没有进程名的记录时返回 `warnings[].code=package_unresolved`，不再静默零结果。
+- 标记：未扫描的 `--start-at end` cursor 可换任意过滤条件复用；`--cursor` 和 `--start-at end` 隐含 mode。
+- `query --wait-ms`（tail，≤60 s）；tail 模式允许 `--all`。
+- `crashes`：Java/native/ANR 按签名分组，带 `first_ref`；`context --same-pid`。
+- 同一 lab 崩溃场景下一次排查的响应量约 47 KB→11 KB（含同 PID 上下文约 19 KB）。
+
+第二轮（2026-11-11，mock 验证）：
+
+- [x] A1 进程名：CLI text 采集用 `log_lifecycle`（ActivityManager `Start proc`/`has died`、AndroidRuntime `Process:`）和 live follow 下的 `ps_snapshot`（与 GUI 同规则）标注；`--package` 在 CLI 采集上可用，并新增 `包名_zygote` 归属。proto 继续使用设备缓存。
+- [x] A2 记录 JSON 精简为响应 schema 3；`source_status` 省略 null。
+- [x] A3 `get/context --seq N`，按字节偏移二分定位（2 万条历史约十几 KiB 读取）。
+- [x] A4 官方 skill `skills/ciallogcat-cli/SKILL.md`，随包分发，`ciallogcat-cli skill` 输出；不做 MCP。`agent_capture.py` 报告附崩溃分组。
+- [x] A5 `get` 默认 decoded（text 记录与 stored 相同；proto 约 2–3 倍，仍按响应预算分块）。
+- [x] A7 删除无操作的 `--case-sensitive`。
+
+待讨论：
+
+- [x] A1 后续：GUI 通过共享核心 `process_names` 使用同一 `log_lifecycle` + ps 归属（v1.4.0）。
+- [ ] A1 真机：验证 Android 8 前后的 `Start proc` 格式、isolated/sandboxed 进程名和 OEM 差异；评估 CLI 每秒一次 `ps` 的开销是否需要开关。
+- [ ] A6-1 模板摘要（Drain 式）：先做离线评估，用同一批问题比较原始日志、模板摘要的回答正确率；未证明不误导前不进入 CLI。
+- [ ] A6-2 启动耗时：`ActivityTaskManager`/`ActivityManager` 的 `Displayed`/`Fully drawn` 行可像 crashes 一样做 `launches` 汇总；体量小，可作为下一个 incident 类型。
+- [ ] A6-3 脱敏：只做可解释、可计数的显式类别（token/JWT/邮箱/手机号等），输出标注“尽力而为，不保证无漏”；默认不开启。
+- [ ] A6-4 证据包：以 native JSONL + `diagnose` 报告 + 查询条件 + crashes 摘要为主体，不复制 `adb bugreport` 的全部内容；bugreport 可作为可选附件路径。
+- [ ] A8 不做：自动启动会话、设备点击/安装编排、默认 `logcat -c`、MCP 服务。
+
+## 5. 可选方向（需求成立再排期）
 
 - [ ] 原生系统文件选择器：当前支持路径与拖放，需独立依赖和平台兼容评估。
 - [ ] GUI 原始/解码/展示对象的重复持有与峰值内存：先测再优化，紧凑编码目前只去重磁盘存档。
-- [ ] 自动选 proto、独立多 buffer 流、数据库索引、MCP 封装：以实际使用场景决定；暂不扩展为设备测试编排平台。
+- [ ] 自动选 proto、独立多 buffer 流、数据库索引：以实际使用场景决定；暂不扩展为设备测试编排平台（MCP 见 A4）。
 
 ## 历史证据
 

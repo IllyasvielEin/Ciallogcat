@@ -677,7 +677,7 @@ dependencies = [
 
 [[package]]
 name = "ciallogcat"
-version = "1.3.1"
+version = "1.4.0"
 dependencies = [
  "ciallogcat-core",
  "eframe",
@@ -691,7 +691,7 @@ dependencies = [
 
 [[package]]
 name = "ciallogcat-cli"
-version = "1.3.2"
+version = "1.4.0"
 dependencies = [
  "base64",
  "ciallogcat-core",
@@ -711,7 +711,7 @@ dependencies = [
 
 [[package]]
 name = "ciallogcat-core"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "base64",
  "prost",

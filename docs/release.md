@@ -2,7 +2,7 @@
 
 ## 独立组件版本
 
-当前 GUI 为 **1.3.1**（根 Cargo.toml 的 `ciallogcat`），CLI 为 **1.3.2**（`crates/cli/Cargo.toml` 的 `ciallogcat-cli`），内部共享库为 **1.3.0**（`crates/core/Cargo.toml`）。三者组成一个 workspace，共用 Cargo.lock。Rust 库名仍为 `ciallogcat`，核心不单独发布二进制或上传 crates.io。
+当前 GUI 为 **1.4.0**（根 Cargo.toml 的 `ciallogcat`），CLI 为 **1.4.0**（`crates/cli/Cargo.toml` 的 `ciallogcat-cli`），内部共享库为 **1.4.0**（`crates/core/Cargo.toml`）。三者组成一个 workspace，共用 Cargo.lock。Rust 库名仍为 `ciallogcat`，核心不单独发布二进制或上传 crates.io。
 
 GUI 与 CLI 独立递增版本；发布 GUI 不修改 CLI 版本，也不重发 CLI 附件。共享核心变更需验证两端，但不强制同时发布。每个标签指向完整源码提交，能够重建该组件所用的核心代码；应用版本、核心包版本与存档/协议版本分别管理。
 
@@ -17,6 +17,10 @@ GUI 与 CLI 独立递增版本；发布 GUI 不修改 CLI 版本，也不重发 
 ```
 
 新工作流的 `scope` 为 `gui` 或 `cli`，必须与标签前缀相同。发布策略保留旧单 package 的 `cli/full` 校验以验证历史契约，但不允许在新 workspace 中发布旧式全量标签。缺少清单、说明、版本不匹配或附件异常均停止，不隐式扩大范围。
+
+## v1.4.0 更新（GUI 与 CLI）
+
+两个组件同时发布，各用独立标签和六件附件：[CLI v1.4.0](releases/cli-v1.4.0.md) 面向 Agent 循环（标记、`--wait-ms`、`crashes`、`--seq`、精简响应 schema 3、官方 skill）并为 text 采集标注进程名；[GUI v1.4.0](releases/gui-v1.4.0.md) 通过共享核心使用同一生命周期进程名推断。CLI 响应 schema、token 和 `get` 默认视图有不兼容变化，见 CLI 说明。先推送 `cli-v1.4.0`，再推送 `gui-v1.4.0`，使 GUI 正式版成为 Latest。
 
 ## GUI v1.3.1 更新
 
