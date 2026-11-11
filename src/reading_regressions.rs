@@ -79,6 +79,57 @@ fn crash_navigation_reveals_filtered_unknown_process_with_original_context() {
 }
 
 #[test]
+fn lifecycle_lines_name_short_lived_processes_missed_by_ps_sampling() {
+    let ctx = egui::Context::default();
+    let mut app = CiallogcatApp::with_config(&ctx, AppConfig::default(), None);
+    let id = app.begin_test_capture();
+    // No ps sample ever sees PID 4300: it starts and crashes between samples.
+    for entry in [
+        LogEntry::new(
+            "",
+            1000,
+            1000,
+            "ActivityManager",
+            Level::Info,
+            "Start proc 4300:com.app.fast/u0a77 for pre-top-activity {com.app.fast/.Main}",
+        ),
+        LogEntry::new(
+            "",
+            4300,
+            4300,
+            "AndroidRuntime",
+            Level::Error,
+            "FATAL EXCEPTION: main",
+        ),
+        LogEntry::new(
+            "",
+            1000,
+            1000,
+            "ActivityManager",
+            Level::Info,
+            "Process com.app.fast (pid 4300) has died: fg TOP",
+        ),
+        LogEntry::new("", 4300, 4300, "Daemon", Level::Info, "reused PID"),
+    ] {
+        app.backend_tx
+            .send(BackendEvent::Logcat {
+                session_id: id,
+                event: LogcatEvent::Entry(entry.into()),
+            })
+            .unwrap();
+    }
+    app.poll_backend(&ctx);
+    let crash = &app.entries[1];
+    assert_eq!(crash.process.as_deref(), Some("com.app.fast"));
+    assert_eq!(crash.process_source, Some(ProcessSource::LogLifecycle));
+    assert!(crash.matches_package("com.app.fast"));
+    assert!(
+        app.entries[3].process.is_none(),
+        "names end with the death line"
+    );
+}
+
+#[test]
 fn watched_application_follows_new_pids_without_rewriting_old_attribution() {
     let ctx = egui::Context::default();
     let mut app = CiallogcatApp::with_config(&ctx, AppConfig::default(), None);

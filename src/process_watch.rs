@@ -55,12 +55,10 @@ impl Watcher {
         }
         let mut next = BTreeMap::new();
         self.truncated_sample = false;
-        for (&pid, name) in processes.iter().filter(|(_, name)| {
-            name.as_ref() == package
-                || name
-                    .strip_prefix(package)
-                    .is_some_and(|suffix| suffix.starts_with(':'))
-        }) {
+        for (&pid, name) in processes
+            .iter()
+            .filter(|(_, name)| ciallogcat::model::package_owns_process(package, name))
+        {
             next.insert(pid, Arc::clone(name));
             if next.len() > MAX_PROCESSES {
                 next.pop_last();

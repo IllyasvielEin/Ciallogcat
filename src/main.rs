@@ -46,7 +46,7 @@ use eframe::egui::{
 use egui_extras::{Column, TableBuilder};
 use filter::{FilterRequest, FilterSpec};
 use log_store::LogStore;
-use model::{Level, LogBuffer, LogEntry, LogEntryKind, ProcessSource, SavedFilter};
+use model::{Level, LogBuffer, LogEntry, ProcessSource, SavedFilter};
 use regex::Regex;
 
 const MIB: usize = 1024 * 1024;
@@ -216,6 +216,8 @@ struct CiallogcatApp {
     visible_log_rows: Vec<(egui::Id, usize)>,
     processes: HashMap<u32, Arc<str>>,
     process_snapshot: Option<(Instant, Instant)>,
+    /// Shared core attribution: lifecycle lines plus the fresh ps sample.
+    process_names: ciallogcat::process_names::ProcessNames,
     process_watch: process_watch::Watcher,
     unresolved_count: usize,
     dropped_entries: usize,
@@ -355,6 +357,7 @@ impl CiallogcatApp {
             visible_log_rows: Vec::new(),
             processes: HashMap::new(),
             process_snapshot: None,
+            process_names: Default::default(),
             process_watch: process_watch::Watcher::default(),
             unresolved_count: 0,
             dropped_entries: 0,
@@ -784,21 +787,14 @@ impl CiallogcatApp {
 
     fn append_received_entry(&mut self, mut entry: LogEntry, received_at: Instant) {
         self.expire_processes(Instant::now());
-        if entry.kind == LogEntryKind::Log
-            && self.capture_attempt_scope == ciallogcat::capture_scope::CaptureScope::default()
-            && entry.process.is_none()
-            && entry.pid != 0
-            && self.process_snapshot.is_some_and(|(started, completed)| {
-                received_at >= completed
-                    && received_at
-                        .checked_duration_since(started)
-                        .is_some_and(|age| age <= PROCESS_HINT_TTL)
-            })
-            && let Some(process) = self.processes.get(&entry.pid)
-        {
-            entry.process = Some(Arc::clone(process));
-            entry.process_source = Some(ProcessSource::PsSnapshot);
-        }
+        // Lifecycle names follow stream order and also name history rows; ps
+        // hints apply only to live follow captures, as before.
+        self.process_names.observe(&entry);
+        self.process_names.attribute(
+            &mut entry,
+            received_at,
+            self.capture_attempt_scope == ciallogcat::capture_scope::CaptureScope::default(),
+        );
 
         let index = self.entries.len();
         if entry.is_unresolved_process() {
@@ -888,6 +884,7 @@ impl CiallogcatApp {
     fn clear_processes(&mut self) {
         self.processes.clear();
         self.process_snapshot = None;
+        self.process_names.discard_ps();
         self.process_watch.invalidate();
     }
 
@@ -925,6 +922,8 @@ impl CiallogcatApp {
         self.process_snapshot = Some((observed_from, observed_until));
         self.expire_processes(Instant::now());
         if self.process_snapshot.is_some() {
+            self.process_names
+                .update_ps(Some(processes.clone()), observed_from, observed_until);
             self.processes = processes
                 .into_iter()
                 .map(|(pid, name)| (pid, Arc::from(name)))
@@ -1373,6 +1372,8 @@ impl CiallogcatApp {
                 self.reset_scope_budget = false;
             }
             self.clear_processes();
+            // A new attempt may follow a gap that hid lifecycle lines.
+            self.process_names = Default::default();
             self.process_query_error = None;
             self.process_query_pending = false;
             self.last_capture_error = None;
@@ -2367,10 +2368,10 @@ impl CiallogcatApp {
                                     fields.pid,
                                     fields.tid,
                                     preview_message(fields.process_name()),
-                                    if fields.process_source == Some(ProcessSource::PsSnapshot) {
-                                        tr!(" (ps 推测)")
-                                    } else {
-                                        String::new()
+                                    match fields.process_source {
+                                        Some(ProcessSource::PsSnapshot) => tr!(" (ps 推测)"),
+                                        Some(ProcessSource::LogLifecycle) => tr!(" (日志推断)"),
+                                        _ => String::new(),
                                     },
                                     preview_message(fields.tag)
                                 )
@@ -2744,7 +2745,7 @@ impl CiallogcatApp {
                             if let Some(fields) = fields {
                                 tr!("第 %{row} 行日志。时间 %{time}。级别 %{level}。PID / TID %{pid}。进程 %{process}%{hint}。Tag %{tag}。消息 %{message}%{truncated}",
                                     row = match_index + 1, time = values[0], level = format!("{:?}", fields.level), pid = values[2], process = values[3],
-                                    hint = if fields.process_source == Some(ProcessSource::PsSnapshot) { tr!("（ps 采样推测，未核实）") } else { String::new() },
+                                    hint = match fields.process_source { Some(ProcessSource::PsSnapshot) => tr!("（ps 采样推测，未核实）"), Some(ProcessSource::LogLifecycle) => tr!("（由生命周期日志推断，未核实）"), _ => String::new() },
                                     tag = values[4], message = values[5],
                                     truncated = if truncated { tr!("。预览已截断；选中可查看完整详情，或使用“复制完整日志”。") } else { String::new() })
                             } else {
@@ -2778,6 +2779,10 @@ impl CiallogcatApp {
                             if ui.add_enabled(self.context_view.is_none() && !self.filter_pending && self.filter_dirty_since.is_none(), egui::Button::new(tr!("查看上下文"))).clicked() { context_requested = Some(entry_index); ui.close(); }
                             if fields.is_some_and(|fields| fields.process_source == Some(ProcessSource::PsSnapshot)) {
                                 ui.label(tr!("进程名来自近期 ps 快照，仅为推测；不能证明历史 PID 归属。"));
+                                ui.separator();
+                            }
+                            if fields.is_some_and(|fields| fields.process_source == Some(ProcessSource::LogLifecycle)) {
+                                ui.label(tr!("进程名由同一日志流中的 ActivityManager / AndroidRuntime 生命周期记录推断，仅为线索；漏掉死亡记录时可能沿用旧名。"));
                                 ui.separator();
                             }
                             if selection.contains(entry_index) && ui.button(tr!("复制选中日志")).clicked() {

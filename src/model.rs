@@ -138,6 +138,8 @@ impl<'a> LogFields<'a> {
 pub enum ProcessSource {
     PsSnapshot,
     DeviceProcessCache,
+    /// Framework lifecycle lines in the same stream (see `process_names`).
+    LogLifecycle,
 }
 
 /// Original Android protobuf values, separate from lossy display fields.
@@ -296,10 +298,7 @@ impl LogEntry {
         let Some(process) = self.log_fields().and_then(|fields| fields.process) else {
             return false;
         };
-        process == package
-            || process
-                .strip_prefix(package)
-                .is_some_and(|suffix| suffix.starts_with(':'))
+        package_owns_process(package, process)
     }
 
     /// Format one complete record using the same text as clipboard export.
@@ -381,6 +380,16 @@ pub struct SavedFilter {
     pub case_sensitive: bool,
 }
 
+/// Whether a process name belongs to a package: the main process, any
+/// `package:suffix` process (services, isolated/sandboxed renderers) and the
+/// Android 10+ app zygote `package_zygote`. A name is a hint, not ownership.
+pub fn package_owns_process(package: &str, process: &str) -> bool {
+    process == package
+        || process
+            .strip_prefix(package)
+            .is_some_and(|suffix| suffix.starts_with(':') || suffix == "_zygote")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -442,6 +451,24 @@ mod tests {
         assert!(entry.matches_package("com.example.app"));
         assert!(entry.matches_package("com.example.app:sync"));
         assert!(!entry.matches_package("com.example.other"));
+        for (process, owned) in [
+            (
+                "com.android.chrome:sandboxed_process0:org.chromium.content.app.SandboxedProcessService0:0",
+                true,
+            ),
+            ("com.android.chrome:privileged_process0", true),
+            ("com.android.chrome_zygote", true),
+            ("com.android.chromeX", false),
+            ("com.android.chrome_zygote2", false),
+            // WebView renderers belong to the WebView provider, not the host app.
+            ("com.google.android.webview:sandboxed_process0", false),
+        ] {
+            assert_eq!(
+                package_owns_process("com.android.chrome", process),
+                owned,
+                "{process}"
+            );
+        }
     }
 
     #[test]

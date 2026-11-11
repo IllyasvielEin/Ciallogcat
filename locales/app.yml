@@ -301,6 +301,15 @@ _version: 2
 "第 %{row} 行日志。时间 %{time}。级别 %{level}。PID / TID %{pid}。进程 %{process}%{hint}。Tag %{tag}。消息 %{message}%{truncated}":
   en: "Log row %{row}. Time %{time}. Level %{level}. PID / TID %{pid}. Process %{process}%{hint}. Tag %{tag}. Message %{message}%{truncated}"
   zh-CN: "第 %{row} 行日志。时间 %{time}。级别 %{level}。PID / TID %{pid}。进程 %{process}%{hint}。Tag %{tag}。消息 %{message}%{truncated}"
+" (日志推断)":
+  en: " (log inferred)"
+  zh-CN: " (日志推断)"
+"（由生命周期日志推断，未核实）":
+  en: " (inferred from lifecycle logs, unverified)"
+  zh-CN: "（由生命周期日志推断，未核实）"
+"进程名由同一日志流中的 ActivityManager / AndroidRuntime 生命周期记录推断，仅为线索；漏掉死亡记录时可能沿用旧名。":
+  en: "The process name is inferred from ActivityManager / AndroidRuntime lifecycle lines in the same log stream; it is only a hint and can be stale if a death line was missed."
+  zh-CN: "进程名由同一日志流中的 ActivityManager / AndroidRuntime 生命周期记录推断，仅为线索；漏掉死亡记录时可能沿用旧名。"
 "（ps 采样推测，未核实）":
   en: " (sampled ps hint, unverified)"
   zh-CN: "（ps 采样推测，未核实）"
