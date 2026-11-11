@@ -7,9 +7,14 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+import time
 from urllib.parse import quote
 
 from release_policy import digest, expected_assets, load_plan, validate_assets
+
+
+DRAFT_VISIBILITY_ATTEMPTS = 10
+DRAFT_VISIBILITY_DELAY_SECS = 3
 
 
 def gh(*args: str):
@@ -96,7 +101,14 @@ def publish(root: Path, directory: Path, tag: str, repo: str, commit: str):
     if release is None:
         gh("release", "create", tag, "--repo", repo, "--verify-tag", "--draft",
            "--latest=false", "--title", title, "--notes-file", notes)
-        release = find_release(repo, tag)
+        # The release listing is eventually consistent: a draft created a
+        # moment ago can be missing from it (seen for cli-v1.4.0). Retry for a
+        # bounded time before treating it as invisible.
+        for _ in range(DRAFT_VISIBILITY_ATTEMPTS):
+            release = find_release(repo, tag)
+            if release is not None:
+                break
+            time.sleep(DRAFT_VISIBILITY_DELAY_SECS)
         if release is None:
             raise ValueError("created release draft is not visible")
     endpoint = f"repos/{repo}/releases/{release['id']}"

@@ -25,7 +25,11 @@ class PublishTests(ReleaseFixture):
         self.tag_commit = self.commit
         self.corrupt_download = False
         self.latest = {"id": 6}
+        self.hidden_listings = 0
+        self.hide_after_create = 0
+        self.sleeps = []
         for patcher in (
+            patch.object(publisher.time, "sleep", side_effect=self.sleeps.append),
             patch.object(publisher, "api", side_effect=self.api),
             patch.object(publisher, "gh", side_effect=self.gh),
             patch.object(publisher.subprocess, "check_output", return_value=self.commit + "\n"),
@@ -37,6 +41,9 @@ class PublishTests(ReleaseFixture):
         if path.endswith("/releases/latest"):
             return self.latest
         if "/releases?" in path:
+            if self.release and self.hidden_listings:
+                self.hidden_listings -= 1
+                return []
             return [self.release] if self.release else []
         if "/releases/tags/" in path:
             raise AssertionError("drafts must be read by ID, not by tag")
@@ -54,6 +61,7 @@ class PublishTests(ReleaseFixture):
         self.commands.append(args)
         if args[1] == "create":
             self.release = {"id": 7, "draft": True, "tag_name": args[2]}
+            self.hidden_listings = self.hide_after_create
         elif args[1] == "upload":
             for path in self.dist.iterdir():
                 self.remote[path.name] = path.read_bytes()
@@ -94,6 +102,22 @@ class PublishTests(ReleaseFixture):
         upload = next(args for args in self.commands if args[1] == "upload")
         self.assertEqual({Path(arg).name for arg in upload if arg.startswith(str(self.dist))}, expected_assets(self.plan))
         self.assertFalse(any("--generate-notes" in args for args in self.commands))
+
+    def test_new_draft_missing_from_eventually_consistent_listing_is_retried(self):
+        self.release = None
+        self.hide_after_create = 2
+        self.publish()
+        self.assertEqual(self.sleeps, [publisher.DRAFT_VISIBILITY_DELAY_SECS] * 2)
+        self.assertFalse(self.release["draft"])
+        self.assertEqual(set(self.remote), expected_assets(self.plan))
+
+    def test_new_draft_that_never_appears_is_reported_after_bounded_retries(self):
+        self.release = None
+        self.hide_after_create = publisher.DRAFT_VISIBILITY_ATTEMPTS
+        with self.assertRaisesRegex(ValueError, "created release draft is not visible"):
+            self.publish()
+        self.assertEqual(len(self.sleeps), publisher.DRAFT_VISIBILITY_ATTEMPTS)
+        self.assertFalse(any(args[1] == "upload" for args in self.commands))
 
     def test_gui_only_release_publishes_six_assets_and_becomes_latest(self):
         tag = "gui-v1.3.1"
