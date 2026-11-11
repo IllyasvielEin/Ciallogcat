@@ -12,6 +12,10 @@ name = "ciallogcat-cli"
 path = "../../src/bin/ciallogcat-cli.rs"
 
 [[test]]
+name = "agent_loop"
+path = "../../tests/agent_loop.rs"
+
+[[test]]
 name = "cli_integration"
 path = "../../tests/cli_integration.rs"
 

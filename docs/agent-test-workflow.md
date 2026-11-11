@@ -70,8 +70,8 @@ header/footer 可以只推进 offset 而不推进 seq。
 
 ## 报告与后续取证
 
-本例的 stdout 报告使用 `schema_version: 2`。CLI 查询响应仍为 schema_version=2；
-所有起点的 cursor 内部版本统一为 4，旧版 token 需重新查询取得；调用方不应解析 token。
+本例的 stdout 报告使用 `schema_version: 3`，并在 `crashes` 中附上动作前标记之后的崩溃/ANR 分组（`--crash-groups`，默认 10，0 关闭；失败记为 `crashes` 阶段错误，不影响证据）。CLI 查询响应为 schema_version=3；
+所有起点的 cursor 内部版本统一为 5，旧版 token 需重新查询取得；调用方不应解析 token。
 旧示例的单一 `evidence_page/error` 改为有界的 `evidence/errors`：
 
 - `action` 保留执行器退出、timeout/interrupted、主机时刻、耗时和 `reaped`。

@@ -646,7 +646,7 @@ fn display_options_do_not_change_cursor_filters_or_archived_jsonl() {
             .starts_with("1970-01-01T00:00:02.000Z [received; host-observation] | [device-text=")
     );
     assert_eq!(reference["records"].as_array().unwrap().len(), 1);
-    assert_eq!(reference["records"][0]["message_preview"], "second\r\n");
+    assert_eq!(reference["records"][0]["message"], "second\r\n");
     for field in ["snapshot", "scan", "next_cursor", "time_window"] {
         assert_eq!(second.summary()[field], reference[field], "{field}");
     }

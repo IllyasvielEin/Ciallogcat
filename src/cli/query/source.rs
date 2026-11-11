@@ -22,6 +22,32 @@ pub(super) struct Binding {
     pub artifact_id: String,
 }
 
+/// Compact token commitment to a full [`Binding`]. The verifier recomputes the
+/// binding from the reopened source; only the parameters needed to do so and a
+/// digest of the result travel in the token.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(super) struct BindingRef {
+    #[serde(rename = "s")]
+    pub schema: u8,
+    #[serde(rename = "n")]
+    pub session: bool,
+    #[serde(rename = "l")]
+    pub prefix_len: u64,
+    #[serde(rename = "d")]
+    pub digest: String,
+}
+
+impl Binding {
+    pub fn reference(&self) -> BindingRef {
+        BindingRef {
+            schema: self.schema,
+            session: self.session,
+            prefix_len: self.prefix_len,
+            digest: hash(&serde_json::to_vec(self).expect("binding serializes")),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(super) struct Boundary {
     pub offset: u64,
@@ -135,7 +161,7 @@ fn identity(file: &File, metadata: &Metadata) -> Result<String> {
 }
 
 impl Source {
-    pub fn open(path: PathBuf, session: bool, expected: Option<&Binding>) -> Result<Self> {
+    pub fn open(path: PathBuf, session: bool, expected: Option<&BindingRef>) -> Result<Self> {
         let (path, status_value) = if session {
             let directory = super::super::session_path(
                 path.to_str()
@@ -252,10 +278,8 @@ impl Source {
         if upper.offset > metadata.len() {
             return Err(stale("file is shorter than the published boundary"));
         }
-        if let Some(binding) = expected
-            && (binding.path != path_hash || binding.identity != id || binding.session != session)
-        {
-            return Err(stale("token belongs to a different or replaced source"));
+        if expected.is_some_and(|binding| binding.session != session) {
+            return Err(stale("token belongs to a different source kind"));
         }
         if expected.is_some_and(|binding| binding.prefix_len > upper.offset) {
             return Err(stale("file was truncated below its identity prefix"));
@@ -368,8 +392,14 @@ impl Source {
         }
         source.binding.prefix_len = prefix_len;
         source.binding.prefix_hash = hash(&source.block(0, prefix_len)?);
-        if expected.is_some_and(|binding| binding != &source.binding) {
-            return Err(stale("source prefix, schema or artifact identity changed"));
+        if expected.is_some_and(|binding| binding != &source.binding.reference()) {
+            return Err(stale(
+                "token belongs to a different, replaced or changed source (path, file identity, prefix, schema or artifact)",
+            ));
+        }
+        // Unavailable observations are omitted rather than repeated as null.
+        if let Some(fields) = source.status.as_object_mut() {
+            fields.retain(|_, value| !value.is_null());
         }
         Ok(source)
     }
@@ -383,7 +413,7 @@ impl Source {
         } else {
             self.path.clone()
         };
-        Self::open(path, self.binding.session, Some(&self.binding))
+        Self::open(path, self.binding.session, Some(&self.binding.reference()))
     }
 
     /// Pin every subsequent record/control read to the caller's original
@@ -586,6 +616,43 @@ impl Source {
             return Err(stale("source was replaced or truncated while querying"));
         }
         Ok(())
+    }
+
+    /// Locate the record with `seq` inside the pinned boundary by bisecting
+    /// byte offsets: sequences strictly increase along the file, so each step
+    /// reads one line (plus a bounded backward search for its start) and the
+    /// cost is logarithmic in the record count, not linear.
+    pub fn find_seq(&mut self, seq: u64) -> Result<Option<(u64, Vec<u8>)>> {
+        let mut low = self.data_start;
+        let mut high = self.fence.offset;
+        while low < high {
+            let middle = low + (high - low) / 2;
+            let start = self
+                .previous_line_start(middle + 1, low, MAX_RECORD_BYTES + 1)?
+                .ok_or_else(|| invalid("record exceeds its encoded byte limit"))?;
+            let bytes = self.line(start, high, MAX_RECORD_BYTES)?;
+            if bytes.is_empty() {
+                return Err(stale("unexpected EOF inside the published boundary"));
+            }
+            #[derive(Deserialize)]
+            struct Kind {
+                #[serde(rename = "type")]
+                kind: String,
+            }
+            let kind: Kind = serde_json::from_slice(&bytes).map_err(|e| invalid(e.to_string()))?;
+            let found = if kind.kind == "artifact_end" {
+                None
+            } else {
+                Some(self.row(&bytes, 0)?.seq)
+            };
+            match found {
+                Some(found) if found == seq => return Ok(Some((start, bytes))),
+                Some(found) if found < seq => low = start + bytes.len() as u64,
+                // A footer sorts after every record.
+                _ => high = start,
+            }
+        }
+        Ok(None)
     }
 
     /// Find one preceding record boundary without scanning the file prefix.

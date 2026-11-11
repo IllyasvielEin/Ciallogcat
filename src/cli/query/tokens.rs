@@ -2,15 +2,22 @@
 use std::fs;
 use std::io::Write;
 
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use hmac::{Hmac, Mac};
 use serde::{Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 
 use super::super::{Result, error, io_error, new_file, read_limited, regular};
 
+/// 128-bit SHA-256 prefix, hex encoded. Every use is an integrity commitment
+/// inside an authenticated token, never a portable content address.
 pub(super) fn hash(bytes: &[u8]) -> String {
-    hex(&Sha256::digest(bytes))
+    hex(&Sha256::digest(bytes)[..16])
 }
+
+/// Authentication tags are truncated HMAC-SHA256 (128 bits, RFC 2104 §5).
+const MAC_BYTES: usize = 16;
 
 fn hex(bytes: &[u8]) -> String {
     const DIGITS: &[u8] = b"0123456789abcdef";
@@ -20,25 +27,6 @@ fn hex(bytes: &[u8]) -> String {
         output.push(DIGITS[(byte & 15) as usize] as char);
     }
     output
-}
-
-fn unhex(text: &str) -> Result<Vec<u8>> {
-    if !text.len().is_multiple_of(2) {
-        return Err(invalid());
-    }
-    text.as_bytes()
-        .as_chunks::<2>()
-        .0
-        .iter()
-        .map(|pair| {
-            let digit = |byte| match byte {
-                b'0'..=b'9' => Ok(byte - b'0'),
-                b'a'..=b'f' => Ok(byte - b'a' + 10),
-                _ => Err(invalid()),
-            };
-            Ok((digit(pair[0])? << 4) | digit(pair[1])?)
-        })
-        .collect()
 }
 
 fn invalid() -> super::super::Error {
@@ -110,10 +98,11 @@ impl Signer {
         let mut mac = Hmac::<Sha256>::new_from_slice(&self.0).expect("valid HMAC key");
         mac.update(kind.as_bytes());
         mac.update(&bytes);
+        let tag = mac.finalize().into_bytes();
         Ok(format!(
             "{kind}.{}.{}",
-            hex(&bytes),
-            hex(&mac.finalize().into_bytes())
+            URL_SAFE_NO_PAD.encode(&bytes),
+            URL_SAFE_NO_PAD.encode(&tag[..MAC_BYTES])
         ))
     }
 
@@ -125,15 +114,24 @@ impl Signer {
         if parts.next() != Some(kind) {
             return Err(invalid());
         }
-        let bytes = unhex(parts.next().ok_or_else(invalid)?)?;
-        let signature = unhex(parts.next().ok_or_else(invalid)?)?;
+        let decode = |part: Option<&str>| {
+            URL_SAFE_NO_PAD
+                .decode(part.ok_or_else(invalid)?)
+                .map_err(|_| invalid())
+        };
+        let bytes = decode(parts.next())?;
+        let signature = decode(parts.next())?;
+        if signature.len() != MAC_BYTES {
+            return Err(invalid());
+        }
         if parts.next().is_some() {
             return Err(invalid());
         }
         let mut mac = Hmac::<Sha256>::new_from_slice(&self.0).expect("valid HMAC key");
         mac.update(kind.as_bytes());
         mac.update(&bytes);
-        mac.verify_slice(&signature).map_err(|_| invalid())?;
+        mac.verify_truncated_left(&signature)
+            .map_err(|_| invalid())?;
         serde_json::from_slice(&bytes).map_err(|_| invalid())
     }
 }

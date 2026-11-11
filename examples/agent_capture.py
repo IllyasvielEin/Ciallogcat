@@ -137,7 +137,7 @@ def query_page(args, session, cursor, deadline, start_at=None):
     if start_at:
         flags += ["--start-at", start_at]
     page = command(args.cli, *flags, timeout=remaining(deadline, args.command_timeout))
-    if (page.get("schema_version") != 2 or page.get("mode") != "tail"
+    if (page.get("schema_version") != 3 or page.get("mode") != "tail"
             or not isinstance(page.get("records"), list) or not page.get("next_cursor")
             or any(not isinstance(page.get(key), dict)
                    for key in ("source_status", "snapshot", "scan", "validation"))
@@ -220,6 +220,24 @@ def collect_evidence(args, session, baseline, evidence):
             break
 
 
+def collect_crashes(args, session, baseline, report):
+    """Group crashes/ANRs after the pre-action mark: one bounded CLI scan."""
+    if args.crash_groups == 0 or not baseline:
+        report["crashes"] = {"skipped": "disabled" if args.crash_groups == 0 else "no_baseline"}
+        return
+    value = command(args.cli, "crashes", "--session-dir", str(session),
+                    "--cursor", baseline["next_cursor"], "--limit", str(args.crash_groups),
+                    "--max-response-bytes", str(args.evidence_bytes),
+                    "--max-scan-records", str(args.scan_records),
+                    "--max-scan-bytes", str(args.scan_bytes),
+                    timeout=args.command_timeout)
+    if value.get("schema_version") != 3 or not isinstance(value.get("groups"), list):
+        raise WorkflowError("invalid_response", "expected a crashes response")
+    # Groups are navigation hints; first_ref leads to get/context evidence.
+    report["crashes"] = {key: value.get(key) for key in (
+        "groups", "groups_total", "groups_truncated", "incidents", "complete", "has_more")}
+
+
 def run(args):
     session = Path(args.session_dir).absolute()
     if session.exists():
@@ -232,7 +250,8 @@ def run(args):
               "ready_timeout": (1, 60), "command_timeout": (1, 60),
               "failure_tail_secs": (0, 30), "evidence_timeout": (1, 60),
               "max_pages": (1, 100), "evidence_records": (1, 1000),
-              "evidence_bytes": (8192, 1048576), "scan_records": (1, 1000000),
+              "evidence_bytes": (8192, 1048576), "crash_groups": (0, 200),
+              "scan_records": (1, 1000000),
               "scan_bytes": (8388609, 67108864)}
     for name, (low, high) in ranges.items():
         value = getattr(args, name)
@@ -246,10 +265,11 @@ def run(args):
     if len(args.query.encode("utf-8")) > 4096:
         raise ValueError("query must not exceed 4096 UTF-8 bytes")
 
-    report = {"schema_version": 2, "session_dir": str(session), "action": None,
+    report = {"schema_version": 3, "session_dir": str(session), "action": None,
               "readiness": None, "boundaries": {"before_action": None, "after_action": None,
               "after_stop": None}, "failure_tail": {"requested_secs": args.failure_tail_secs,
               "waited_secs": 0, "reason": "not_needed"}, "capture": None, "evidence": {},
+              "crashes": None,
               "limits": {name: getattr(args, name) for name in ranges}, "errors": []}
     def problem(stage, error):
         report["errors"].append({"stage": stage, "code": getattr(error, "code", type(error).__name__),
@@ -325,6 +345,10 @@ def run(args):
             except (WorkflowError, OSError, subprocess.TimeoutExpired, KeyboardInterrupt) as error:
                 report["evidence"]["stop_reason"] = "interrupted" if isinstance(error, KeyboardInterrupt) else "query_error"
                 problem("evidence", error)
+            try:
+                collect_crashes(args, session, baseline, report)
+            except (WorkflowError, OSError, subprocess.TimeoutExpired, KeyboardInterrupt) as error:
+                problem("crashes", error)
 
     action, capture = report["action"], report["capture"] or {}
     complete_scan = report["evidence"].get("complete_to_observed_watermark", False)
@@ -354,6 +378,8 @@ def parser():
     result.add_argument("--max-pages", type=int, default=8)
     result.add_argument("--evidence-records", type=int, default=20)
     result.add_argument("--evidence-bytes", type=int, default=32768)
+    result.add_argument("--crash-groups", type=int, default=10,
+                        help="crash/ANR groups after the mark; 0 disables")
     result.add_argument("--scan-records", type=int, default=100000)
     result.add_argument("--scan-bytes", type=int, default=16777216)
     result.add_argument("--query", default="")

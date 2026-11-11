@@ -241,8 +241,22 @@ pub(super) fn run(
                 },
             )
         },
+        |tx| {
+            adb::spawn_process_query(
+                config.adb.clone(),
+                config.serial.clone(),
+                0,
+                tx,
+                WakeSignal::default(),
+            );
+            true
+        },
     )
 }
+
+/// Interval between ps samples while following live text logs (the desktop
+/// viewer samples every 750 ms; hints expire after `PS_HINT_TTL`).
+const PS_POLL: Duration = Duration::from_secs(1);
 
 trait CaptureHandle {
     fn stop(&mut self);
@@ -267,6 +281,9 @@ fn run_capture<H: CaptureHandle>(
         &dyn Fn() -> bool,
         Instant,
     ) -> std::result::Result<H, String>,
+    // Starts one asynchronous ps sample that reports BackendEvent::Processes on
+    // the given channel; returns false when no sample was started.
+    mut query_processes: impl FnMut(mpsc::SyncSender<BackendEvent>) -> bool,
 ) -> Result<Status> {
     let start = Instant::now();
     let deadline = start + Duration::from_secs(config.duration_secs);
@@ -342,6 +359,14 @@ fn run_capture<H: CaptureHandle>(
     let mut last_backend_error = None;
     let mut incomplete_frame_at_stop = None;
     let mut heartbeat = start - Duration::from_secs(1);
+    // Text records carry no process name. Name them from lifecycle lines in the
+    // stream and, for live follow captures only, from fresh ps samples (the
+    // same rule as the desktop viewer). Protobuf records carry the device cache.
+    let ps_enabled = config.transport == adb::LogTransport::Text
+        && config.scope == ciallogcat::capture_scope::CaptureScope::default();
+    let mut names = ciallogcat::process_names::ProcessNames::default();
+    let mut ps_in_flight = false;
+    let mut last_ps: Option<Instant> = None;
 
     loop {
         let tick = Instant::now();
@@ -464,6 +489,15 @@ fn run_capture<H: CaptureHandle>(
         if stopping.is_some() {
             status.state = "stopping".into();
         }
+        if ps_enabled
+            && stopping.is_none()
+            && !ps_in_flight
+            && matches!(controller.status(), Phase::Running)
+            && last_ps.is_none_or(|at| at.elapsed() >= PS_POLL)
+        {
+            ps_in_flight = query_processes(tx.clone());
+            last_ps = Some(Instant::now());
+        }
         if heartbeat.elapsed() >= Duration::from_millis(500) {
             progress(&mut status, &visible);
             if let Some(dir) = dir
@@ -509,7 +543,10 @@ fn run_capture<H: CaptureHandle>(
                         continue;
                     }
                     let observed = queued.received_unix_ms();
+                    let received_at = queued.received_at();
                     let mut entry = queued.into_inner();
+                    names.observe(&entry);
+                    names.attribute(&mut entry, received_at, ps_enabled);
                     entry.provenance = session.next_record(observed);
                     let mut next_encoder = encoder.clone();
                     match next_encoder.record_bytes(&entry) {
@@ -561,6 +598,8 @@ fn run_capture<H: CaptureHandle>(
                     }
                     controller.exited(id, exit_message, Instant::now());
                     if unexpected {
+                        // Lifecycle lines may be missed across the gap.
+                        names = ciallogcat::process_names::ProcessNames::default();
                         reconnects += 1;
                         status.stream_interruptions = Some(reconnects);
                         status.capture_completeness = Some("partial".into());
@@ -576,11 +615,31 @@ fn run_capture<H: CaptureHandle>(
                     }
                 }
             },
+            Ok(BackendEvent::Processes {
+                observed_from,
+                observed_until,
+                result,
+                ..
+            }) => {
+                ps_in_flight = false;
+                names.update_ps(result.ok(), observed_from, observed_until);
+            }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 failure
                     .get_or_insert_with(|| error("adb_error", "backend channel disconnected", 4));
             }
             _ => (),
+        }
+    }
+    // Let an in-flight ps sample finish so its ADB child is reaped before exit.
+    let ps_deadline = Instant::now() + Duration::from_secs(2);
+    while ps_in_flight {
+        let Some(remaining) = ps_deadline.checked_duration_since(Instant::now()) else {
+            break;
+        };
+        match rx.recv_timeout(remaining) {
+            Ok(BackendEvent::Processes { .. }) | Err(_) => ps_in_flight = false,
+            Ok(_) => {}
         }
     }
     if let Some(child) = &mut child {

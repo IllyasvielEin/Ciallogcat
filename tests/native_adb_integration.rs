@@ -327,7 +327,7 @@ fn native_background_stop_reaps_idle_child_and_publishes_finalized_snapshot() {
         std::thread::sleep(Duration::from_millis(20));
     }
     let query = s.ok(&["query", "--session-dir", &dir, "--mode", "tail"]);
-    assert_eq!(query["records"][0]["message_preview"], "before idle");
+    assert_eq!(query["records"][0]["message"], "before idle");
     let stopped = s.ok(&["stop", "--session-dir", &dir]);
     assert_eq!(stopped["state"], "completed");
     assert_eq!(stopped["diagnostics_complete"], true);
@@ -396,7 +396,7 @@ fn native_binary_pipe_preserves_protobuf_payload_and_can_be_stopped() {
         let stopped = s.ok(&["stop", "--session-dir", &dir]);
         assert_eq!(stopped["visible_end"]["offset"], stopped["bytes"]);
         let all = s.ok(&["query", "--session-dir", &dir]);
-        assert_eq!(all["schema_version"], 2);
+        assert_eq!(all["schema_version"], 3);
         assert_eq!(all["source_schema_version"], page["source_schema_version"]);
         assert_eq!(all["complete"], true);
         let detail = s.ok(&[

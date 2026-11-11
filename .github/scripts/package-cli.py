@@ -57,6 +57,7 @@ def package() -> Path:
         shutil.copy2("proto/LICENSE-APACHE-2.0", stage / "LICENSE-AOSP.txt")
         shutil.copy2("proto/README.md", stage / "PROTOBUF-NOTICE.md")
         shutil.copy2("docs/agent-query.md", stage / "agent-query.md")
+        shutil.copy2("skills/ciallogcat-cli/SKILL.md", stage / "SKILL.md")
         if platform == "windows-x86_64":
             with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
                 for source in sorted(stage.iterdir()):
@@ -130,6 +131,7 @@ def package_deb() -> Path:
         shutil.copyfile("proto/LICENSE-APACHE-2.0", documentation / "LICENSE-AOSP.txt")
         shutil.copyfile("proto/README.md", documentation / "PROTOBUF-NOTICE.md")
         shutil.copyfile("docs/agent-query.md", documentation / "agent-query.md")
+        shutil.copyfile("skills/ciallogcat-cli/SKILL.md", documentation / "SKILL.md")
         for document in documentation.iterdir():
             document.chmod(0o644)
         # Debian uses ~ for prerelease ordering; preserve +build metadata.

@@ -360,7 +360,13 @@ fn history_follow_keeps_live_stream_and_host_record_budget_after_selected_histor
         assert_eq!(doc.header.source.extra["capture_scope"]["mode"], "follow");
         assert_eq!(output.summary()["reason"], "max_entries");
         assert_eq!(output.summary()["stream_interruptions"], 0);
-        assert_eq!(sandbox.trace()[0]["args"][5], "-T");
+        // Live follow also samples ps for process-name hints; pick the stream.
+        let trace = sandbox.trace();
+        let stream = trace
+            .iter()
+            .find(|row| row["args"][2] == "logcat")
+            .expect("logcat invocation");
+        assert_eq!(stream["args"][5], "-T");
         sandbox.assert_reaped();
     }
 }
@@ -1042,7 +1048,13 @@ fn help_and_version_work_without_adb() {
 #[test]
 fn query_help_exposes_budgets_and_continuations_without_opening_a_source() {
     let s = Sandbox::new("normal");
-    for command in [None, Some("query"), Some("get"), Some("context")] {
+    for command in [
+        None,
+        Some("query"),
+        Some("crashes"),
+        Some("get"),
+        Some("context"),
+    ] {
         for flag in ["--help", "-h"] {
             let args = command.map_or_else(|| vec![flag], |command| vec![command, flag]);
             let help = s.run(&args);
@@ -1050,6 +1062,24 @@ fn query_help_exposes_budgets_and_continuations_without_opening_a_source() {
             assert!(help.stderr.is_empty());
             assert!(!help.stdout.contains("query-v2"));
             assert!(!help.stdout.contains("--after-seq"));
+            if command.is_none() {
+                // The global index stays short; budgets live in focused help.
+                for expected in [
+                    "--file FILE",
+                    "--session-dir DIR",
+                    "query --help",
+                    "crashes --help",
+                    "get --help",
+                    "context --help",
+                    "--start-at end",
+                    "--wait-ms",
+                ] {
+                    assert!(help.stdout.contains(expected), "missing {expected}");
+                }
+                assert!(!help.stdout.contains("--max-response-bytes"));
+                assert!(help.stdout.len() < 4096);
+                continue;
+            }
             for expected in [
                 "--file FILE",
                 "--session-dir DIR",
@@ -1066,7 +1096,7 @@ fn query_help_exposes_budgets_and_continuations_without_opening_a_source() {
                 assert!(!help.stdout.contains("--max-scan-records"));
             } else {
                 for expected in [
-                    "--preview-bytes N     Default 2048; range 0..=16384",
+                    "--preview-bytes N     Default 512; range 0..=16384",
                     "--max-scan-bytes N    Default 16777216; range 8388609..=67108864",
                     "--max-scan-records N  Default 100000; range 1..=1000000",
                     "rejected by get",
@@ -1096,7 +1126,7 @@ fn query_help_exposes_budgets_and_continuations_without_opening_a_source() {
                 Some("get") => &[
                     "--ref TOKEN",
                     "--text-offset N",
-                    "--view stored|decoded",
+                    "--view decoded|stored",
                     "derived view",
                     "0..=67108864",
                     "0..=8388608",
@@ -1105,7 +1135,15 @@ fn query_help_exposes_budgets_and_continuations_without_opening_a_source() {
                     "complete=true",
                     "preview/scan budget flags are rejected",
                 ],
+                Some("crashes") => &[
+                    "--limit N",
+                    "1..=200",
+                    "first_ref",
+                    "not diagnoses",
+                    "next_cursor",
+                ],
                 Some("context") => &[
+                    "--same-pid",
                     "--ref TOKEN",
                     "--before N",
                     "--after N",
@@ -1114,7 +1152,7 @@ fn query_help_exposes_budgets_and_continuations_without_opening_a_source() {
                     "partial_before/partial_after",
                     "no context cursor",
                 ],
-                _ => &["query --help", "get --help", "context --help"],
+                _ => unreachable!(),
             };
             for expected in guidance {
                 assert!(
@@ -1201,14 +1239,11 @@ fn query_reads_native_sources_and_rejects_invalid_or_unsupported_records() {
             let result = s.run(&args);
             result.success();
             let value: Value = serde_json::from_str(&result.stdout).unwrap();
-            assert_eq!(value["schema_version"], 2);
+            assert_eq!(value["schema_version"], 3);
             assert_eq!(value["source_schema_version"], schema);
             assert_eq!(value["records"].as_array().unwrap().len(), 1);
             assert_eq!(value["records"][0]["seq"], 1);
-            assert_eq!(
-                value["records"][0]["message_preview"],
-                entry.message.as_ref()
-            );
+            assert_eq!(value["records"][0]["message"], entry.message.as_ref());
             assert!(value["records"][0]["record_ref"].is_string());
             assert!(value["next_cursor"].is_string());
             assert_eq!(value["complete"], true);
