@@ -606,6 +606,7 @@ fn capture_loop_recovers_from_full_writer_and_backend_and_honors_stop_limits() {
                     });
                     Ok(TestHandle(stop_tx))
                 },
+                |_| false,
             );
             done_tx.send(result).unwrap();
         });
@@ -752,6 +753,7 @@ fn capture_finalization_reports_actual_flush_failure_and_timeout_before_cancella
                 let (stop_tx, _stop_rx) = mpsc::channel();
                 Ok(TestHandle(stop_tx))
             },
+            |_| false,
         );
         let error = result.err().unwrap();
         assert_eq!(error.exit, 5);

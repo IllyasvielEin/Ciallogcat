@@ -276,8 +276,9 @@ fn snapshot_cursor_does_not_expand_after_file_append_and_binds_filters() {
     let second = sandbox.run(&next).page();
     assert_eq!(seqs(&second), [2]);
     assert_eq!(second["complete"], true);
+    // Dropping --ignore-case changes the filter.
     let mut mismatch = next.clone();
-    mismatch[6] = "--case-sensitive";
+    assert_eq!(mismatch.remove(6), "--ignore-case");
     sandbox.fail(&mismatch, "cursor_mismatch");
     sandbox.publish(&directory, 3);
     let fresh = sandbox.run(&args[..args.len() - 2]).page();
@@ -338,7 +339,8 @@ fn invalid_regex_incompatible_modes_and_missing_time_fail_explicitly() {
         vec!["--query", "[", "--regex"],
         vec!["--all", "--format", "json"],
         vec!["--all", "--mode", "tail"],
-        vec!["--ignore-case", "--case-sensitive"],
+        // Removed no-op flag: case-sensitive matching is simply the default.
+        vec!["--case-sensitive"],
         vec!["--pid", "-1"],
         vec!["--tag", "a", "--tag-include", "b"],
     ] {
@@ -663,8 +665,12 @@ fn native_received_time_filters_preserve_capture_identity() {
         ])
         .page();
     assert_eq!(seqs(&page), [2]);
-    assert_eq!(page["records"][0]["identity"], rows[1]["provenance"]);
-    assert_eq!(page["records"][0]["identity_scope"], "capture_session");
+    assert_eq!(page["records"][0]["seq"], rows[1]["provenance"]["seq"]);
+    assert_eq!(
+        page["records"][0]["observed_unix_ms"],
+        rows[1]["provenance"]["observed_unix_ms"]
+    );
+    assert!(page["records"][0].get("identity_scope").is_none());
     let reference = page["records"][0]["record_ref"].as_str().unwrap();
     let get = sandbox
         .run(&[
@@ -715,7 +721,7 @@ fn native_received_time_and_unknown_fields_survive_every_query_view() {
     assert_eq!(stream.summary()["complete"], true);
     let directory = sandbox.session(std::slice::from_ref(&original));
     let page = sandbox.run(&["query", "--session-dir", &directory]).page();
-    assert_eq!(page["schema_version"], 2);
+    assert_eq!(page["schema_version"], 3);
     assert_eq!(page["source_schema_version"], 3);
     assert_eq!(
         page["records"][0]["observed_unix_ms"],

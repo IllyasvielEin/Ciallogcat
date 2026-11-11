@@ -26,13 +26,14 @@ ciallogcat-cli query --session-dir ./capture --mode tail --start-at end --query 
 
 | 参数 | 默认值 | 边界 |
 | --- | --- | --- |
-| `--mode` | `snapshot` | `snapshot` 或 `tail`；tail 仅支持 session-dir |
+| `--mode` | `snapshot` | `snapshot` 或 `tail`；tail 仅支持 session-dir；提供 `--cursor` 时默认取 cursor 记录的模式，`--start-at end` 隐含 tail；显式值须一致 |
 | `--start-at` | `beginning` | `beginning` 或 `end`；end 仅支持 native session-dir 的 tail；显式起点不能与 cursor 同传 |
 | `--cursor` | 从第一条开始 | 后续请求提供上一页 next_cursor |
 | `--query` | 空字符串 | 同一 cursor 必须保持条件不变 |
 | `--limit` | 100 | 1–1000 条返回记录 |
 | `--max-response-bytes` | 65536 | 8192–1048576，包含 JSON envelope 和最后换行 |
-| `--preview-bytes` | 2048 | 0–16384，UTF-8 字节上限，不截断码点 |
+| `--preview-bytes` | 512 | 0–16384，UTF-8 字节上限，不截断码点 |
+| `--wait-ms` | 0 | 0–60000；仅 tail，见下文“标记与等待” |
 | `--max-scan-bytes` | 16777216 | 8388609–67108864 |
 | `--max-scan-records` | 100000 | 1–1000000 |
 
@@ -48,12 +49,13 @@ snapshot 到达上界后，要查看后续追加需省略 cursor 创建新快照
 
 活动会话水位来自原子发布的 status 文件。原生会话使用 `visible_end: {seq, offset}`，同时验证 `record_schema_version`、`artifact_id`、`session_id`。offset 包含 header/footer 字节，seq 仅计公共记录。完整一行 flush 后才可推进水位；文件里已经出现但水位尚未覆盖的字节不会被读取为记录。这个保证是进程间可见性，不是逐条 fsync 或断电耐久性。
 
-响应 `schema_version: 2` 是查询 API 版本，独立于命令名和存档版本。三个命令都返回固定内部来源标记 `source_schema_version: 3`，不是用户可选格式；protobuf 摘要和消息过滤使用固定 `aosp_logcat_16r1_host_v1` 投影，与 ADB adapter 和共享文档 codec 相同。
+响应 `schema_version: 3` 是查询 API 版本（query、crashes、get、context 共用；3 起记录预览改为精简字段），独立于命令名和存档版本。这些命令都返回固定内部来源标记 `source_schema_version: 3`，不是用户可选格式；protobuf 摘要和消息过滤使用固定 `aosp_logcat_16r1_host_v1` 投影，与 ADB adapter 和共享文档 codec 相同。
 
 响应的主要字段：
 
-- `records`：有界预览、`record_ref`、seq、kind 和已知的稳定身份。原生 provenance 保留 capture session/seq 与主机接收时间，后者由 adapter 在队列背压等待前采样，不是设备事件时间。缺失的可选观察不会被补造。原生 event/unparsed 不添加虚构的 PID、等级、Tag。
-- `complete`：当前 snapshot/tail 水位已扫完；不代表采集结束或设备日志无缺失。`--all` 固定快照并自动续页（包括空匹配页），完整 text/JSONL 输出到 stdout，最终摘要到 stderr；内存不累计全量匹配。
+- `records`：精简的有界预览。每条总有 `record_ref`、`seq`、`message`（预览）；日志记录另有 `observed_unix_ms`（主机接收时间，由 adapter 在队列背压等待前采样，不是设备事件时间）、`time`（设备时间原文）、`pid`、`tid`、`level`、`tag`。只在有意义时出现：`kind`（非 entry 时，即 event/unparsed）、`process`/`process_source`（有进程名时）、`preview_truncated: true` 与 `message_bytes`（预览被截断时）、`text_loss`（记录了截断或非法 UTF-8 替换时）、`metadata_preview_truncated: true`、`session_id`（仅当记录来自与文档头不同的采集会话）。完整身份（session、segment、attempt）及全部存档字段用 `get` 取得。缺失的可选观察不会被补造；原生 event/unparsed 不添加虚构的 PID、等级、Tag。`source_status` 省略值为 null 的观察。
+- `complete`：当前 snapshot/tail 水位已扫完；不代表采集结束或设备日志无缺失。`--all` 固定快照（tail 模式下固定本次请求观察到的水位）并自动续页（包括空匹配页），完整 text/JSONL 输出到 stdout，最终摘要到 stderr；内存不累计全量匹配。
+- `warnings`：仅在需要时出现。`--package` 生效而扫描到没有进程名的日志记录时返回 `{code:"package_unresolved", records:N, message}`；这些记录（如历史行、两种来源都未命中的进程、旧采集）的零结果不能说明应用没有日志，应改用 `--pid` 或 `--tag`。进程名来源见 [CLI 指南](cli.md#agent-loop)。
 - `next_cursor`、`has_more`：是否还有本次上界内的字节。空 records 也可能 has_more=true，例如本页扫描的记录都不匹配。每次都用返回的新 cursor 继续。
 - `snapshot`：本次固定的可见序号/字节边界。
 - `source_status`：本次读取的状态观察，含其更新时间与 stale 标志、readiness 与错误/诊断各最多 96 UTF-8 字节的预览及截断标志；它不等于 snapshot 创建时的采集状态。native 来源提供已经校验的 artifact_id/session_id。原生会话还提供 capture_completeness、stream_interruptions 和最后流错误预览；离线 native 文件提供 footer 的采集观察及 known_gap_count，不能把它视为当前设备健康状态。需要完整诊断时使用 `status`。
@@ -64,17 +66,31 @@ snapshot 到达上界后，要查看后续追加需省略 cursor 创建新快照
 
 扫描为下一条最大 8 MiB 编码记录预留空间，因此可能在字节预算用满前停止。默认响应只含摘要，Tag、设备时间和 process 名称另有小预览限制；`metadata_preview_truncated` 表明这些字段被裁短或省略。首条大记录会缩小预览，必要时保留最小引用信息，并推进 cursor，避免卡在同一条。响应预算不足以容纳 envelope 和引用时明确报参数错误。
 
+## 标记与等待
+
+`--start-at end`（隐含 tail 模式）返回的 cursor 是一个**标记**：它尚未扫描任何记录（count=0 且位于尾部起点），只绑定来源、位置和 tail 模式，不绑定过滤条件。续查时可以使用任意过滤条件（包括时间过滤，锚点取本次请求时间），也可以反复用于多个查询和 `crashes`。一旦 cursor 扫描过记录，就重新绑定其过滤条件，改条件报 `cursor_mismatch`。snapshot 模式仍拒绝标记。
+
+`--wait-ms N` 仅用于 tail。本页没有匹配记录且已扫到当前水位时，按约 200 ms 间隔重新读取已发布水位并续扫，直到出现匹配、来源结束（terminal、stale 或已见 footer）或到期。响应增加 `wait: {requested_ms, waited_ms, stop_reason}`，stop_reason 为 `matched`、`has_more`、`source_ended`、`deadline` 之一。每次轮询分别受扫描预算约束；返回的 cursor 可直接用于下一次等待。text/JSONL 输出同样支持，`--all` 可与 tail 组合，输出标记之后到本次水位的全部记录。
+
+## 崩溃分组
+
+`crashes` 与 `query` 共用来源、`--mode`、`--cursor`、`--start-at` 和全部过滤参数，在一次有界扫描内识别：Java（`AndroidRuntime` 的 `FATAL EXCEPTION:`）、native（`libc` 的 `Fatal signal`、`DEBUG` 的 tombstone）、ANR（`ActivityManager` 的 `ANR in`）。后续行按写入 PID 和 Tag 归属到打开的事件，400 条无后续即关闭；多行单条消息（proto）按行处理。
+
+每组返回 `kind`、`signature`、`occurrences`、`first_seq`/`last_seq`、`first_ref`、最多 4 个 `pids`、`process`、`thread`、`headline`、`cause` 和最多 5 个 `frames`。Java 签名取最深 `Caused by` 的类名及其首帧；native 取信号与首个非 libc 帧（去掉偏移）；ANR 原因中的数字折叠为 `#`。签名是导航线索，不是根因判断；用 `first_ref` 调用 `get`/`context --same-pid` 取原始证据。`--limit` 默认 20、最多 200，按 first_seq 排序，超出响应预算时先丢弃后面的组并标记 `groups_truncated`。`has_more=true` 表示只覆盖已扫描范围，组不会跨调用合并；crashes 的 cursor 只能继续 crashes 扫描。
+
 ## 全文和上下文
 
-`get --ref TOKEN [--view stored|decoded] [--text-offset N] [--max-response-bytes N]` 返回 `record_json_chunk`，编码为 `json_utf8`。默认 `--view stored` 保持原有行为：返回存档原始单条 JSON 字节流，保留未知字段、空白和字段顺序，只去掉末尾 LF。protobuf 原行只有 raw payload，不含 message 等派生字段。
+`get (--ref TOKEN | --seq N) [--view decoded|stored] [--text-offset N] [--max-response-bytes N]` 返回 `record_json_chunk`，编码为 `json_utf8`。`--seq N` 在来源当前可见边界（会话的已发布水位或离线文件 footer 前）内按字节偏移二分定位记录，每步只读一行，读取量随记录数对数增长；找不到报 `record_not_found`。`context` 同样接受 `--seq`。默认 `--view decoded`（见下文）；text 传输的记录 decoded 与 stored 逐字节相同，proto 记录的 decoded 因同时带派生文本与原始 base64 约为 stored 的 2–3 倍，但每次响应仍受 `--max-response-bytes` 约束并分块返回。`--view stored` 返回存档原始单条 JSON 字节流，保留未知字段、空白和字段顺序，只去掉末尾 LF；protobuf 原行只有 raw payload，不含 message 等派生字段。
 
-显式 `--view decoded` 返回完整结构化 JSON：message 不做预览截断，包含时间、PID/TID、等级、tag、process、身份、text_loss 和 proto 全部已知标量/bytes（base64）。原生格式使用 header 声明的固定投影，并将 device_time/process 扩展还原到对应父字段；其余未知扩展也保留，包括未知 projection_extensions 子字段。响应标记 `view`、`derived`，proto decoded 还标记 `projection_profile`。这是**派生视图，不是存档原字节**，其中的 schema_version 标识来源，不可把展开 JSON 当合法 compact 存档行写回；需要原始证据应取 stored 视图，不将 decoded 结果当作存档写回。
+`--view decoded` 返回完整结构化 JSON：message 不做预览截断，包含时间、PID/TID、等级、tag、process、身份、text_loss 和 proto 全部已知标量/bytes（base64）。原生格式使用 header 声明的固定投影，并将 device_time/process 扩展还原到对应父字段；其余未知扩展也保留，包括未知 projection_extensions 子字段。响应标记 `view`、`derived`，proto decoded 还标记 `projection_profile`。这是**派生视图，不是存档原字节**，其中的 schema_version 标识来源，不可把展开 JSON 当合法 compact 存档行写回；需要原始证据应取 stored 视图，不将 decoded 结果当作存档写回。
 
 第一块 offset 为 0，随后使用 `next_text_offset`，直到 `complete=true`。拼接所有 `record_json_chunk` 字符串后再解析 JSON；保持来源、ref 和 **view 不变**。`text-offset` 是所选视图的 UTF-8 字节偏移，必须处于码点边界。stored 范围为 0–8388608；decoded 范围为 0–67108864，均不能超过该视图实际长度。`record_bytes` 是该视图的完整字节数。
 
 每次 get 校验引用绑定的原始记录摘要和共享 codec 约束，不扫描该记录之前的日志。存档行仍最多 8 MiB；compact 原帧中的 NUL/转义或非法 UTF-8 展开可能使 decoded JSON 超过 8 MiB，因此派生视图单独受 64 MiB 编码预算限制。每次分块会重新构建该单条视图，没有整文件转换或副本存档。`--max-response-bytes` 继续限制包括转义、envelope 和 LF 的每次响应；preview/scan 参数不控制 get 分块，来源元数据验证仍有额外 I/O。
 
 `context --ref TOKEN [--before 10] [--after 10]` 返回以原记录为中心的有序预览。before/after 各为 0–100。它固定在 reference 创建时的 snapshot 内，不混入后续日志。向前查找使用有界反向换行扫描，不从文件头重扫。字节、记录或响应预算不足时保留目标记录，并设置 `partial_before` / `partial_after`；到达文件边界则不是 partial。上下文中的每条记录也有独立引用。没有暗中扩展查询分页来携带上下文。
+
+`--same-pid` 只保留与目标同 PID 的邻近记录（例如堆栈后续行）；其他记录仍在预算内扫描但跳过，数量见 `skipped_other_pid`，目标须为日志记录。
 
 上下文不沿用原 query 的消息过滤；前后两侧共用响应、扫描预算，目标记录也计入。先取 before，再取 after，反向查找换行的读取也计入扫描字节。`--max-scan-records 1` 因此只允许目标记录。上下文没有续页 cursor；需继续取证时使用返回的 record_ref。
 
@@ -112,7 +128,7 @@ token 使用本机持久 HMAC-SHA256 密钥认证。密钥在 GUI 配置目录�
 
 cursor 绑定规范化源路径、文件身份（Unix dev/inode；Windows volume/file index）、source/schema、固定前缀摘要、模式、过滤条件、offset、last_seq、扫描统计及上界。换源、换过滤、换模式、token 恶改、文件替换、缩短或已观察边界改变都会报错，不会悄悄从头重查。record_ref 还绑定记录本身的完整摘要；get/context 的目标校验可以发现其原地修改。
 
-所有起点统一签发/接受 version=4 cursor；旧 version=2/3 cursor 不再接受，必须省略 cursor 重新查询。过滤条件统一使用结构化规范编码计算指纹，不再保留旧字面量专用分支。end 起点仍将未扫描历史的边界、发布条数和首条 seq 单独保存；count/first_seq 仅记录实际扫描的后缀，不把跳过的历史冒充已验证内容。record_ref 保持单一 version=2 结构，与响应 schema 或存档版本互不替代。调用方始终把 token 当不透明字符串。尾部 cursor 到达新水位时还检查发布 entries 与累计后缀条数一致；已观察 footer 后拒绝任何新的发布追加。
+token 形如 `kind.base64url(payload).base64url(tag)`：payload 为 JSON，tag 为截断到 128 位的 HMAC-SHA256。payload 不再携带完整来源绑定，只保存 schema、session、prefix_len 和绑定摘要；校验时从当前来源重算绑定并比较摘要，任何路径、文件身份、前缀、schema 或 artifact 变化都报 `stale_cursor`。所有起点统一签发/接受 `c5`（version=5）cursor；旧 `c4` 及更早 cursor 不再接受，必须省略 cursor 重新查询。过滤条件统一使用结构化规范编码计算指纹，不再保留旧字面量专用分支。end 起点仍将未扫描历史的边界、发布条数和首条 seq 单独保存；count/first_seq 仅记录实际扫描的后缀，不把跳过的历史冒充已验证内容。record_ref 为单一 `r3`（version=3）结构，旧 `r2` 拒绝；与响应 schema 或存档版本互不替代。调用方始终把 token 当不透明字符串。尾部 cursor 到达新水位时还检查发布 entries 与累计后缀条数一致；已观察 footer 后拒绝任何新的发布追加。
 
 性能前提是源文件只追加且不修改已观察前缀。每页的历史一致性摘要只覆盖固定大小前缀和边界 anchor，不哈希整个历史文件；有界 header/footer 的格式与身份校验另行执行。因此不声称发现任意位置、同大小的外部原地篡改。相同用户能够修改源和私钥，这也不是该用户权限内的安全隔离边界。
 

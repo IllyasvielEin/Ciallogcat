@@ -100,7 +100,7 @@ cargo build --locked --release -p ciallogcat-cli
 - 设备发现失败时保留上次成功列表与当前选择。快照中的离线或设备缺失不会单独停止仍在运行的日志流，“暂停”仍可使用。
 - 实际日志流退出后按 1、2、4 秒最多重连三次；暂停或关闭会取消重连。重新采集须等待旧进程与输出排空确认，超过 5 秒未确认则报错并阻止新启动。
 - 缓冲区默认 `main + system + crash`，修改后点击“**应用**”生效。启动与重启使用 `-T 1`，不会回补历史，期间可能有缺口。
-- 包名筛选包含 `com.example.app:sync` 等子进程。GUI 进程名来自近期 `ps` 推测，并非已核实的身份；查询失败或过期后不再使用，也不会用后来的快照回填历史未知行。未识别或短命进程可能被该筛选隐藏，清除包名限制即可检查它们的日志。结构分隔行与未解析文本可在默认 Verbose 阈值下匹配消息条件；包名、Tag 或更严格的级别条件会排除这些没有日志元字段的记录，不将其计为未知进程。
+- 包名筛选包含 `com.example.app:sync` 等子进程与 app zygote `com.example.app_zygote`。进程名均为推测，并非已核实的身份：实时日志使用近期 `ps` 快照（查询失败或过期后不再使用，不回填历史行），另外根据同一日志流中 ActivityManager/AndroidRuntime 的生命周期记录（`Start proc` 至 `has died`）推断，可覆盖在两次采样之间启动即崩溃的短命进程。两种来源都未识别的行可能被该筛选隐藏，清除包名限制即可检查它们的日志。结构分隔行与未解析文本可在默认 Verbose 阈值下匹配消息条件；包名、Tag 或更严格的级别条件会排除这些没有日志元字段的记录，不将其计为未知进程。
 - 正则无效时显示错误，修正后恢复结果。**清空视图** 确认后仅清除本地记录，不清除设备上的 Logcat 缓冲区。
 
 ### 内存保留
@@ -131,6 +131,7 @@ ciallogcat-cli stop --session-dir ./capture-session
 - 时长与输出大小限制始终同时生效，默认分别为 **600 秒**与 **1 GiB**。使用 `--duration-secs` 和 `--max-bytes` 调整。达到限制、收到停止请求、dump 成功完成或遇到终止错误时结束；意外流退出会有限重试，不会无限驻留。
 - `start` 返回 `adb_process_started` 仅表示 worker 与 ADB 进程已启动，**不代表设备已就绪或一定会产生日志**。请检查 `status` 并查询输出。
 - `query --query` 默认对消息进行区分大小写的字面子串匹配，也支持正则、元数据和时间筛选。预览翻页时将 `next_cursor` 传给 `--cursor`，保持来源、模式和筛选不变；`--all --format text` 可输出快照内的完整可读记录。
+- Agent 循环：动作前用 `query --start-at end` 取得标记（可换任意筛选条件复用），动作后用 `--wait-ms` 等待首个匹配，`crashes` 按签名汇总 Java/native 崩溃与 ANR，`context --same-pid` 查看同进程上下文。`--package` 包含 `包名:*` 子进程与 `包名_zygote`；CLI 采集通过 ps 采样和生命周期日志标注进程名。完整步骤见 [Agent 循环](docs/cli.md#agent-loop)；`ciallogcat-cli skill` 输出官方 Agent skill。
 - 输出文件与会话目录必须是新路径。设备日志可能含敏感信息，请存放在私人目录，并在分享前检查内容。
 
 选项、分页限制、退出码、停止行为和打包说明见 [CLI 指南](docs/cli.md)；已有脚本请先查看 [query 迁移说明](docs/cli.md#migrating-query-callers)。快速参考可运行 `ciallogcat-cli --help`。

@@ -29,12 +29,6 @@ impl QueryFilter {
         let query = string(flags, "--query")?;
         let regex = flags.remove("--regex").is_some();
         let insensitive = flags.remove("--ignore-case").is_some();
-        let sensitive = flags.remove("--case-sensitive").is_some();
-        if insensitive && sensitive {
-            return Err(usage(
-                "--ignore-case and --case-sensitive are mutually exclusive",
-            ));
-        }
         let tag_include = string(flags, "--tag")?;
         let tag_exclude = string(flags, "--tag-exclude")?;
         let package = string(flags, "--package")?;
@@ -108,6 +102,10 @@ impl QueryFilter {
         self.device_time
     }
 
+    pub(super) fn package_active(&self) -> bool {
+        !self.spec.package.trim().is_empty()
+    }
+
     pub(super) fn has_time_filter(&self) -> bool {
         self.since.is_some() || self.until.is_some()
     }
@@ -149,7 +147,11 @@ impl QueryFilter {
             "since_input":self.since_input,"until_input":self.until_input,
             "device_time":self.device_time && (self.since.is_some() || self.until.is_some())}))
         .expect("filter fields serialize");
-        format!("{:x}", Sha256::digest(bytes))
+        // 128 bits suffice for a commitment inside an authenticated cursor.
+        Sha256::digest(bytes)[..16]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect()
     }
 
     pub(super) fn matches(&self, entry: &LogEntry) -> Result<bool> {
@@ -370,9 +372,9 @@ mod tests {
     fn literal_queries_use_canonical_hashes_and_case_sensitive_matches() {
         let f = parse(&[("--query", "Hello")]).unwrap();
         assert_ne!(f.fingerprint(), format!("{:x}", Sha256::digest(b"Hello")));
-        assert_eq!(
+        assert_ne!(
             f.fingerprint(),
-            parse(&[("--query", "Hello"), ("--case-sensitive", "")])
+            parse(&[("--query", "Hello"), ("--ignore-case", "")])
                 .unwrap()
                 .fingerprint()
         );
@@ -417,7 +419,6 @@ mod tests {
             assert!(!parse(&flags).unwrap().matches(&entry()).unwrap());
         }
         assert!(parse(&[("--query", "["), ("--regex", "")]).is_err());
-        assert!(parse(&[("--ignore-case", ""), ("--case-sensitive", "")]).is_err());
         assert!(parse(&[("--pid", "4294967296")]).is_err());
         assert!(parse(&[("--pid", "+1")]).is_err());
         assert!(parse(&[("--min-level", "X")]).is_err());

@@ -22,33 +22,72 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 const SCHEMA: u8 = 1;
+/// The official agent skill, embedded so it always matches this binary.
+const SKILL: &str = include_str!("../../skills/ciallogcat-cli/SKILL.md");
 const HELP: &str = "ciallogcat-cli: bounded local Android log capture (Linux/Windows)
 
-Commands:
+Commands (COMMAND --help shows only that command's options):
   devices [--adb PATH]
   diagnose --serial SERIAL [--adb PATH] [--buffers LIST] [--timeout-ms 10000]
-  capture --serial SERIAL [--adb PATH] [--output FILE|-] [--duration-secs 600] [--max-bytes 1073741824] [--max-entries N]
-  start --serial SERIAL --session-dir DIR [--adb PATH] [same capture bounds]
+  capture --serial SERIAL [--adb PATH] [--output FILE|-] [CAPTURE OPTIONS]
+  start --serial SERIAL --session-dir DIR [--adb PATH] [CAPTURE OPTIONS]
   capture/start transport: [--transport text|proto] (default text; proto is experimental)
-  One native document format is used for both transports.
-  capture/start history: [--tail N | --since TIME] [--dump] [--buffers LIST]
   status --session-dir DIR
-  query (--file FILE | --session-dir DIR) [OPTIONS]
-  get (--file FILE | --session-dir DIR) --ref TOKEN [OPTIONS]
-  context (--file FILE | --session-dir DIR) --ref TOKEN [OPTIONS]
   stop --session-dir DIR [--wait-secs 10] [--force]
+  query (--file FILE | --session-dir DIR) [OPTIONS]
+  crashes (--file FILE | --session-dir DIR) [OPTIONS]
+  get (--file FILE | --session-dir DIR) (--ref TOKEN | --seq N) [OPTIONS]
+  context (--file FILE | --session-dir DIR) (--ref TOKEN | --seq N) [OPTIONS]
+  skill                 Print the agent skill (SKILL.md) matching this version.
 
-Use query --help, get --help or context --help for focused help.
-Options use --name VALUE; --dump, --all, --regex, --ignore-case,
---case-sensitive, --force and --help/-h take no value. Help is plain text on stdout.
-Command results are JSON; capture writes a native JSONL document (default stdout),
-including its header and final footer. Capture summaries go to stderr.
-Errors are JSON on stderr. New output files/session directories must not exist.
-Stop requests cooperative exit even for stale sessions, never signals a persisted PID.
-After the wait, --force administratively closes an unacknowledged session with a
-frozen published query boundary; it does NOT kill or confirm worker/ADB exit.
-Local sessions can contain
+Agent loop (each step is one bounded call; device actions use your own tools):
+  start --serial S --session-dir DIR --duration-secs 600
+  query --session-dir DIR --start-at end                  -> keep next_cursor as MARK
+  ...install, launch or tap with another tool...
+  query --session-dir DIR --cursor MARK --min-level E --wait-ms 20000
+  crashes --session-dir DIR --cursor MARK                 -> grouped crashes/ANRs
+  context --session-dir DIR --ref REF --same-pid --after 20
+  query --session-dir DIR --cursor MARK --all --format text
+  stop --session-dir DIR
+A MARK has scanned nothing yet, so it accepts any filters and can be reused.
+--package also matches pkg:* subprocesses and pkg_zygote; names are capture hints.
+
+Use query --help, crashes --help, get --help or context --help for focused help.
+Options use --name VALUE; --dump, --all, --regex, --ignore-case, --same-pid,
+--force and --help/-h take no value. Help is plain text on stdout.
+Command results are JSON; errors are JSON on stderr with a stable code.
+New output files/session directories must not exist. Local sessions can contain
 sensitive device logs. No device logs are cleared.
+
+";
+const CAPTURE_HELP: &str =
+    "capture --serial SERIAL [--adb PATH] [--output FILE|-] [BOUNDS] [HISTORY]
+start --serial SERIAL --session-dir DIR [--adb PATH] [BOUNDS] [HISTORY]
+  --transport text|proto  Default text; proto is experimental. One native
+                          document format is used for both transports.
+capture writes a native JSONL document (default stdout), including its header and
+final footer; its summary goes to stderr. start runs the same capture as a local
+background worker and returns status JSON. adb_process_started means the worker
+and ADB process started, not that the device is ready or that logs will arrive.
+
+";
+const STATUS_HELP: &str = "status --session-dir DIR
+Returns the session status JSON: state, readiness, entries/bytes, visible_end,
+capture_completeness, stream_interruptions and, after stop, shutdown details.
+stale=true means a non-terminal worker has not updated status for 5 seconds.
+
+";
+const STOP_HELP: &str = "stop --session-dir DIR [--wait-secs 10] [--force]
+  --wait-secs N   Default 10; how long to wait for the worker's acknowledgement.
+  --force         After the wait, administratively close an unacknowledged session.
+Stop requests cooperative exit even for stale sessions and never signals a
+persisted PID. --force freezes the published query boundary; it does NOT kill or
+confirm worker/ADB exit. Returns the final status JSON.
+
+";
+const DEVICES_HELP: &str = "devices [--adb PATH]
+Lists ADB devices as JSON (serial, state, model, transport). Without --adb, ADB is
+found through CIALLOGCAT_ADB, SDK environment variables, PATH and common SDK paths.
 
 ";
 const CAPTURE_SCOPE_HELP: &str = "Device history (capture and start):
@@ -105,8 +144,8 @@ const QUERY_RESPONSE_HELP: &str = "Response budget (query, get and context):
                          A budget too small for the envelope/reference is an error.
 
 ";
-const QUERY_SCAN_HELP: &str = "Preview/scan budgets (query and context only; rejected by get):
-  --preview-bytes N     Default 2048; range 0..=16384 UTF-8 message bytes per record.
+const QUERY_SCAN_HELP: &str = "Preview/scan budgets (query, crashes and context; rejected by get):
+  --preview-bytes N     Default 512; range 0..=16384 UTF-8 message bytes per record.
                        Preserves code points; response budget may shorten previews.
   --max-scan-bytes N    Default 16777216; range 8388609..=67108864 bytes.
   --max-scan-records N  Default 100000; range 1..=1000000 candidate records.
@@ -118,11 +157,12 @@ reserve space for an 8 MiB record and may stop before using the full byte budget
 const QUERY_HELP: &str = "query (--file FILE | --session-dir DIR) [OPTIONS]
   --mode snapshot|tail  Default snapshot. Snapshot fixes the first page's upper
                         bound; tail refreshes it per call and requires --session-dir.
+                        Implied by --cursor (its recorded mode) and by
+                        --start-at end (tail); an explicit --mode must agree.
   --query TEXT          Default empty (all); case-sensitive literal message match,
                         at most 4096 UTF-8 bytes. Same message predicate as GUI.
   --regex               Interpret --query as a Rust regular expression.
   --ignore-case         Case-insensitive message matching; default case-sensitive.
-  --case-sensitive      Explicit default; conflicts with --ignore-case.
   --tag TEXT            Case-sensitive literal Tag substring.
   --tag-exclude TEXT    Exclude a case-sensitive literal Tag substring.
   --package TEXT        Shared GUI package/process matching (when stored).
@@ -149,14 +189,22 @@ const QUERY_HELP: &str = "query (--file FILE | --session-dir DIR) [OPTIONS]
   --timezone local|utc  Text only; default local. Epoch ignores this setting.
   --process-width N     Text process column display width; default 32, 0 unlimited.
                         Middle ellipsis preserves prefix/suffix, not full identity.
-  --all                 Automatically scan every page of a fixed snapshot.
-                        Defaults to jsonl; requires jsonl/text, not tail mode.
+  --all                 Automatically scan every page up to the fixed snapshot
+                        boundary (tail: the watermark observed by this request).
+                        Defaults to jsonl; requires jsonl/text.
                         Without --all, even text/jsonl returns only one page.
+  --wait-ms N           Tail only; default 0, range 0..=60000. When nothing
+                        matches yet, poll the published watermark until a record
+                        matches, the source ends or the deadline passes. The
+                        response's wait.stop_reason is matched/has_more/
+                        source_ended/deadline. Scan budgets apply per poll.
   --limit N             Default 100; range 1..=1000 returned records per page.
   --cursor TOKEN        Continue with next_cursor; cannot combine with --start-at.
   --start-at beginning|end  Default beginning. End requires a native session
-                           + --mode tail, without --cursor. Returns an empty page
+                           and tail mode (implied), without --cursor. Returns an empty page
                            at the published boundary; the prefix is not scanned.
+                           That cursor is a mark: until it scans a record, it may be
+                           resumed with any filters (and reused for several queries).
 Both modes default to the first record. Keep source, --mode and all filters unchanged
 when resuming; --limit and budgets may change. Response/scan budgets
 can stop a page before --limit. Follow next_cursor while has_more, even if records
@@ -165,7 +213,9 @@ complete means this snapshot/current tail boundary was scanned, NOT capture comp
 evidence.summary explains query completion, artifact verification and source capture
 coverage together. An empty known-gap list does not prove lossless capture.
 Session status is a current source observation, not fixed snapshot coverage.
-Tail does not wait: when has_more=false, reuse next_cursor later for new data.
+Tail waits only with --wait-ms: when has_more=false, reuse next_cursor for new data.
+--package needs stored process names; warnings[].code=package_unresolved reports
+log records it could not match (for example history rows); use --pid or --tag.
 An exhausted snapshot stays fixed; omit --cursor to see new data in a new snapshot.
 JSON pages contain previews and record_ref; use get for full original record JSON.
 Streaming keeps bounded pages/records in memory, never the entire result. Page budgets
@@ -174,12 +224,32 @@ Text is normalized and JSONL is decoded/derived, not a lossless native archive.
 A late error can leave partial stdout; require exit 0 and complete stderr summary.
 
 ";
-const GET_HELP: &str = "get (--file FILE | --session-dir DIR) --ref TOKEN [OPTIONS]
-  --ref TOKEN           Required record_ref from query or context.
-  --view stored|decoded Default stored: the archive's original JSON line.
-                        Decoded: full structured JSON with message and metadata,
-                        using the fixed protobuf projection; a derived view,
-                        not the archive's original bytes. Preserves extensions.
+const CRASHES_HELP: &str = "crashes (--file FILE | --session-dir DIR) [OPTIONS]
+  Groups crash and ANR incidents found by one bounded scan: Java (AndroidRuntime
+  FATAL EXCEPTION ...), native (libc Fatal signal, DEBUG tombstone) and ANR
+  (ActivityManager ANR in ...). Each group has kind, signature, occurrences,
+  first_seq/last_seq, first_ref, pids, process, headline, cause and frames.
+  Signatures are heuristics for navigation, not diagnoses. Use get/context with
+  first_ref for the evidence (context --same-pid follows the stack trace).
+  --mode, --cursor, --start-at and every query filter behave as in query. A mark
+  from query --start-at end limits the scan to records after it.
+  --limit N             Default 20; range 1..=200 returned groups, ordered by
+                        first_seq; later groups drop first beyond the response budget.
+One call scans up to the scan budgets. has_more=true means groups cover only the
+scanned range; continue with next_cursor (groups are not merged across calls).
+
+";
+const GET_HELP: &str = "get (--file FILE | --session-dir DIR) (--ref TOKEN | --seq N) [OPTIONS]
+  --ref TOKEN           record_ref from query, crashes or context; pins the
+                        record to that response's snapshot boundary.
+  --seq N               Or the record's seq, found by bisection inside the
+                        source's current visible boundary (record_not_found if
+                        absent). Seq is unique within a native document.
+  --view decoded|stored Default decoded: full structured JSON with message and
+                        metadata (protobuf rows via the fixed projection); a
+                        derived view. For text-transport records it is byte-for-byte
+                        the stored line. Stored: the archive's original JSON line
+                        (protobuf rows then hold only the raw payload), for evidence.
   --text-offset N       Default 0; stored range 0..=8388608, decoded 0..=67108864.
                         Within the selected view's UTF-8 bytes, on a code-point
                         boundary. Keep --view unchanged while joining chunks.
@@ -191,10 +261,15 @@ record (at most 8 MiB) plus source metadata; it does not scan the preceding logs
 Only --max-response-bytes controls chunk size; preview/scan budget flags are rejected.
 
 ";
-const CONTEXT_HELP: &str = "context (--file FILE | --session-dir DIR) --ref TOKEN [OPTIONS]
-  --ref TOKEN           Required record_ref from query or context.
+const CONTEXT_HELP: &str =
+    "context (--file FILE | --session-dir DIR) (--ref TOKEN | --seq N) [OPTIONS]
+  --ref TOKEN           record_ref from query, crashes or context.
+  --seq N               Or the target's seq inside the current visible boundary.
   --before N            Default 10; range 0..=100 preceding records.
   --after N             Default 10; range 0..=100 following records.
+  --same-pid            Only neighbours from the target's PID (for example a stack
+                        trace); others are scanned within budgets but skipped and
+                        counted in skipped_other_pid.
 Returns ordered previews within the reference's original snapshot, without a
 message filter. Before/after share response and scan budgets, including the target;
 preceding records are collected first. Reverse scanning also counts toward bytes.
@@ -205,23 +280,31 @@ use returned record_ref values for further retrieval.
 ";
 
 fn print_help(command: &str) -> Result<()> {
-    match command {
-        "diagnose" => {
-            print!("{DIAGNOSE_HELP}");
+    let text = match command {
+        "diagnose" => DIAGNOSE_HELP,
+        "capture" | "start" => {
+            print!("{CAPTURE_HELP}{CAPTURE_SCOPE_HELP}");
             return Ok(());
         }
-        "query" => print!("{QUERY_HELP}"),
-        "get" => print!("{GET_HELP}"),
-        "context" => print!("{CONTEXT_HELP}"),
-        "help" | "--help" | "-h" | "devices" | "capture" | "start" | "status" | "stop"
-        | "version" | "--version" => {
-            print!("{HELP}{CAPTURE_SCOPE_HELP}{DIAGNOSE_HELP}{QUERY_HELP}{GET_HELP}{CONTEXT_HELP}");
+        "status" => STATUS_HELP,
+        "stop" => STOP_HELP,
+        "devices" => DEVICES_HELP,
+        "skill" => {
+            "skill\nPrints the agent skill (SKILL.md) for this CLI version to stdout, e.g.\n  ciallogcat-cli skill > ~/.claude/skills/ciallogcat-cli/SKILL.md\n\n"
         }
+        "help" | "--help" | "-h" | "version" | "--version" => HELP,
+        "query" => QUERY_HELP,
+        "crashes" => CRASHES_HELP,
+        "get" => GET_HELP,
+        "context" => CONTEXT_HELP,
         _ => return Err(usage(format!("unknown command: {command}; use --help"))),
-    }
-    print!("{QUERY_SOURCE_HELP}{QUERY_RESPONSE_HELP}");
-    if command != "get" {
-        print!("{QUERY_SCAN_HELP}");
+    };
+    print!("{text}");
+    if matches!(command, "query" | "crashes" | "get" | "context") {
+        print!("{QUERY_SOURCE_HELP}{QUERY_RESPONSE_HELP}");
+        if command != "get" {
+            print!("{QUERY_SCAN_HELP}");
+        }
     }
     Ok(())
 }
@@ -465,8 +548,8 @@ fn parse_args() -> Result<(String, BTreeMap<String, String>)> {
                 | "--all"
                 | "--regex"
                 | "--ignore-case"
-                | "--case-sensitive"
                 | "--force"
+                | "--same-pid"
         ) {
             let name = if flag == "-h" { "--help" } else { &flag };
             if flags.insert(name.into(), String::new()).is_some() {
@@ -585,6 +668,11 @@ fn execute() -> Result<()> {
         "help" | "--help" | "-h" => {
             no_flags(&flags)?;
             print_help(&command)
+        }
+        "skill" => {
+            no_flags(&flags)?;
+            print!("{SKILL}");
+            Ok(())
         }
         "--version" | "version" => {
             no_flags(&flags)?;
@@ -768,7 +856,7 @@ fn execute() -> Result<()> {
             }
             result
         }
-        "query" | "get" | "context" => query::run(&command, flags),
+        "query" | "get" | "context" | "crashes" => query::run(&command, flags),
         "status" | "stop" => {
             let dir_value = required(&mut flags, "--session-dir")?;
             let dir = session_path(&dir_value)?;

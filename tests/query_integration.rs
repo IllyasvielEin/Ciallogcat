@@ -384,17 +384,11 @@ fn canonical_query_uses_current_key_and_single_cursor_contract() {
         let parts: Vec<_> = token.split('.').collect();
         assert_eq!(parts.len(), 3);
         assert_eq!(parts[0], kind);
-        let unhex = |text: &str| {
-            (0..text.len())
-                .step_by(2)
-                .map(|index| u8::from_str_radix(&text[index..index + 2], 16).unwrap())
-                .collect::<Vec<_>>()
-        };
-        let bytes = unhex(parts[1]);
+        let bytes = token_bytes(parts[1]);
         let mut mac = Hmac::<Sha256>::new_from_slice(&key).unwrap();
         mac.update(kind.as_bytes());
         mac.update(&bytes);
-        mac.verify_slice(&unhex(parts[2])).unwrap();
+        mac.verify_truncated_left(&token_bytes(parts[2])).unwrap();
         let payload: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(payload["version"], version);
     };
@@ -417,31 +411,18 @@ fn canonical_query_uses_current_key_and_single_cursor_contract() {
     s.native_status(&header, 3, bytes.len(), 3);
 
     let page = s.ok(&["query", "--session-dir", &dir, "--limit", "1"]);
-    assert_eq!(page["schema_version"], 2);
-    verify(cursor(&page), "c4", 4);
-    verify(reference(&page, 0), "r2", 2);
-    for obsolete_version in [2, 3] {
+    assert_eq!(page["schema_version"], 3);
+    verify(cursor(&page), "c5", 5);
+    verify(reference(&page, 0), "r3", 3);
+    for obsolete_version in [2, 3, 4] {
         let mut payload = cursor_payload(&page);
         payload["version"] = obsolete_version.into();
         let bytes = serde_json::to_vec(&payload).unwrap();
-        let hex = |bytes: &[u8]| {
-            bytes
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<String>()
-        };
-        for kind in ["c2", "c4"] {
-            let mut mac = Hmac::<Sha256>::new_from_slice(&key).unwrap();
-            mac.update(kind.as_bytes());
-            mac.update(&bytes);
-            let obsolete = format!(
-                "{kind}.{}.{}",
-                hex(&bytes),
-                hex(&mac.finalize().into_bytes())
-            );
+        for kind in ["c4", "c5"] {
+            let obsolete = seal_token(&key, kind, &bytes);
             assert_eq!(
                 s.fail(&["query", "--session-dir", &dir, "--cursor", &obsolete]),
-                if kind == "c2" {
+                if kind == "c4" {
                     "invalid_token"
                 } else {
                     "cursor_mismatch"
@@ -492,7 +473,7 @@ fn canonical_query_uses_current_key_and_single_cursor_contract() {
         "--start-at",
         "end",
     ]);
-    verify(cursor(&tail), "c4", 4);
+    verify(cursor(&tail), "c5", 5);
     let resumed = s.ok(&[
         "query",
         "--session-dir",
@@ -640,14 +621,30 @@ fn native_lines(sequences: &[u64]) -> (DocumentHeader, Vec<Vec<u8>>) {
     (header, lines)
 }
 
+fn token_bytes(part: &str) -> Vec<u8> {
+    use base64::Engine;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(part)
+        .unwrap()
+}
+
+/// Seal a payload exactly as the CLI does: base64url JSON plus a truncated
+/// (128-bit) HMAC-SHA256 tag over kind and payload.
+fn seal_token(key: &[u8], kind: &str, payload: &[u8]) -> String {
+    use base64::Engine;
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    let mut mac = Hmac::<Sha256>::new_from_slice(key).unwrap();
+    mac.update(kind.as_bytes());
+    mac.update(payload);
+    let tag = mac.finalize().into_bytes();
+    let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    format!("{kind}.{}.{}", b64.encode(payload), b64.encode(&tag[..16]))
+}
+
 fn cursor_payload(page: &Value) -> Value {
     // Inspect test tokens solely to assert protocol compatibility and counts.
-    let hex = cursor(page).split('.').nth(1).unwrap();
-    let bytes: Vec<u8> = (0..hex.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
-        .collect();
-    serde_json::from_slice(&bytes).unwrap()
+    serde_json::from_slice(&token_bytes(cursor(page).split('.').nth(1).unwrap())).unwrap()
 }
 
 #[test]
@@ -655,8 +652,21 @@ fn end_start_requires_tail_without_cursor_and_uses_current_tokens() {
     let s = Sandbox::new();
     let dir = s.session(&[(1, "old")]);
     let file = s.path("session/logs.jsonl");
+    // --start-at end implies tail mode; an explicit snapshot mode disagrees.
+    let implied = s.ok(&["query", "--session-dir", &dir, "--start-at", "end"]);
+    assert_eq!(implied["mode"], "tail");
+    assert!(records(&implied).is_empty());
     for args in [
-        vec!["query", "--session-dir", &dir, "--start-at", "end"],
+        vec![
+            "query",
+            "--session-dir",
+            &dir,
+            "--mode",
+            "snapshot",
+            "--start-at",
+            "end",
+        ],
+        vec!["query", "--file", &file, "--start-at", "end"],
         vec![
             "query",
             "--file",
@@ -680,7 +690,7 @@ fn end_start_requires_tail_without_cursor_and_uses_current_tokens() {
         "beginning",
     ]);
     assert_eq!(records(&beginning), [1]);
-    assert_eq!(cursor_payload(&beginning)["version"], 4);
+    assert_eq!(cursor_payload(&beginning)["version"], 5);
     assert!(cursor_payload(&beginning).get("tail_start").is_none());
     for start in ["beginning", "end"] {
         assert_eq!(
@@ -735,7 +745,7 @@ fn end_start_empty_native_session_sees_only_published_appends_and_footer() {
     assert_eq!(start["scan"]["bytes"], 0);
     assert_eq!(start["scan"]["next_offset"], lines[0].len());
     assert_eq!(start["validation"]["scope"], "full_prefix");
-    assert_eq!(cursor_payload(&start)["version"], 4);
+    assert_eq!(cursor_payload(&start)["version"], 5);
     fs::write(&path, lines.concat()).unwrap();
     let follow = [
         "query",
@@ -812,22 +822,35 @@ fn end_start_sparse_sequences_keep_suffix_counts_and_filter_binding() {
     assert_eq!(cursor_payload(&start)["tail_start"]["published_count"], 2);
     assert_eq!(cursor_payload(&start)["tail_start"]["first_seq"], 5);
     assert_eq!(start["validation"]["scope"], "tail_suffix");
-    for mode in ["snapshot", "tail"] {
-        assert_eq!(
-            s.fail(&[
-                "query",
-                "--session-dir",
-                &dir,
-                "--mode",
-                mode,
-                "--cursor",
-                cursor(&start),
-                "--query",
-                "changed"
-            ]),
-            "cursor_mismatch"
-        );
-    }
+    // A mark binds only its position and mode: snapshot is still rejected,
+    // while an unconsumed tail mark accepts different filters.
+    assert_eq!(
+        s.fail(&[
+            "query",
+            "--session-dir",
+            &dir,
+            "--mode",
+            "snapshot",
+            "--cursor",
+            cursor(&start),
+            "--query",
+            "changed"
+        ]),
+        "cursor_mismatch"
+    );
+    let remarked = s.ok(&[
+        "query",
+        "--session-dir",
+        &dir,
+        "--mode",
+        "tail",
+        "--cursor",
+        cursor(&start),
+        "--query",
+        "changed",
+    ]);
+    assert!(records(&remarked).is_empty());
+    assert_eq!(cursor_payload(&remarked)["count"], 0);
     fs::write(&path, lines.concat()).unwrap();
     s.native_status(&header, 20, lines.concat().len(), 4);
     let no_match = s.ok(&[
@@ -867,6 +890,34 @@ fn end_start_sparse_sequences_keep_suffix_counts_and_filter_binding() {
     );
     assert_eq!(cursor_payload(&finished)["count"], 2);
     assert_eq!(cursor_payload(&finished)["first_seq"], 12);
+    // Once a cursor has scanned records it is bound to its filter again.
+    assert_eq!(
+        s.fail(&[
+            "query",
+            "--session-dir",
+            &dir,
+            "--mode",
+            "tail",
+            "--cursor",
+            cursor(&no_match),
+            "--query",
+            "changed",
+        ]),
+        "cursor_mismatch"
+    );
+    // The original mark still sees the same window under another filter.
+    let other = s.ok(&[
+        "query",
+        "--session-dir",
+        &dir,
+        "--mode",
+        "tail",
+        "--cursor",
+        cursor(&start),
+        "--query",
+        "row-",
+    ]);
+    assert_eq!(records(&other), [12, 20]);
     let detail = s.ok(&[
         "get",
         "--session-dir",
@@ -1425,8 +1476,21 @@ fn native_offline_and_active_stream_share_codec_and_stable_identities() {
     assert_eq!(records(&page), [1, 2]);
     assert_eq!(page["artifact_finalized"], true);
     assert_eq!(page["records"][1]["kind"], "event");
+    // The header's session is not repeated per record; get keeps identity.
+    assert!(page["records"][0].get("session_id").is_none());
+    let detail = s.ok(&[
+        "get",
+        "--file",
+        &file,
+        "--ref",
+        reference(&page, 0),
+        "--view",
+        "decoded",
+    ]);
+    let decoded: Value =
+        serde_json::from_str(detail["record_json_chunk"].as_str().unwrap()).unwrap();
     assert_eq!(
-        page["records"][0]["identity"]["session_id"],
+        decoded["provenance"]["session_id"],
         doc.header.session_id.unwrap().to_string()
     );
     let detail = s.ok(&["get", "--file", &file, "--ref", reference(&page, 0)]);
@@ -1972,10 +2036,12 @@ fn empty_files_and_utf8_preview_have_explicit_small_results() {
     )
     .unwrap();
     let page = s.ok(&["query", "--file", &file, "--preview-bytes", "4"]);
-    assert_eq!(page["records"][0]["message_preview"], "雪");
-    assert_eq!(page["records"][0]["identity_scope"], "capture_session");
-    assert_eq!(page["records"][0]["identity"]["seq"], 1);
-    assert!(page["records"][0]["text_loss"].is_null());
+    assert_eq!(page["records"][0]["message"], "雪");
+    // Compact previews omit constant identity fields and absent losses.
+    assert!(page["records"][0].get("identity_scope").is_none());
+    assert!(page["records"][0].get("identity").is_none());
+    assert_eq!(page["records"][0]["seq"], 1);
+    assert!(page["records"][0].get("text_loss").is_none());
     assert_eq!(
         s.fail(&["query", "--file", &file, "--max-scan-bytes", "1024"]),
         "invalid_arguments"
@@ -2248,19 +2314,19 @@ fn native_proto_stored_and_decoded_views_preserve_full_fields_extensions_and_utf
         "--preview-bytes",
         "3",
     ]);
-    assert_eq!(page["schema_version"], 2);
+    assert_eq!(page["schema_version"], 3);
     assert_eq!(page["source_schema_version"], doc.header.schema_version);
-    assert_eq!(page["records"][0]["message_preview"], "雪");
+    assert_eq!(page["records"][0]["message"], "雪");
     assert_eq!(page["records"][0]["preview_truncated"], true);
     let record_ref = reference(&page, 0);
     let stored = get_chunks(&s, &file, record_ref, "stored", 8192);
     let raw_line = bytes.split(|b| *b == b'\n').nth(1).unwrap();
     assert_eq!(stored.as_bytes(), raw_line);
     let default = s.ok(&["get", "--file", &file, "--ref", record_ref]);
-    assert_eq!(default["view"], "stored");
-    assert_eq!(default["derived"], false);
-    assert!(stored.starts_with(default["record_json_chunk"].as_str().unwrap()));
+    assert_eq!(default["view"], "decoded");
+    assert_eq!(default["derived"], true);
     let decoded_text = get_chunks(&s, &file, record_ref, "decoded", 8192);
+    assert!(decoded_text.starts_with(default["record_json_chunk"].as_str().unwrap()));
     let decoded: Value = serde_json::from_str(&decoded_text).unwrap();
     assert_eq!(decoded["message"], message);
     assert_eq!(decoded["device_time"]["text"], "1.000000002");
@@ -2468,9 +2534,6 @@ fn decoded_native_retains_extensions_and_obsolete_session_schema_is_rejected() {
 
 #[test]
 fn query_get_and_context_enforce_original_sequence_fence_across_status_growth() {
-    use hmac::{Hmac, Mac};
-    use sha2::Sha256;
-
     let s = Sandbox::new();
     let dir = s.session(&[(1, "one"), (2, "two"), (3, "three")]);
     let path = s.root.join("session/logs.jsonl");
@@ -2512,29 +2575,12 @@ fn query_get_and_context_enforce_original_sequence_fence_across_status_growth() 
     s.status(3, bytes, None);
     let all = s.ok(&["query", "--session-dir", &dir]);
     let parts: Vec<_> = reference(&all, 2).split('.').collect();
-    let payload: Vec<u8> = (0..parts[1].len())
-        .step_by(2)
-        .map(|index| u8::from_str_radix(&parts[1][index..index + 2], 16).unwrap())
-        .collect();
+    let payload = token_bytes(parts[1]);
     let mut value: Value = serde_json::from_slice(&payload).unwrap();
-    value["upper"]["seq"] = 1.into();
+    value["u"]["seq"] = 1.into();
     let payload = serde_json::to_vec(&value).unwrap();
     let key = fs::read(s.root.join("config/query.key")).unwrap();
-    let mut mac = Hmac::<Sha256>::new_from_slice(&key).unwrap();
-    mac.update(parts[0].as_bytes());
-    mac.update(&payload);
-    let hex = |bytes: &[u8]| {
-        bytes
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>()
-    };
-    let outside = format!(
-        "{}.{}.{}",
-        parts[0],
-        hex(&payload),
-        hex(&mac.finalize().into_bytes())
-    );
+    let outside = seal_token(&key, parts[0], &payload);
     assert_eq!(
         s.fail(&["get", "--session-dir", &dir, "--ref", &outside]),
         "invalid_source"

@@ -67,10 +67,11 @@ ciallogcat-cli query --session-dir ./capture-session --all --format jsonl > matc
 ciallogcat-cli query --session-dir ./capture-session --all --since 5m --until 30s
 ```
 
-`--all` fixes a snapshot and internally follows signed offset cursors until
-`complete=true`, including empty matching pages. It does not wait for future data.
-The default format with `--all` is `jsonl`; explicit `--format json` and tail mode
-are rejected. Without `--all`, text/JSONL returns one page and writes its cursor
+`--all` fixes a snapshot (in tail mode: the watermark observed by this request)
+and internally follows signed offset cursors until `complete=true`, including
+empty matching pages. It waits for future data only with `--wait-ms` in tail mode.
+The default format with `--all` is `jsonl`; explicit `--format json` is
+rejected. Without `--all`, text/JSONL returns one page and writes its cursor
 and completeness metadata to stderr. `--limit` and scan/response budgets remain
 **per-page**, not a total result limit; streamed full records are not bounded by
 the preview response budget. Memory is bounded by a page and a single record/view,
@@ -142,8 +143,8 @@ complete. For pipelines needing transactional files, write a temporary file and
 rename only after successful completion. Existing source files are never changed.
 
 Filters combine with AND. `--query` remains literal and case-sensitive by default;
-`--regex` enables Rust regex syntax, `--ignore-case` affects message matching only,
-and `--case-sensitive` explicitly selects the default. `--tag`
+`--regex` enables Rust regex syntax and `--ignore-case` affects message matching
+only (the former no-op `--case-sensitive` flag was removed). `--tag`
 and `--tag-exclude` use case-sensitive literal substrings as in the GUI.
 `--package` uses the shared GUI process/package predicate when that metadata is
 stored; `--pid` and `--tid` match exact unsigned IDs. `--min-level` accepts
@@ -179,6 +180,33 @@ host clock adjustments remain observable. A missing host observation returns
 are not absolute instants. Explicit null also means unavailable;
 non-integer, negative, or out-of-u64 timestamp values are invalid records. Capture/start `--since` retains
 its separate device-logcat history syntax; it is not this offline query option.
+
+### Agent-loop update (unreleased)
+
+- Cursors are now `c5` (payload version 5) and references `r3` (version 3):
+  base64url payloads with a 128-bit HMAC-SHA256 tag and a digest of the source
+  binding instead of the full binding. Typical references shrink from about 1 KB
+  to about 330 bytes. Older `c4`/`r2` tokens are rejected; query again.
+- `--preview-bytes` defaults to 512 (was 2048). Pass it explicitly to keep longer
+  previews.
+- `--help` prints a short index with the agent loop; each command's `--help` now
+  prints only that command's options.
+- `--mode` is implied by `--cursor` (the cursor's recorded mode) and by
+  `--start-at end` (tail); an explicit `--mode` must still agree.
+- Response schema 3: record previews are compact. `message` replaces
+  `message_preview`; `identity`, `identity_scope` and the duplicate
+  `observed_unix_ms` inside `identity` are gone (use `get` for full identity);
+  `kind` is omitted for ordinary entries; `preview_truncated`/`message_bytes`,
+  `text_loss`, `process`/`process_source` and `metadata_preview_truncated` appear
+  only when meaningful; `source_status` omits null observations.
+- `get` defaults to `--view decoded` (was stored). `get`/`context` accept `--seq N`.
+- Text captures now name processes (`log_lifecycle`, `ps_snapshot`), so
+  `--package` works on CLI captures; it also matches `PKG_zygote`.
+- `--case-sensitive` (a no-op default) was removed.
+- `ciallogcat-cli skill` prints the official agent skill for this version.
+- New: `crashes`, `query --wait-ms`, tail-mode `--all`, reusable marks,
+  `context --same-pid` and `warnings[].code=package_unresolved`. Existing
+  response fields are unchanged; new fields are additive.
 
 ### Migrating query callers
 
@@ -217,7 +245,7 @@ change:
 | `schema_version: 1`, full `entries` | `schema_version: 2`, bounded `records` previews with `message_preview` and `record_ref`. Use `get` or `--all --format jsonl` for full records. |
 | `--limit` up to 10000 | `--limit` is 1–1000 (default 100), subject to per-page response/scan budgets. |
 | Top-level `scanned_records`, `scan_limited`, `stop_reason`, `partial` | Use `scan.records`, `scan.stop_reason`, `has_more`, `complete`, and the explicit `snapshot` boundary; old fields are not emitted. |
-| Reading the current file tail on each sequence page | Default `snapshot` fixes the first page's published boundary. Use `--mode tail` with a session to read later publications with the returned cursor; neither mode waits for future logs. |
+| Reading the current file tail on each sequence page | Default `snapshot` fixes the first page's published boundary. Use `--mode tail` with a session to read later publications with the returned cursor; tail waits for future logs only with `--wait-ms`. |
 
 Restart old sequence pagination as a fresh query and update response parsing;
 do not pass a saved sequence number to `--cursor` or assume previews are full
@@ -424,6 +452,81 @@ capacity is distinct from host capture queues, GUI retention, file budgets and
 these diagnostic output caps. See the [diagnostic API and report contract](device-diagnostics.md)
 for statuses, cancellation, serialized response bounds and mock-only validation.
 
+## Agent loop
+
+An agent investigating an action needs four things from logs: a position before
+the action, a way to wait for what the action causes, a short summary of crashes,
+and the evidence around one record. Each is one bounded command:
+
+```sh
+ciallogcat-cli start --serial DEVICE_SERIAL --session-dir ./case --duration-secs 600
+# 1. Mark the published end before acting; keep next_cursor as MARK.
+ciallogcat-cli query --session-dir ./case --start-at end
+# 2. ...install, launch or tap with your own tool...
+# 3. Wait up to 20 s for the first error after the mark.
+ciallogcat-cli query --session-dir ./case --cursor "$MARK" --min-level E --wait-ms 20000
+# 4. Group crashes/ANRs after the mark; drill into one group's first_ref.
+ciallogcat-cli crashes --session-dir ./case --cursor "$MARK"
+ciallogcat-cli context --session-dir ./case --ref "$FIRST_REF" --same-pid --after 20
+# 5. Read the whole window as text when needed.
+ciallogcat-cli query --session-dir ./case --cursor "$MARK" --all --format text
+ciallogcat-cli stop --session-dir ./case
+```
+
+- **Mark.** A `--start-at end` cursor has scanned nothing, so it binds only the
+  position and tail mode. It may be resumed with *any* filters and reused for
+  several queries, including `crashes`. Once a cursor has scanned records it is
+  bound to its filter again (`cursor_mismatch` otherwise).
+- **Wait.** `--wait-ms N` (tail only, at most 60000) polls the published
+  watermark until a record matches, the source ends (terminal, stale or footer)
+  or the deadline passes. `wait.stop_reason` is `matched`, `has_more`,
+  `source_ended` or `deadline`; the returned cursor stays valid for the next wait.
+  Scan budgets apply to each poll.
+- **Crashes.** `crashes` groups Java (`AndroidRuntime` `FATAL EXCEPTION`), native
+  (`libc` `Fatal signal`, `DEBUG` tombstone) and ANR (`ActivityManager` `ANR in`)
+  incidents found by one bounded scan. A group reports `kind`, `signature`,
+  `occurrences`, `first_seq`/`last_seq`, `first_ref`, up to four `pids`,
+  `process`, `thread`, `headline`, `cause` and up to five `frames`. Java
+  signatures use the deepest `Caused by` class and its top frame; native ones use
+  the signal and first non-libc frame (offsets stripped); ANR reasons have digits
+  folded to `#`. These are navigation hints, not diagnoses. `--limit` (default 20,
+  at most 200) caps returned groups; `has_more=true` means only the scanned range
+  is covered, and groups are not merged across calls. Crash cursors resume only
+  crash scans. Filters such as `--since` or `--pid` narrow the input records.
+- **Same-PID context.** `context --same-pid` keeps only neighbours from the
+  target's PID (for example the rest of a stack trace); other records are still
+  scanned within budgets and counted in `skipped_other_pid`.
+- **Package filter.** Capture is never restricted to one app: like the GUI, the
+  CLI records every process and filters on the host. `--package P` matches the
+  process `P`, every `P:suffix` process (services, isolated and sandboxed
+  renderers such as `com.android.chrome:sandboxed_process0:…`) and the app zygote
+  `P_zygote`. WebView renderers belong to the WebView provider
+  (`com.google.android.webview:…`), not to the host app. Protobuf records carry
+  the device's process cache. Text records are named while capturing from two
+  labelled hints: `log_lifecycle` (ActivityManager `Start proc PID:NAME/…` until
+  `Process NAME (pid PID) has died`, and AndroidRuntime `Process: NAME, PID: PID`)
+  and, for live follow captures only, `ps_snapshot` (a `ps -A -o PID,NAME`
+  sample about once per second, applied to records received within two seconds
+  of it, as in the GUI). History rows (`--tail N`, `--since`, `--dump`) get
+  lifecycle names only. Records left unnamed cannot match `--package`; the
+  response then carries `warnings: [{code: "package_unresolved", records: N}]`
+  instead of a silent empty result. Use `--pid` or `--tag` for them.
+
+### Agent skill
+
+The repository ships an official agent skill at
+[`skills/ciallogcat-cli/SKILL.md`](../skills/ciallogcat-cli/SKILL.md) (also
+`SKILL.md` in CLI release archives and the DEB documentation). The binary embeds
+the same file, so the skill always matches the installed version:
+
+```sh
+mkdir -p ~/.claude/skills/ciallogcat-cli
+ciallogcat-cli skill > ~/.claude/skills/ciallogcat-cli/SKILL.md
+```
+
+Other agents that read `SKILL.md` skills use their own skills directory. There
+is no MCP server: the JSON commands are already the tool interface.
+
 ## Native capture and Agent queries
 
 `capture` and `start` record the same native documents for text and protobuf
@@ -489,15 +592,21 @@ ciallogcat-cli query --session-dir ./compact --mode tail --cursor '<next_cursor>
 ciallogcat-cli get --session-dir ./compact --ref '<record_ref>' --view decoded
 ```
 
-`query`, `get` and `context` use response schema version 2, independently
+`query`, `crashes`, `get` and `context` use response schema version 3, independently
 of command names and the internal source schema marker. `--start-at beginning|end`
 defaults to beginning; end requires a native session in tail mode without
 a cursor. It returns an empty page at the published boundary, with the skipped
 prefix explicitly unscanned. Continue with the returned cursor.
 
-`get --view stored` is the default and returns the original archive JSON line.
-`--view decoded` returns full structured JSON, including complete message,
-metadata and extensions, marked as a derived view rather than archived bytes.
+`get --view decoded` is the default and returns full structured JSON, including
+complete message, metadata and extensions, marked as a derived view rather than
+archived bytes. For text-transport records it is byte-for-byte the stored line;
+for protobuf records it is roughly 2–3 times larger because it carries the
+derived text beside the raw base64 payload. `--view stored` returns the original
+archive JSON line. `get` and `context` accept `--seq N` instead of `--ref`: the
+record is located by bisection inside the current visible boundary
+(`record_not_found` if absent), reading a few lines per step rather than the
+history.
 It is not a stored archive record for writing back. Join UTF-8 chunks using
 `next_text_offset`, keeping the same view. Stored lines retain the 8 MiB limit;
 decoded views have a separate 64 MiB cap to allow escaped protobuf text to expand.

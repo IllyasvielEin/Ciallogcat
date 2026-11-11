@@ -1,10 +1,12 @@
 //! Bounded queries over the native append-only archive format.
+mod crashes;
 mod source;
 mod tokens;
 
 use std::collections::BTreeMap;
 use std::io::{self, Write};
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use ciallogcat::document;
 use ciallogcat::document::MAX_RECORD_BYTES;
@@ -12,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::{Result, emit, error, io_error, no_flags, number, required, usage};
-use source::{Anchor, Binding, Boundary, Row, Source, invalid, stale};
+use source::{Anchor, BindingRef, Boundary, Row, Source, invalid, stale};
 use tokens::{Signer, hash};
 
 #[derive(Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
@@ -25,7 +27,7 @@ enum Mode {
 #[derive(Clone, Deserialize, Serialize)]
 struct Cursor {
     version: u8,
-    binding: Binding,
+    binding: BindingRef,
     mode: Mode,
     filter: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -43,6 +45,18 @@ struct Cursor {
     tail_start: Option<TailStart>,
 }
 
+impl Cursor {
+    /// An end-start cursor that has not scanned any record yet. It marks a
+    /// published position only, so it may be resumed with any filter.
+    fn pristine(&self) -> bool {
+        self.count == 0
+            && self
+                .tail_start
+                .as_ref()
+                .is_some_and(|start| start.boundary.offset == self.offset)
+    }
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 struct TailStart {
     boundary: Boundary,
@@ -51,13 +65,20 @@ struct TailStart {
 }
 
 #[derive(Clone, Deserialize, Serialize)]
+// Opaque token payload: short keys keep per-record references small.
 struct RecordRef {
     version: u8,
-    binding: Binding,
+    #[serde(rename = "b")]
+    binding: BindingRef,
+    #[serde(rename = "u")]
     upper: Boundary,
+    #[serde(rename = "o")]
     offset: u64,
+    #[serde(rename = "y")]
     bytes: u64,
+    #[serde(rename = "q")]
     seq: u64,
+    #[serde(rename = "h")]
     digest: String,
 }
 
@@ -65,6 +86,15 @@ struct RecordRef {
 // beyond the archive line limit. Keep it independently bounded.
 const MAX_DECODED_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_EVIDENCE_SUMMARY_BYTES: usize = 512;
+/// Query API response version (query, crashes, get, context). Version 3
+/// introduced compact record previews.
+const RESPONSE_SCHEMA: u8 = 3;
+// Token kinds and payload versions change together whenever the token layout
+// changes. Older kinds are rejected as invalid_token; callers re-query.
+const CURSOR_KIND: &str = "c5";
+const CURSOR_VERSION: u8 = 5;
+const REF_KIND: &str = "r3";
+const REF_VERSION: u8 = 3;
 
 #[derive(Clone, Copy, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -84,7 +114,7 @@ impl Options {
     fn parse(flags: &mut BTreeMap<String, String>, response: usize) -> Result<Self> {
         Ok(Self {
             response,
-            preview: number(flags, "--preview-bytes", 2048, 0, 16384)? as usize,
+            preview: number(flags, "--preview-bytes", 512, 0, 16384)? as usize,
             // A supported maximum-size first record must always be scannable.
             scan_bytes: number(
                 flags,
@@ -113,8 +143,9 @@ pub(super) fn run(command: &str, mut flags: BTreeMap<String, String>) -> Result<
         number(&mut flags, "--max-response-bytes", 65536, 8192, 1048576)? as usize;
     let signer = Signer::load()?;
     if command == "get" {
-        let reference = record_reference(&signer, &mut flags)?;
-        let view = match flags.remove("--view").as_deref().unwrap_or("stored") {
+        let reference = record_target(&signer, &mut flags, &path, session)?;
+        // Decoded is what readers need; for text records it equals stored.
+        let view = match flags.remove("--view").as_deref().unwrap_or("decoded") {
             "stored" => View::Stored,
             "decoded" => View::Decoded,
             _ => return Err(usage("--view must be stored or decoded")),
@@ -131,7 +162,19 @@ pub(super) fn run(command: &str, mut flags: BTreeMap<String, String>) -> Result<
             response_budget,
         );
     }
+    let wait_ms = if command == "query" {
+        number(&mut flags, "--wait-ms", 0, 0, 60000)?
+    } else {
+        0
+    };
     let options = Options::parse(&mut flags, response_budget)?;
+    if command == "crashes" {
+        let groups = number(&mut flags, "--limit", 20, 1, 200)? as usize;
+        let mut state = QueryState::open(path, session, &signer, flags, ScanKind::Crashes)?;
+        let page = state.scan_page(&signer, &options, None)?;
+        let response = state.crash_response(&signer, page, groups, response_budget)?;
+        return emit_response(response, response_budget);
+    }
     if command == "query" {
         let all = flags.remove("--all").is_some();
         let format = flags.remove("--format");
@@ -146,32 +189,83 @@ pub(super) fn run(command: &str, mut flags: BTreeMap<String, String>) -> Result<
                 ));
             }
             "text" | "jsonl" => {
-                return stream_query(path, session, &signer, &options, flags, all, format);
+                return stream_query(
+                    path, session, &signer, &options, flags, all, format, wait_ms,
+                );
             }
             _ => return Err(usage("--format must be json, jsonl or text")),
         }
     }
     let response = match command {
         "query" => {
-            let mut state = QueryState::open(path, session, &signer, flags)?;
-            let page = state.scan_page(&signer, &options, None)?;
-            state.response(&signer, page)?
+            let mut state = QueryState::open(path, session, &signer, flags, ScanKind::Records)?;
+            state.set_wait(wait_ms)?;
+            let started = Instant::now();
+            let mut page = state.scan_page(&signer, &options, None)?;
+            while let Some(pause) = state.wait_pause(started, page.records.is_empty()) {
+                std::thread::sleep(pause);
+                state.refresh_tail()?;
+                page = state.scan_page(&signer, &options, None)?;
+            }
+            let mut response = state.response(&signer, page)?;
+            state.annotate_wait(&mut response, started, false);
+            response
         }
         "context" => {
-            let reference = record_reference(&signer, &mut flags)?;
+            let reference = record_target(&signer, &mut flags, &path, session)?;
             let before = number(&mut flags, "--before", 10, 0, 100)?;
             let after = number(&mut flags, "--after", 10, 0, 100)?;
+            let same_pid = flags.remove("--same-pid").is_some();
             no_flags(&flags)?;
-            context(path, session, &signer, &reference, &options, before, after)?
+            context(
+                path, session, &signer, &reference, &options, before, after, same_pid,
+            )?
         }
         _ => return Err(usage("unsupported query command")),
     };
     emit_response(response, response_budget)
 }
 
+/// The target of get/context: a signed `--ref`, or `--seq N` resolved inside
+/// the source's current published (session) or finalized (file) boundary.
+fn record_target(
+    signer: &Signer,
+    flags: &mut BTreeMap<String, String>,
+    path: &std::path::Path,
+    session: bool,
+) -> Result<RecordRef> {
+    let Some(seq) = flags.remove("--seq") else {
+        return record_reference(signer, flags);
+    };
+    if flags.contains_key("--ref") {
+        return Err(usage("provide exactly one of --ref and --seq"));
+    }
+    if seq.is_empty() || !seq.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(usage("--seq must contain only ASCII digits"));
+    }
+    let seq: u64 = seq.parse().map_err(|_| usage("--seq is out of range"))?;
+    let mut source = Source::open(path.to_path_buf(), session, None)?;
+    let (offset, bytes) = source.find_seq(seq)?.ok_or_else(|| {
+        error(
+            "record_not_found",
+            format!("no record with seq {seq} inside the source's visible boundary"),
+            3,
+        )
+    })?;
+    Ok(RecordRef {
+        version: REF_VERSION,
+        binding: source.binding.reference(),
+        upper: source.upper,
+        offset,
+        bytes: bytes.len() as u64,
+        seq,
+        digest: hash(&bytes),
+    })
+}
+
 fn record_reference(signer: &Signer, flags: &mut BTreeMap<String, String>) -> Result<RecordRef> {
-    let reference: RecordRef = signer.open("r2", &required(flags, "--ref")?)?;
-    if reference.version != 2 {
+    let reference: RecordRef = signer.open(REF_KIND, &required(flags, "--ref")?)?;
+    if reference.version != REF_VERSION {
         return Err(stale("unsupported reference version"));
     }
     Ok(reference)
@@ -230,12 +324,8 @@ fn stream_query(
     mut flags: BTreeMap<String, String>,
     all: bool,
     format: &str,
+    wait_ms: u64,
 ) -> Result<()> {
-    if all && flags.get("--mode").is_some_and(|mode| mode != "snapshot") {
-        return Err(usage(
-            "--all requires snapshot mode; tail is a single non-waiting page",
-        ));
-    }
     let text = if format == "text" {
         Some(super::text_output::TextOptions::parse(&mut flags)?)
     } else {
@@ -248,19 +338,30 @@ fn stream_query(
         format,
         records: 0,
     };
-    let mut state = QueryState::open(path, session, signer, flags)?;
+    let mut state = QueryState::open(path, session, signer, flags, ScanKind::Records)?;
+    state.set_wait(wait_ms)?;
+    let started = Instant::now();
     let mut pages = 0u64;
     let mut scanned = 0u64;
     let mut scanned_bytes = 0u64;
     let mut file_bytes = 0u64;
+    let mut unresolved = 0u64;
     loop {
-        let page = state.scan_page(signer, options, Some(&mut output))?;
+        let mut page = state.scan_page(signer, options, Some(&mut output))?;
         pages += 1;
         scanned += page.scanned_records;
         scanned_bytes += page.scanned_bytes;
         file_bytes += page.file_bytes_read;
+        unresolved += page.package_unresolved;
         if !all || state.complete() {
+            if let Some(pause) = state.wait_pause(started, output.records == 0) {
+                std::thread::sleep(pause);
+                state.refresh_tail()?;
+                continue;
+            }
+            page.package_unresolved = unresolved;
             let mut response = state.response(signer, page)?;
+            state.annotate_wait(&mut response, started, true);
             output.writer.flush().map_err(io_error)?;
             stream_summary(
                 &mut response,
@@ -320,6 +421,33 @@ fn preview(text: &str, bytes: usize) -> &str {
     &text[..end]
 }
 
+fn record_ref(
+    signer: &Signer,
+    source: &Source,
+    upper: Boundary,
+    offset: u64,
+    bytes: &[u8],
+    seq: u64,
+) -> Result<String> {
+    signer.seal(
+        REF_KIND,
+        &RecordRef {
+            version: REF_VERSION,
+            binding: source.binding.reference(),
+            upper,
+            offset,
+            bytes: bytes.len() as u64,
+            seq,
+            digest: hash(bytes),
+        },
+    )
+}
+
+/// Compact record preview (response schema 3). Fields with default meaning are
+/// omitted: `kind` defaults to `entry`; `message_bytes`/`preview_truncated`
+/// appear only for truncated previews; `text_loss`, `process` and
+/// `metadata_preview_truncated` appear only when present/true. Full identity
+/// (session, segment, attempt) and every stored field remain available via `get`.
 fn summary(
     signer: &Signer,
     source: &Source,
@@ -329,63 +457,79 @@ fn summary(
     row: &Row,
     preview_bytes: usize,
 ) -> Result<Value> {
-    let reference = RecordRef {
-        version: 2,
-        binding: source.binding.clone(),
-        upper,
-        offset,
-        bytes: bytes.len() as u64,
-        seq: row.seq,
-        digest: hash(bytes),
-    };
     let message = preview(&row.entry.message, preview_bytes);
     let mut value = json!({
-        "record_ref":signer.seal("r2", &reference)?, "seq":row.seq,"kind":row.kind,
-        "identity":row.entry.provenance,
-        "observed_unix_ms":row.entry.provenance.and_then(|p| p.observed_unix_ms),
-        "identity_scope":"capture_session",
-        "message_preview":message,"message_bytes":row.entry.message.len(),
-        "preview_truncated":message.len() != row.entry.message.len(),
-        "text_loss":row.entry.text_loss,
+        "record_ref":record_ref(signer, source, upper, offset, bytes, row.seq)?, "seq":row.seq,
     });
+    let fields = value.as_object_mut().unwrap();
+    if row.kind != "entry" {
+        fields.insert("kind".into(), row.kind.into());
+    }
+    if let Some(observed) = row.entry.provenance.and_then(|p| p.observed_unix_ms) {
+        fields.insert("observed_unix_ms".into(), observed.into());
+    }
+    if let Some(identity) = row.entry.provenance
+        && source
+            .header
+            .session_id
+            .is_none_or(|session| session != identity.session_id)
+    {
+        // Only records from another capture session repeat their session.
+        fields.insert("session_id".into(), json!(identity.session_id));
+    }
     if let Some(log) = row.entry.log_fields() {
-        let fields = value.as_object_mut().unwrap();
         fields.insert("time".into(), preview(log.time, 128).into());
         fields.insert("pid".into(), log.pid.into());
         fields.insert("tid".into(), log.tid.into());
         fields.insert("level".into(), log.level.short().into());
         fields.insert("tag".into(), preview(log.tag, 256).into());
-        fields.insert(
-            "process".into(),
-            json!(log.process.map(|p| preview(p, 256))),
-        );
-        fields.insert("process_source".into(), json!(log.process_source));
-        fields.insert(
-            "metadata_preview_truncated".into(),
-            (log.time.len() > 128
-                || log.tag.len() > 256
-                || log.process.is_some_and(|p| p.len() > 256))
-            .into(),
-        );
+        if let Some(process) = log.process {
+            fields.insert("process".into(), preview(process, 256).into());
+            fields.insert("process_source".into(), json!(log.process_source));
+        }
+        if log.time.len() > 128 || log.tag.len() > 256 || log.process.is_some_and(|p| p.len() > 256)
+        {
+            fields.insert("metadata_preview_truncated".into(), true.into());
+        }
+    }
+    // Only recorded losses are repeated; unknown or loss-free rows omit it.
+    if let Some(loss) = &row.entry.text_loss
+        && (loss.truncated || loss.invalid_utf8_replaced)
+    {
+        fields.insert("text_loss".into(), json!(loss));
+    }
+    fields.insert("message".into(), message.into());
+    if message.len() != row.entry.message.len() {
+        fields.insert("preview_truncated".into(), true.into());
+        fields.insert("message_bytes".into(), row.entry.message.len().into());
     }
     Ok(value)
 }
 
 fn shrink_summary(mut value: Value, allowance: usize) -> Result<Option<Value>> {
     while encoded_len(&value)? > allowance {
-        let text = value["message_preview"].as_str().unwrap_or("");
+        let text = value["message"].as_str().unwrap_or("").to_owned();
         if text.is_empty() {
             // Keep the stable reference even when metadata itself is large.
-            for key in ["time", "tag", "process"] {
+            for key in ["time", "tag", "process", "process_source"] {
                 value.as_object_mut().unwrap().remove(key);
             }
             value["metadata_preview_truncated"] = true.into();
             return Ok((encoded_len(&value)? <= allowance).then_some(value));
         }
-        value["message_preview"] = preview(text, text.len() / 2).into();
+        if value.get("message_bytes").is_none() {
+            value["message_bytes"] = text.len().into();
+        }
+        value["message"] = preview(&text, text.len() / 2).into();
         value["preview_truncated"] = true.into();
     }
     Ok(Some(value))
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ScanKind {
+    Records,
+    Crashes,
 }
 
 struct QueryState {
@@ -394,6 +538,8 @@ struct QueryState {
     predicate: super::query_filter::QueryFilter,
     limit: u64,
     scanned: bool,
+    crashes: Option<crashes::Collector>,
+    wait_ms: u64,
 }
 
 struct ScanPage {
@@ -403,7 +549,11 @@ struct ScanPage {
     scanned_records: u64,
     stop_reason: &'static str,
     file_bytes_read: u64,
+    /// Log records lacking a stored process name while --package is active.
+    package_unresolved: u64,
 }
+
+const WAIT_POLL: Duration = Duration::from_millis(200);
 
 impl QueryState {
     fn open(
@@ -411,28 +561,43 @@ impl QueryState {
         session: bool,
         signer: &Signer,
         mut flags: BTreeMap<String, String>,
+        kind: ScanKind,
     ) -> Result<Self> {
-        let mode = match flags.remove("--mode").as_deref().unwrap_or("snapshot") {
-            "snapshot" => Mode::Snapshot,
-            "tail" if session => Mode::Tail,
-            "tail" => return Err(usage("tail mode requires --session-dir")),
-            _ => return Err(usage("--mode must be snapshot or tail")),
-        };
         let start_at = flags.remove("--start-at");
         let token = flags.remove("--cursor");
+        if start_at.is_some() && token.is_some() {
+            return Err(usage("--start-at cannot be combined with --cursor"));
+        }
+        let mut previous: Option<Cursor> = token
+            .map(|token| signer.open(CURSOR_KIND, &token))
+            .transpose()?;
+        // A cursor records its mode and --start-at end only exists in tail
+        // mode, so --mode is implied there; an explicit value is still checked.
+        let implied = match (&previous, start_at.as_deref()) {
+            (Some(cursor), _) => cursor.mode,
+            (None, Some("end")) => Mode::Tail,
+            _ => Mode::Snapshot,
+        };
+        let mode = match flags.remove("--mode").as_deref() {
+            None => implied,
+            Some("snapshot") => Mode::Snapshot,
+            Some("tail") => Mode::Tail,
+            Some(_) => return Err(usage("--mode must be snapshot or tail")),
+        };
+        if mode == Mode::Tail && !session {
+            return Err(usage("tail mode requires --session-dir"));
+        }
         let from_end = match start_at.as_deref().unwrap_or("beginning") {
             "beginning" => false,
             "end" if mode == Mode::Tail => true,
             "end" => return Err(usage("--start-at end requires --mode tail")),
             _ => return Err(usage("--start-at must be beginning or end")),
         };
-        if start_at.is_some() && token.is_some() {
-            return Err(usage("--start-at cannot be combined with --cursor"));
-        }
-        let previous: Option<Cursor> = token.map(|token| signer.open("c4", &token)).transpose()?;
-        if previous
-            .as_ref()
-            .is_some_and(|cursor| cursor.time_anchor_ms.is_none())
+        let pristine = previous.as_ref().is_some_and(Cursor::pristine);
+        if !pristine
+            && previous
+                .as_ref()
+                .is_some_and(|cursor| cursor.time_anchor_ms.is_none())
             && (flags.contains_key("--since") || flags.contains_key("--until"))
         {
             return Err(error(
@@ -443,14 +608,31 @@ impl QueryState {
         }
         let anchor = previous
             .as_ref()
+            .filter(|_| !pristine)
             .and_then(|c| c.time_anchor_ms)
             .unwrap_or_else(super::now);
         let predicate = super::query_filter::QueryFilter::parse(&mut flags, anchor)?;
-        let filter = predicate.fingerprint();
-        let limit = number(&mut flags, "--limit", 100, 1, 1000)?;
+        let filter = match kind {
+            ScanKind::Records => predicate.fingerprint(),
+            // Crash pages resume only crash scans, never record pages.
+            ScanKind::Crashes => hash(format!("crashes:{}", predicate.fingerprint()).as_bytes()),
+        };
+        let limit = match kind {
+            ScanKind::Records => number(&mut flags, "--limit", 100, 1, 1000)?,
+            ScanKind::Crashes => u64::MAX,
+        };
         no_flags(&flags)?;
+        // A mark binds a position only. Nothing has been returned under its
+        // original filter, so the first resumed request defines the filter.
+        if pristine
+            && let Some(cursor) = &mut previous
+            && cursor.mode == mode
+        {
+            cursor.filter.clone_from(&filter);
+            cursor.time_anchor_ms = predicate.has_time_filter().then_some(anchor);
+        }
         if let Some(cursor) = &previous
-            && (cursor.version != 4
+            && (cursor.version != CURSOR_VERSION
                 || (cursor.tail_start.is_some() && cursor.mode != Mode::Tail)
                 || cursor.mode != mode
                 || cursor.filter != filter)
@@ -498,8 +680,8 @@ impl QueryState {
                 source.data_start
             };
             Cursor {
-                version: 4,
-                binding: source.binding.clone(),
+                version: CURSOR_VERSION,
+                binding: source.binding.reference(),
                 mode,
                 filter,
                 time_anchor_ms: predicate.has_time_filter().then_some(anchor),
@@ -524,7 +706,74 @@ impl QueryState {
             predicate,
             limit,
             scanned: false,
+            crashes: (kind == ScanKind::Crashes).then(crashes::Collector::default),
+            wait_ms: 0,
         })
+    }
+
+    fn set_wait(&mut self, wait_ms: u64) -> Result<()> {
+        if wait_ms > 0 && self.cursor.mode != Mode::Tail {
+            return Err(usage("--wait-ms requires --mode tail"));
+        }
+        self.wait_ms = wait_ms;
+        Ok(())
+    }
+
+    /// The source cannot publish more records: footer seen, terminal or stale.
+    fn ended(&self) -> bool {
+        self.cursor.finalized
+            || self.source.status["terminal"].as_bool() == Some(true)
+            || self.source.status["stale"].as_bool() == Some(true)
+    }
+
+    /// Returns a sleep duration while a waiting tail request should poll again.
+    fn wait_pause(&self, started: Instant, nothing_returned: bool) -> Option<Duration> {
+        let remaining = Duration::from_millis(self.wait_ms).checked_sub(started.elapsed())?;
+        (nothing_returned && self.complete() && !self.ended() && !remaining.is_zero())
+            .then(|| remaining.min(WAIT_POLL))
+    }
+
+    fn annotate_wait(&self, response: &mut Value, started: Instant, streamed: bool) {
+        if self.wait_ms == 0 {
+            return;
+        }
+        let returned = if streamed {
+            response["records_returned"].as_u64().unwrap_or(0) > 0
+        } else {
+            response["records"]
+                .as_array()
+                .is_some_and(|r| !r.is_empty())
+        };
+        let reason = if returned {
+            "matched"
+        } else if !self.complete() {
+            "has_more"
+        } else if self.ended() {
+            "source_ended"
+        } else {
+            "deadline"
+        };
+        response["wait"] = json!({"requested_ms":self.wait_ms,
+            "waited_ms":(started.elapsed().as_millis() as u64).min(self.wait_ms),
+            "stop_reason":reason});
+    }
+
+    /// Re-read the published watermark for another bounded tail page, with the
+    /// same validation as resuming the current cursor in a new request.
+    fn refresh_tail(&mut self) -> Result<()> {
+        let mut source = self.source.reopen()?;
+        source.pin_boundary(self.cursor.upper)?;
+        source.check_anchor(&self.cursor.upper_anchor)?;
+        source.check_anchor(&self.cursor.anchor)?;
+        if self.cursor.finalized && self.cursor.upper != source.upper {
+            return Err(stale("finalized artifact was appended"));
+        }
+        self.cursor.upper = source.upper;
+        source.pin_boundary(self.cursor.upper)?;
+        self.cursor.upper_anchor = source.anchor(self.cursor.upper.offset)?;
+        self.source = source;
+        self.scanned = false;
+        Ok(())
     }
 
     fn scan_page(
@@ -546,6 +795,9 @@ impl QueryState {
         let cursor = &mut self.cursor;
         let predicate = &self.predicate;
         let limit = self.limit;
+        let mut crash_sink = self.crashes.as_mut();
+        let package_active = predicate.package_active();
+        let mut package_unresolved = 0u64;
         source.pin_boundary(cursor.upper)?;
         let start = cursor.offset;
         let mut entries = Vec::new();
@@ -573,7 +825,12 @@ impl QueryState {
             u64::MAX,
             "response_budget",
             u64::MAX,
+            u64::MAX,
         )?;
+        if self.wait_ms > 0 {
+            envelope["wait"] = json!({"requested_ms":u64::MAX,"waited_ms":u64::MAX,
+                "stop_reason":"source_ended"});
+        }
         // Footer discovery can change the explanation during this scan. Reserve
         // its whole JSON-string allowance, rather than the current template.
         envelope["evidence"]["summary"] = "x".repeat(MAX_EVIDENCE_SUMMARY_BYTES - 2).into();
@@ -595,7 +852,7 @@ impl QueryState {
             }
         }
         let reserve = encoded_len(&envelope)? + 128;
-        if reserve + 2048 >= options.response {
+        if crash_sink.is_none() && reserve + 2048 >= options.response {
             return Err(usage(
                 "response budget is too small for a record reference and cursor",
             ));
@@ -658,7 +915,19 @@ impl QueryState {
             }
             let row = source.row(&bytes, cursor.last_seq)?;
             scanned_records += 1;
-            if predicate.matches(&row.entry)? {
+            if package_active
+                && row
+                    .entry
+                    .log_fields()
+                    .is_some_and(|fields| fields.process.is_none())
+            {
+                package_unresolved += 1;
+            }
+            if let Some(sink) = crash_sink.as_deref_mut() {
+                if predicate.matches(&row.entry)? {
+                    sink.feed(signer, source, cursor.upper, cursor.offset, &bytes, &row)?;
+                }
+            } else if predicate.matches(&row.entry)? {
                 let value = summary(
                     signer,
                     source,
@@ -710,6 +979,7 @@ impl QueryState {
             scanned_records,
             stop_reason,
             file_bytes_read: source.bytes_read(),
+            package_unresolved,
         })
     }
 
@@ -729,8 +999,66 @@ impl QueryState {
             page.scanned_records,
             page.stop_reason,
             page.file_bytes_read,
+            if self.predicate.package_active() {
+                page.package_unresolved
+            } else {
+                0
+            },
         )
     }
+
+    fn crash_response(
+        &mut self,
+        signer: &Signer,
+        page: ScanPage,
+        limit: usize,
+        budget: usize,
+    ) -> Result<Value> {
+        let collector = self.crashes.take().expect("crash scan state");
+        let prefix_scanned = self
+            .cursor
+            .tail_start
+            .as_ref()
+            .is_none_or(|s| s.published_count == 0);
+        let (mut groups, incidents) = collector.finish();
+        let total = groups.len();
+        groups.truncate(limit);
+        let mut response = json!({"schema_version":RESPONSE_SCHEMA,"type":"crashes","mode":self.cursor.mode,
+            "groups":groups,"groups_total":total,"groups_truncated":total > limit,
+            "incidents":incidents,
+            "next_cursor":signer.seal(CURSOR_KIND,&self.cursor)?,
+            "has_more":!self.complete(),"complete":self.complete(),"snapshot":self.cursor.upper,
+            "evidence":{"summary":evidence_summary(&self.source, &self.cursor, prefix_scanned)},
+            "time_window":self.predicate.time_window(self.cursor.time_anchor_ms),
+            "scan":{"start_offset":page.start,"next_offset":self.cursor.offset,
+                "last_seq":self.cursor.last_seq,"bytes":page.scanned_bytes,
+                "records":page.scanned_records,"file_bytes_read":page.file_bytes_read,
+                "stop_reason":page.stop_reason},
+            "heuristic":"AndroidRuntime FATAL EXCEPTION, libc Fatal signal, DEBUG tombstone and ActivityManager ANR in; navigation hints, not diagnoses"});
+        if let Some(warnings) = package_warnings(&self.predicate, page.package_unresolved) {
+            response["warnings"] = warnings;
+        }
+        // Drop the latest groups first; the earliest first_seq is usually the
+        // originating incident and keeps its reference.
+        while encoded_len(&response)? > budget {
+            let groups = response["groups"].as_array_mut().unwrap();
+            if groups.pop().is_none() {
+                return Err(usage("response budget cannot hold the crash summary"));
+            }
+            response["groups_truncated"] = true.into();
+        }
+        Ok(response)
+    }
+}
+
+fn package_warnings(
+    predicate: &super::query_filter::QueryFilter,
+    unresolved: u64,
+) -> Option<Value> {
+    (predicate.package_active() && unresolved > 0).then(|| {
+        json!([{"code":"package_unresolved","records":unresolved,
+            "message":"--package cannot match these log records because they have no stored process name. Live text captures name processes from ps samples and ActivityManager/AndroidRuntime lifecycle lines; history rows, processes missed by both, and older captures stay unnamed. Zero matches are not evidence of no app logs; filter these with --pid or --tag."}])
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -745,19 +1073,20 @@ fn query_response(
     scanned_records: u64,
     stop_reason: &str,
     bytes_read: u64,
+    package_unresolved: u64,
 ) -> Result<Value> {
     let prefix_scanned = cursor
         .tail_start
         .as_ref()
         .is_none_or(|s| s.published_count == 0);
     Ok(
-        json!({"schema_version":2,"type":"query","mode":cursor.mode,"source_schema_version":source.binding.schema,
+        json!({"schema_version":RESPONSE_SCHEMA,"type":"query","mode":cursor.mode,"source_schema_version":source.binding.schema,
         "source_status":source.status,"snapshot":cursor.upper,"artifact_finalized":cursor.finalized && prefix_scanned,
         "validation":{"scope":if prefix_scanned {"full_prefix"} else {"tail_suffix"},
             "start":cursor.tail_start.as_ref().map(|s| s.boundary),
             "skipped_records":cursor.tail_start.as_ref().map_or(0, |s| s.published_count),
             "footer_seen":cursor.finalized},
-        "records":entries,"next_cursor":signer.seal("c4",cursor)?,"has_more":cursor.offset<cursor.upper.offset,
+        "records":entries,"next_cursor":signer.seal(CURSOR_KIND,cursor)?,"has_more":cursor.offset<cursor.upper.offset,
         "complete":cursor.offset==cursor.upper.offset,"time_anchor_unix_ms":cursor.time_anchor_ms,
         "evidence":{"summary":evidence_summary(source, cursor, prefix_scanned)},
         "time_window":predicate.time_window(cursor.time_anchor_ms),
@@ -765,6 +1094,12 @@ fn query_response(
             "bytes":scanned_bytes,"records":scanned_records,"file_bytes_read":bytes_read,"stop_reason":stop_reason},
         "integrity":"append_only_identity_and_boundary_anchors"}),
     )
+    .map(|mut response: Value| {
+        if let Some(warnings) = package_warnings(predicate, package_unresolved) {
+            response["warnings"] = warnings;
+        }
+        response
+    })
 }
 
 fn evidence_summary(source: &Source, cursor: &Cursor, prefix_scanned: bool) -> String {
@@ -875,7 +1210,7 @@ fn get(
         ));
     }
     let response = |end: usize| {
-        json!({"schema_version":2,"type":"get","seq":row.seq,"identity":row.entry.provenance,
+        json!({"schema_version":RESPONSE_SCHEMA,"type":"get","seq":row.seq,"identity":row.entry.provenance,
         "source_schema_version":source.binding.schema,"view":view,"derived":view==View::Decoded,
         "projection_profile":if view==View::Decoded && row.entry.proto.is_some() {
             Some(ciallogcat::protobuf::PROJECTION_PROFILE)
@@ -904,6 +1239,7 @@ fn get(
     Ok(response(end))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn context(
     path: PathBuf,
     session: bool,
@@ -912,9 +1248,24 @@ fn context(
     options: &Options,
     before: u64,
     after: u64,
+    same_pid: bool,
 ) -> Result<Value> {
     let mut source = Source::open(path, session, Some(&reference.binding))?;
     let (bytes, row) = reference_row(&mut source, reference)?;
+    let pid = if same_pid {
+        Some(
+            row.entry
+                .log_fields()
+                .map(|fields| fields.pid)
+                .ok_or_else(|| usage("--same-pid requires a log record target"))?,
+        )
+    } else {
+        None
+    };
+    // Neighbours from other processes are scanned (and budgeted) but skipped.
+    let wanted =
+        |row: &Row| pid.is_none_or(|pid| row.entry.log_fields().is_some_and(|f| f.pid == pid));
+    let mut skipped = 0u64;
     let target = summary(
         signer,
         &source,
@@ -959,6 +1310,12 @@ fn context(
         let row = source.row(&bytes, 0)?;
         if row.seq >= next_seq {
             return Err(invalid("context sequences are not strictly increasing"));
+        }
+        if !wanted(&row) {
+            skipped += 1;
+            position = start;
+            next_seq = row.seq;
+            continue;
         }
         let value = summary(
             signer,
@@ -1007,6 +1364,12 @@ fn context(
         }
         let row = source.row(&bytes, last)?;
         scan_records += 1;
+        if !wanted(&row) {
+            skipped += 1;
+            position += bytes.len() as u64;
+            last = row.seq;
+            continue;
+        }
         let value = summary(
             signer,
             &source,
@@ -1028,10 +1391,11 @@ fn context(
     }
     source.check_current(reference.upper)?;
     Ok(
-        json!({"schema_version":2,"type":"context","source_schema_version":source.binding.schema,"target_seq":reference.seq,"records":records,
+        json!({"schema_version":RESPONSE_SCHEMA,"type":"context","source_schema_version":source.binding.schema,"target_seq":reference.seq,"records":records,
         "before_returned":before_count,"after_returned":after_count,"partial_before":partial_before,
         "partial_after":after_count<after && position<reference.upper.offset && !ended,
         "snapshot":reference.upper,"source_status":source.status,
+        "same_pid":pid,"skipped_other_pid":skipped,
         "scan":{"bytes":scan_bytes,"records":scan_records,"file_bytes_read":source.bytes_read()}}),
     )
 }

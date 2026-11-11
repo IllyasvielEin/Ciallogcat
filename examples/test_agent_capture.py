@@ -30,14 +30,13 @@ def status(seq=0, state="running", **changes):
 
 def page(sequences=(), cursor="baseline", more=False, upper=None, state="running"):
     upper = max(sequences, default=0) if upper is None else upper
-    return {"schema_version": 2, "mode": "tail", "source_status": status(upper, state),
+    return {"schema_version": 3, "mode": "tail", "source_status": status(upper, state),
             "snapshot": status(upper)["visible_end"], "next_cursor": cursor,
             "has_more": more, "artifact_finalized": state == "completed",
             "validation": {"scope": "tail_suffix", "start": status()["visible_end"],
                            "skipped_records": 0, "footer_seen": state == "completed"},
             "records": [{"seq": seq, "record_ref": f"ref-{seq}",
-                         "message_preview": f"failure-{seq}",
-                         "identity": {"session_id": "session", "seq": seq}}
+                         "message": f"failure-{seq}"}
                         for seq in sequences],
             "scan": {"records": len(sequences), "bytes": len(sequences) * 100,
                      "next_offset": status(upper)["visible_end"]["offset"], "last_seq": upper,
@@ -78,6 +77,8 @@ class WorkflowTests(unittest.TestCase):
         self.timed_out = False
         self.start_error = None
         self.stop_error = None
+        self.crash_groups = []
+        self.crash_error = None
         self.calls = []
         self.action_at = None
         self.stop_at = None
@@ -100,6 +101,13 @@ class WorkflowTests(unittest.TestCase):
             if isinstance(result, BaseException):
                 raise result
             return copy.deepcopy(result)
+        if verb == "crashes":
+            self.assertEqual(argv[argv.index("--cursor") + 1], "baseline")
+            if self.crash_error:
+                raise self.crash_error
+            return {"schema_version": 3, "type": "crashes", "complete": True, "has_more": False,
+                    "groups": copy.deepcopy(self.crash_groups), "groups_total": len(self.crash_groups),
+                    "groups_truncated": False, "incidents": len(self.crash_groups)}
         if verb == "stop":
             self.stop_at = self.clock.now
             if self.stop_error:
@@ -132,17 +140,43 @@ class WorkflowTests(unittest.TestCase):
     def test_success_header_only_baseline_and_published_boundaries(self):
         code, report = self.run_workflow()
         self.assertEqual(code, 0)
-        self.assertEqual([c[0] for c in self.calls], ["start", "query", "status", "stop", "query"])
+        self.assertEqual([c[0] for c in self.calls],
+                         ["start", "query", "status", "stop", "query", "crashes"])
+        self.assertEqual(report["crashes"]["groups"], [])
         self.assertEqual(report["boundaries"]["before_action"]["visible_end"], {"seq": 0, "offset": 100})
         self.assertEqual(report["boundaries"]["after_action"]["visible_end"]["seq"], 2)
         self.assertEqual(report["action"]["elapsed_secs"], 1)
         self.assertGreater(report["action"]["started_unix_ms"], report["action"]["ended_unix_ms"])
         self.assertEqual(report["failure_tail"]["waited_secs"], 0)
         self.assertIn("--max-entries", self.calls[0][1])
-        self.assertIn("baseline", self.calls[-1][1])
+        self.assertIn("baseline", self.calls[-2][1])
         self.assertEqual(self.calls[1][1][-2:], ("--start-at", "end"))
-        self.assertNotIn("--start-at", self.calls[-1][1])
+        self.assertNotIn("--start-at", self.calls[-2][1])
         self.assertEqual(report["boundaries"]["before_action"]["scan"]["records"], 0)
+
+    def test_crash_groups_after_the_mark_are_reported_and_errors_are_isolated(self):
+        self.action_code = 1
+        self.crash_groups = [{"kind": "java_crash", "signature": "E @ a.B.c(B.kt:1)",
+                              "first_ref": "ref-2", "occurrences": 1}]
+        code, report = self.run_workflow()
+        self.assertEqual(code, 1)
+        self.assertEqual(report["crashes"]["groups"][0]["signature"], "E @ a.B.c(B.kt:1)")
+        crash_call = next(call for call in self.calls if call[0] == "crashes")
+        self.assertEqual(crash_call[1][crash_call[1].index("--limit") + 1], "10")
+        # A crash query failure is reported without hiding the evidence.
+        self.setUp()
+        self.crash_error = capture.WorkflowError("invalid_source", "boom")
+        code, report = self.run_workflow()
+        self.assertEqual(code, 1)
+        self.assertEqual(report["errors"][-1]["stage"], "crashes")
+        self.assertEqual(len(report["evidence"]["records"]), 2)
+        # --crash-groups 0 disables the extra call.
+        self.setUp()
+        self.args.crash_groups = 0
+        code, report = self.run_workflow()
+        self.assertEqual(code, 0)
+        self.assertNotIn("crashes", [call[0] for call in self.calls])
+        self.assertEqual(report["crashes"], {"skipped": "disabled"})
 
     def test_failure_collects_delayed_tail_then_stops(self):
         self.action_code = 7
@@ -299,7 +333,7 @@ class WorkflowTests(unittest.TestCase):
         first = page((1,), "q1", more=True, upper=2)
         second = page((2,), "q2", upper=2, state="completed")
         for value in (first, second):
-            value["records"][0]["message_preview"] = "雪" * 1600
+            value["records"][0]["message"] = "雪" * 1600
         self.pages = [page(), first, second]
         code, report = self.run_workflow()
         self.assertEqual(code, 0)
