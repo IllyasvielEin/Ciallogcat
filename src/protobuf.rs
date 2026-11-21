@@ -1,8 +1,8 @@
 //! Experimental AOSP `logcat --proto` framing and display normalization.
 //!
 //! This is an eight-byte little-endian frame stream, not protobuf's varint
-//! length-delimited convention. Keep this module independent of process control,
-//! native artifact envelopes. See `docs/logcat-protobuf.md`.
+//! length-delimited convention. Keep this module independent of process control
+//! and native artifact envelopes.
 use std::borrow::Cow;
 use std::fmt;
 use std::io::{self, Read};

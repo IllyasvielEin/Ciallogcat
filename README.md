@@ -156,19 +156,12 @@ Agent integrations use `capture/start` with `query/get/context`, preserving iden
 
 Detailed guides are in English or Chinese:
 
-- [Documentation index and migration (Chinese)](docs/README.md)
+- [Documentation index (Chinese)](docs/README.md)
 - [Desktop behavior and diagnostics](docs/ui-review.md)
 - [CLI commands and sessions](docs/cli.md)
 - [Shared Rust core](docs/headless-core.md)
 - [Agent queries, full records and context](docs/agent-query.md)
-- [Development direction and implementation progress (Chinese)](docs/development-plan.md)
-- [Open tasks and Agent handoff (Chinese)](TODO.md)
-- [Validation status and limits (Chinese)](docs/validation.md)
-- [Text/protobuf/compact performance comparison (Chinese)](docs/transport-performance-2026-10-24.md)
 - [Read-only device diagnostics](docs/device-diagnostics.md)
-- [Bounded evidence around external tests](docs/agent-test-workflow.md)
-- [Logcat protobuf research and compatibility (Chinese)](docs/logcat-protobuf.md)
-- [Logcat options and software practices (Chinese)](docs/logcat-options-and-ecosystem.md)
 - [ADB subprocess tests and mocks](docs/adb-testing.md)
 - [Release workflow and packaging](docs/release.md)
 - [Contribution guide](CONTRIBUTING.md)

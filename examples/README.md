@@ -3,7 +3,7 @@
 `agent_capture.py` runs one command supplied after `--`, surrounds it with a
 finite native capture, and prints one JSON report. Python 3.10+ and a
 `ciallogcat-cli` build with `query --start-at end` are required. Device actions remain in the
-external command. See the [workflow and report contract](../docs/agent-test-workflow.md).
+external command.
 
 Before running the command, the wrapper creates a tail cursor at the current
 published boundary in one bounded request. Startup history does not consume the

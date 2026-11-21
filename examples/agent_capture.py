@@ -2,7 +2,7 @@
 """Run one external test command with bounded native log evidence (Python 3.10+).
 
 Executor output goes to stderr; stdout is one JSON result. Device operations and
-cleanup belong to the supplied executor. See docs/agent-test-workflow.md.
+cleanup belong to the supplied executor.
 """
 import argparse
 import json

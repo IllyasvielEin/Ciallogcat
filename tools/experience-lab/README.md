@@ -125,5 +125,4 @@ completed evidence file, stop capture in the UI/CLI before quitting the harness.
 
 Keep participant task briefs separate from the oracle and from other reports.
 Record whether public documentation or source code was consulted. Reproduce
-findings on a fresh session before classifying them as product defects. See
-[the experience protocol](../../docs/experience-testing.md).
+findings on a fresh session before classifying them as product defects.

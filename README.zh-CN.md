@@ -153,19 +153,12 @@ Agent 集成可使用 `capture/start` 和 `query/get/context`，沿用 GUI 可�
 
 详细指南使用英文或中文：
 
-- [文档索引与迁移](docs/README.md)
+- [文档索引](docs/README.md)
 - [桌面交互与诊断](docs/ui-review.md)
 - [CLI 命令与会话](docs/cli.md)
 - [共享 Rust 核心](docs/headless-core.md)
 - [Agent 查询、全文与上下文](docs/agent-query.md)
-- [开发方向与实施进度](docs/development-plan.md)
-- [后续任务与 Agent 交接](TODO.md)
-- [验证状态与边界](docs/validation.md)
-- [Text/protobuf/compact 性能对比](docs/transport-performance-2026-10-24.md)
 - [只读设备诊断](docs/device-diagnostics.md)
-- [外部测试前后有界证据流程](docs/agent-test-workflow.md)
-- [Logcat protobuf 调研与兼容方案](docs/logcat-protobuf.md)
-- [Logcat 选项、软件实践与功能取舍](docs/logcat-options-and-ecosystem.md)
 - [ADB 子进程测试与 mock](docs/adb-testing.md)
 - [发布工作流与打包](docs/release.md)
 - [贡献指南](CONTRIBUTING.md)

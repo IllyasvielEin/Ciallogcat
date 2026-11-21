@@ -4,7 +4,6 @@
 
 workspace 包：根目录 `ciallogcat` 为 GUI；`crates/cli` 为独立版本的 CLI；`crates/core` 为内部共享库（Rust crate 名仍为 `ciallogcat`）。manifest 显式引用现有 `src/` 和 `tests/`，源码与资源路径保持稳定；共用根目录 Cargo.lock 和 target。发布单个组件时只修改该组件版本，见[发布指南](docs/release.md)。
 
-新主机接手先读 [TODO](TODO.md) 和 [迁移指南](docs/migration.md)。
 
 提交前运行：
 

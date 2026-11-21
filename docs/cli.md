@@ -577,7 +577,7 @@ uses `adb shell -T -n` with separate stdout/stderr and no PTY. Unsupported devic
 or malformed frames fail without silent text fallback. It preserves each bounded
 protobuf payload as base64, retaining original tag/message bytes inside that
 payload independently of normalized display text. AOSP Android 15+ has the schema; vendor and host-channel
-compatibility still needs device validation. See [protobuf findings](logcat-protobuf.md).
+compatibility still needs device validation.
 
 The native format stores each protobuf payload once and derives display fields
 with the frozen `aosp_logcat_16r1_host_v1` projection. Text entries, events and
@@ -633,8 +633,7 @@ record previews and continuation/reference tokens; use `query`, `get` and
 `context` to request more. A test passing does not imply capture succeeded.
 The example reaps the direct executor and, on POSIX, terminates its private process
 group. On Windows, descendants remain the executor's responsibility. Device cleanup
-always belongs to the supplied executor. See the [workflow contract](agent-test-workflow.md)
-for deadlines, failure tail and the difference between host action times and device logs.
+always belongs to the supplied executor.
 Open `case-002/logs.jsonl` in the GUI after a finalized stop to inspect the same
 session/sequence identities. This example adds no resident service or model API.
 
