@@ -80,8 +80,8 @@ impl LogStore {
                 if chunk.incidents > 0 && end > range.start {
                     let from = range.start.saturating_sub(base);
                     let to = range.end.min(end) - base;
-                    for index in from..to {
-                        if crate::incident::classify(&chunk.entries[index]).is_some() {
+                    for (index, entry) in chunk.entries.iter().enumerate().take(to).skip(from) {
+                        if crate::incident::classify(entry).is_some() {
                             return Some(base + index);
                         }
                     }
